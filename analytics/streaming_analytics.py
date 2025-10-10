@@ -13,8 +13,11 @@ import pandas as pd
 sys.path.append(str(Path(__file__).parent / "src"))
 sys.path.append(str(Path(__file__).parent.parent / "core"))
 
-from src.statistical_analysis import StreamingDataQualityAnalyzer, StreamingForecastingEngine
-from src.statistical_viz import StatisticalVisualizationEngine, visualize_comprehensive_results
+from analytics.statistical_analysis import StreamingDataQualityAnalyzer, StreamingForecastingEngine
+from visualization.statistical_viz import (
+    StatisticalVisualizationEngine,
+    visualize_comprehensive_results,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -32,10 +35,10 @@ class AdvancedStreamingAnalytics:
         self.viz_engine = StatisticalVisualizationEngine()
 
         # Data containers
-        self.raw_data = {}
-        self.processed_data = {}
-        self.analysis_results = {}
-        self.forecasts = {}
+        self.raw_data: dict[str, pd.DataFrame] = {}
+        self.processed_data: dict[str, pd.DataFrame] = {}
+        self.analysis_results: dict[str, Any] = {}
+        self.forecasts: dict[str, Any] = {}
 
         if verbose:
             print("🚀 Advanced Streaming Analytics initialized")
@@ -364,7 +367,11 @@ class AdvancedStreamingAnalytics:
                     best_mae = float("inf")
 
                     for model_name, metrics in performance.items():
-                        if isinstance(metrics, dict) and "mae" in metrics and metrics["mae"] < best_mae:
+                        if (
+                            isinstance(metrics, dict)
+                            and "mae" in metrics
+                            and metrics["mae"] < best_mae
+                        ):
                             best_mae = metrics["mae"]
                             best_model = model_name
 

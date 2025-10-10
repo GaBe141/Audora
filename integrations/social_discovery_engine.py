@@ -11,10 +11,10 @@ from typing import Any
 
 import aiohttp
 
-# Import our existing trending schema
-from trending_schema import TrendingSchema
-
 from core.utils import write_json
+
+# Import our existing trending schema
+from integrations.trending_schema import TrendingSchema
 
 
 class Platform(Enum):
@@ -209,14 +209,16 @@ class YouTubeMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(endpoint, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return data.get("items", [])
-                    else:
-                        print(f"YouTube API error: {response.status}")
-                        return []
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(endpoint, params=params) as response,
+            ):
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("items", [])
+                else:
+                    print(f"YouTube API error: {response.status}")
+                    return []
         except Exception as e:
             print(f"YouTube API exception: {e}")
             return []
@@ -238,13 +240,15 @@ class YouTubeMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(endpoint, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return data.get("items", [])
-                    else:
-                        return []
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(endpoint, params=params) as response,
+            ):
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("items", [])
+                else:
+                    return []
         except Exception as e:
             print(f"YouTube search error: {e}")
             return []
@@ -260,14 +264,16 @@ class YouTubeMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(endpoint, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        items = data.get("items", [])
-                        return items[0] if items else {}
-                    else:
-                        return {"error": f"API error: {response.status}"}
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(endpoint, params=params) as response,
+            ):
+                if response.status == 200:
+                    data = await response.json()
+                    items = data.get("items", [])
+                    return items[0] if items else {}
+                else:
+                    return {"error": f"API error: {response.status}"}
         except Exception as e:
             return {"error": str(e)}
 
@@ -570,12 +576,13 @@ class SocialMusicDiscoveryEngine:
         words = text.split()
 
         for i, word in enumerate(words):
-            if any(indicator in word.lower() for indicator in music_indicators):
-                # Look for quoted or capitalized phrases nearby
-                if i < len(words) - 1:
-                    next_word = words[i + 1]
-                    if next_word.startswith('"') or next_word[0].isupper():
-                        keywords.append(next_word.strip('"'))
+            if (
+                any(indicator in word.lower() for indicator in music_indicators)
+                and i < len(words) - 1
+            ):
+                next_word = words[i + 1]
+                if next_word.startswith('"') or next_word[0].isupper():
+                    keywords.append(next_word.strip('"'))
 
         return keywords
 
@@ -682,9 +689,9 @@ class SocialMusicDiscoveryEngine:
         self, discoveries: dict[str, list[SocialMusicMetrics]]
     ) -> dict[str, int]:
         """Analyze distribution of viral stages across discoveries."""
-        stage_counts = {}
+        stage_counts: dict[str, int] = {}
 
-        for platform, songs in discoveries.items():
+        for _platform, songs in discoveries.items():
             for song in songs:
                 stage = song.viral_stage.value
                 stage_counts[stage] = stage_counts.get(stage, 0) + 1
@@ -695,9 +702,9 @@ class SocialMusicDiscoveryEngine:
         self, discoveries: dict[str, list[SocialMusicMetrics]]
     ) -> dict[str, list[str]]:
         """Analyze age group preferences across platforms."""
-        age_preferences = {}
+        age_preferences: dict[str, list[str]] = {}
 
-        for platform, songs in discoveries.items():
+        for _platform, songs in discoveries.items():
             for song in songs:
                 age_group = song.primary_age_group
                 if age_group not in age_preferences:

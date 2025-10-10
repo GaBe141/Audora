@@ -45,10 +45,10 @@ class StreamingDataQualityAnalyzer:
 
     def __init__(self, verbose: bool = True):
         self.verbose = verbose
-        self.models = {}
-        self.forecasts = {}
-        self.quality_metrics = {}
-        self.anomaly_detectors = {}
+        self.models: dict[str, Any] = {}
+        self.forecasts: dict[str, Any] = {}
+        self.quality_metrics: dict[str, Any] = {}
+        self.anomaly_detectors: dict[str, Any] = {}
 
         # Check available libraries
         self.available_libs = {
@@ -296,9 +296,9 @@ class StreamingForecastingEngine:
 
     def __init__(self, verbose: bool = True):
         self.verbose = verbose
-        self.models = {}
-        self.forecasts = {}
-        self.model_performance = {}
+        self.models: dict[str, Any] = {}
+        self.forecasts: dict[str, Any] = {}
+        self.model_performance: dict[str, Any] = {}
 
         # Available model types
         self.available_models = {
