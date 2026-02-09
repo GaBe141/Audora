@@ -147,3 +147,18 @@ addopts = [
     "--strict-markers",
     "--tb=short",
 ]
+filterwarnings = ["ignore:.*", "default"]
+markers = [
+    "legacy: marks tests as legacy script-style (deselect with '-m \"not legacy\"')",
+]
+
+[tool.coverage.run]
+source = ["core", "analytics", "integrations"]
+omit = ["tests/*", "scripts/*", "*/__init__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+]

@@ -23,6 +23,9 @@ python main.py --setup
 python main.py --mode single          # Single discovery cycle
 python main.py --mode continuous      # Continuous monitoring
 python main.py --demo all            # See all demonstrations
+
+# 5. (Optional) Prototyping GUI - run discovery, demos, setup from the browser
+python run_gui.py                     # Opens http://127.0.0.1:8050
 ```
 
 ## 🎯 **Key Features**
@@ -64,7 +67,9 @@ python main.py --demo all            # See all demonstrations
 ```
 audora/
 ├── main.py                    # 🚀 Main entry point
-├──
+├── run_gui.py                 # Prototyping GUI (Dash) entry point
+├── 📁 gui/                    # Prototyping web UI (Dash)
+│   └── app.py                 # Dashboard layout and callbacks
 ├── 📁 core/                   # Core application components
 │   ├── discovery_app.py       # Main discovery application
 │   ├── data_store.py          # Enterprise database management

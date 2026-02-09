@@ -23,11 +23,11 @@ Key Components:
 
 __version__ = "2.0.0"
 
-# Import key analytics classes
+# Import key analytics classes (optional - avoid breaking submodule imports if deps fail)
 try:
     from .advanced_analytics import MusicTrendAnalytics
     from .statistical_analysis import StreamingDataQualityAnalyzer, StreamingForecastingEngine
 
     __all__ = ["MusicTrendAnalytics", "StreamingDataQualityAnalyzer", "StreamingForecastingEngine"]
-except ImportError:
+except (ImportError, AttributeError):
     __all__ = []
