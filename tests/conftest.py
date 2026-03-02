@@ -12,15 +12,6 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-def pytest_ignore_collect(path, config):
-    """Ignore legacy script-style tests that use old 'src' layout and fail to import."""
-    name = getattr(path, "name", None) or getattr(path, "basename", "")
-    is_file = getattr(path, "is_file", None) or getattr(path, "isfile", lambda: False)
-    if name in ("test_basic_statistical.py", "test_statistical_analysis.py") and callable(is_file) and is_file():
-        return True
-    return False
-
-
 @pytest.fixture
 def temp_db_path(tmp_path):
     """Yield an isolated path for a temporary SQLite database."""

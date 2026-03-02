@@ -256,7 +256,7 @@ def handle_errors(
                         message=f"Unexpected error in {func.__name__}: {str(e)}",
                         error_code="UNEXPECTED_ERROR",
                         details={"original_error": str(e), "function": func.__name__},
-                    )
+                    ) from e
                 return None
 
         return wrapper

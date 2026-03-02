@@ -3,12 +3,15 @@
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # Last.fm module imports from .config which may not exist; provide a minimal mock
 if "integrations.config" not in sys.modules:
     _config_mock = MagicMock()
     _config_mock.get_config = lambda: MagicMock(get_lastfm_config=lambda: {"api_key": "test_key"})
     sys.modules["integrations.config"] = _config_mock
 
+from core.exceptions import APIConnectionError, APIResponseError
 from integrations.lastfm_integration import LastFmAPI
 
 
@@ -68,21 +71,21 @@ class TestLastFmAPISuccess:
 class TestLastFmAPIErrorHandling:
     """Test API error and HTTP error handling."""
 
-    def test_api_error_in_json_returns_empty_dataframe(self):
+    def test_api_error_in_json_raises_response_error(self):
         api = LastFmAPI(api_key="test_key")
         mock_response = MagicMock()
         mock_response.raise_for_status = MagicMock()
         mock_response.json.return_value = {"error": 10, "message": "Invalid API key"}
         with patch.object(api.session, "get", return_value=mock_response):
-            df = api.get_top_artists_global(limit=5)
-        assert df.empty
+            with pytest.raises(APIResponseError, match="Invalid API key"):
+                api.get_top_artists_global(limit=5)
 
-    def test_http_error_returns_empty_dataframe(self):
+    def test_http_error_raises_connection_error(self):
         import requests
 
         api = LastFmAPI(api_key="test_key")
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("429")
         with patch.object(api.session, "get", return_value=mock_response):
-            df = api.get_top_artists_global(limit=5)
-        assert df.empty
+            with pytest.raises(APIConnectionError, match="429"):
+                api.get_top_artists_global(limit=5)
