@@ -1,8 +1,8 @@
 """Deep analysis of genre evolution, age-related patterns, and seasonality in music taste."""
 
 import re
-from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -26,7 +26,7 @@ def extract_release_decade(release_date: str) -> str:
     return "Unknown"
 
 
-def categorize_genre_by_era(genre: str) -> dict[str, any]:
+def categorize_genre_by_era(genre: str) -> dict[str, Any]:
     """Categorize genres by their typical emergence era and characteristics."""
     genre_lower = genre.lower()
 
@@ -192,9 +192,6 @@ def get_season(date) -> str:
 def analyze_generational_patterns(df: pd.DataFrame) -> dict:
     """Analyze how musical taste reflects generational patterns."""
     results = {}
-
-    # Current year for age-related analysis
-    datetime.now().year
 
     # Era preference analysis
     era_counts = (

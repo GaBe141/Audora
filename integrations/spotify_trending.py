@@ -3,22 +3,14 @@ Integration module for trending schema with Spotify streaming data.
 Connects real-time streaming data to trending analysis framework.
 """
 
-import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, TypedDict
 
-# Add parent directory to path for module imports
-sys.path.extend(
-    [
-        str(Path(__file__).parent.parent / "analytics"),
-        str(Path(__file__).parent.parent / "core"),
-    ]
-)
-
 import numpy as np
 import pandas as pd
-from trending_schema import TrendCategory, TrendDirection, TrendingSchema
+
+from .trending_schema import TrendCategory, TrendDirection, TrendingSchema
 
 
 class SpotifyTrendingIntegration:

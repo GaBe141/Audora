@@ -1,6 +1,7 @@
 """Multi-source music data integration combining Spotify, Last.fm, MusicBrainz, AudioDB, and Charts."""
 
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -118,7 +119,7 @@ def collect_all_data() -> dict[str, pd.DataFrame]:
     return all_data
 
 
-def analyze_cross_platform_insights(all_data: dict[str, pd.DataFrame]) -> dict[str, any]:
+def analyze_cross_platform_insights(all_data: dict[str, pd.DataFrame]) -> dict[str, Any]:
     """Analyze insights across all platforms."""
     print("\n🔍 Analyzing cross-platform insights...")
 
