@@ -775,15 +775,38 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
+        # Restrict update fields to prevent SQL injection via column names.
+        allowed_update_fields = {
+            "platform",
+            "track_id",
+            "track_name",
+            "artist",
+            "score",
+            "rank",
+            "region",
+            "trend_date",
+            "first_detected",
+            "metadata",
+            "is_active",
+        }
+        invalid_fields = [field for field in updates if field not in allowed_update_fields]
+        if invalid_fields:
+            raise ValueError(f"Invalid update field(s): {invalid_fields}")
+
+        safe_updates = dict(updates)
+        if "metadata" in safe_updates and not isinstance(safe_updates["metadata"], str):
+            safe_updates["metadata"] = json.dumps(safe_updates["metadata"])
+
         # Build SET clause
-        set_clauses = [f"{field} = ?" for field in updates]
-        params = list(updates.values())
+        set_clauses = [f"{field} = ?" for field in safe_updates]
+        params = list(safe_updates.values())
 
         # Add track IDs for WHERE clause
         placeholders = ",".join("?" * len(track_ids))
         params.extend(track_ids)
 
         with self.get_connection() as conn:
+            # nosec B608 - update columns are validated via allowlist above.
             query = f"""
             UPDATE trends
             SET {', '.join(set_clauses)}, last_updated = CURRENT_TIMESTAMP
