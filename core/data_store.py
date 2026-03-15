@@ -806,7 +806,6 @@ class EnhancedMusicDataStore:
         params.extend(track_ids)
 
         with self.get_connection() as conn:
-            # nosec B608 - update columns are validated via allowlist above.
             query = f"""
             UPDATE trends
             SET {', '.join(set_clauses)}, last_updated = CURRENT_TIMESTAMP
