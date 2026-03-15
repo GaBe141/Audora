@@ -3,7 +3,9 @@
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,18 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheSecurityHardening:
+    """Security-focused tests for cache internals."""
+
+    def test_cache_key_hash_uses_sha256_length(self):
+        cache = CacheManager(backend=LocalCacheBackend(max_size=10))
+        key = cache._build_cache_key("prefix", ("a", 1), {"b": 2})
+        parts = key.split(":")
+        # prefix + arg hash + kwarg hash
+        assert parts[0] == "prefix"
+        assert all(len(part) == 64 for part in parts[1:])
+
+    def test_redis_deserializer_rejects_malformed_payload(self):
+        assert RedisCacheBackend._deserialize_cache_value(b"not-json") is None
