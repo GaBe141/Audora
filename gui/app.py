@@ -9,7 +9,7 @@ from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
-from dash import Input, Output, State, dcc, html
+from dash import Input, Output, State, ctx, dcc, html
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -136,51 +136,29 @@ def _run_command(args: list[str]) -> tuple[str, str]:
     Output("last-status", "data"),
     Output("last-output", "data"),
     Input("btn-discovery", "n_clicks"),
-    State("last-status", "data"),
-    State("last-output", "data"),
-    prevent_initial_call=True,
-)
-def run_discovery(n_clicks, _status, _output):
-    if not n_clicks:
-        raise dash.exceptions.PreventUpdate
-    return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
-
-
-@app.callback(
-    Output("last-status", "data"),
-    Output("last-output", "data"),
     Input("btn-demo", "n_clicks"),
+    Input("btn-setup", "n_clicks"),
+    Input("btn-validate", "n_clicks"),
     State("demo-select", "value"),
     prevent_initial_call=True,
 )
-def run_demo(n_clicks, demo_value):
-    if not n_clicks:
-        raise dash.exceptions.PreventUpdate
-    return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
-
-
-@app.callback(
-    Output("last-status", "data"),
-    Output("last-output", "data"),
-    Input("btn-setup", "n_clicks"),
-    prevent_initial_call=True,
-)
-def run_setup(n_clicks):
-    if not n_clicks:
-        raise dash.exceptions.PreventUpdate
-    return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
-
-
-@app.callback(
-    Output("last-status", "data"),
-    Output("last-output", "data"),
-    Input("btn-validate", "n_clicks"),
-    prevent_initial_call=True,
-)
-def run_validate(n_clicks):
-    if not n_clicks:
-        raise dash.exceptions.PreventUpdate
-    return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--validate"])
+def run_action(
+    _discovery_clicks,
+    _demo_clicks,
+    _setup_clicks,
+    _validate_clicks,
+    demo_value,
+):
+    triggered = ctx.triggered_id
+    if triggered == "btn-discovery":
+        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
+    if triggered == "btn-demo":
+        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
+    if triggered == "btn-setup":
+        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
+    if triggered == "btn-validate":
+        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--validate"])
+    raise dash.exceptions.PreventUpdate
 
 
 @app.callback(

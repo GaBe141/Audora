@@ -39,9 +39,9 @@ sys.path.extend(
 
 
 def main():
-    """Main entry point for the Spotify Music Discovery System."""
+    """Main entry point for Audora - AI-Powered Music Discovery System."""
     parser = argparse.ArgumentParser(
-        description="🎵 Enhanced Spotify Music Discovery System with ML Analytics",
+        description="🎵 Audora - AI-Powered Music Discovery System with ML Analytics",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -172,7 +172,7 @@ For detailed documentation, see docs/QUICK_START.md
 
     # No arguments provided - show help and interactive menu
     if len(sys.argv) == 1:
-        print("\n🎵 Welcome to Enhanced Spotify Music Discovery System v2.0!")
+        print("\n🎵 Welcome to Audora - AI-Powered Music Discovery System v2.0!")
         print("=" * 60)
         print("\n🚀 Features:")
         print("  • Multi-platform social media discovery (TikTok, YouTube, Instagram)")
