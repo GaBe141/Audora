@@ -5,9 +5,12 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import hmac
 import json
 import logging
+import os
 import pickle
+import secrets
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -159,6 +162,16 @@ class RedisCacheBackend(CacheBackend):
             decode_responses=False,  # Use binary mode for pickle
         )
         self._client = redis.Redis(connection_pool=self._pool)
+        signing_key = os.getenv("AUDORA_CACHE_SIGNING_KEY")
+        if signing_key:
+            self._signing_key = signing_key.encode("utf-8")
+        else:
+            # Use a per-process ephemeral key when no configured key is provided.
+            # This blocks unsigned/tampered payloads but invalidates old cache values on restart.
+            self._signing_key = secrets.token_bytes(32)
+            logger.warning(
+                "AUDORA_CACHE_SIGNING_KEY is not set; using ephemeral cache signing key"
+            )
 
         # Test connection
         try:
@@ -174,7 +187,11 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            payload = self._verify_payload(value)
+            if payload is None:
+                logger.warning(f"Rejected unsigned or tampered cache payload for key {key}")
+                return None
+            return pickle.loads(payload)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,11 +199,12 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+            signed_payload = self._sign_payload(serialized)
             if ttl:
-                self._client.setex(key, ttl, serialized)
+                self._client.setex(key, ttl, signed_payload)
             else:
-                self._client.set(key, serialized)
+                self._client.set(key, signed_payload)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 
@@ -212,6 +230,27 @@ class RedisCacheBackend(CacheBackend):
         except Exception as e:
             logger.error(f"Redis exists error for key {key}: {e}")
             return False
+
+    def _sign_payload(self, payload: bytes) -> bytes:
+        """Sign serialized payload to prevent unsafe deserialization of forged values."""
+        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest().encode(
+            "ascii"
+        )
+        return signature + b":" + payload
+
+    def _verify_payload(self, signed_payload: bytes) -> bytes | None:
+        """Verify payload signature and return original payload when valid."""
+        try:
+            signature, payload = signed_payload.split(b":", 1)
+        except ValueError:
+            return None
+
+        expected_signature = hmac.new(
+            self._signing_key, payload, hashlib.sha256
+        ).hexdigest().encode("ascii")
+        if not hmac.compare_digest(signature, expected_signature):
+            return None
+        return payload
 
 
 class CacheManager:
@@ -372,12 +411,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
