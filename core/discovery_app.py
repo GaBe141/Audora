@@ -25,6 +25,11 @@ from core.notification_service import (
     NotificationPriority,
 )
 from core.resilience import EnhancedResilience
+from integrations.lastfm_integration import get_lastfm_client
+from integrations.social_discovery_engine import (
+    SocialMusicDiscoveryEngine,
+    create_mock_discovery_data,
+)
 
 
 class EnhancedMusicDiscoveryApp:
@@ -49,6 +54,11 @@ class EnhancedMusicDiscoveryApp:
         )
         self.analytics = MusicTrendAnalytics(self.data_store)
         self.notifications = EnhancedNotificationService()
+
+        # Initialize integration clients
+        social_api_config = self.configs.get("api", {}).get("social", {})
+        self.social_engine = SocialMusicDiscoveryEngine(social_api_config)
+        self.lastfm_client = get_lastfm_client()
 
         self.logger.info("Enhanced Music Discovery App initialized successfully")
 
@@ -203,38 +213,101 @@ class EnhancedMusicDiscoveryApp:
         """Collect trending data from multiple sources with resilience."""
         self.logger.info("🔍 Collecting trending data from multiple sources")
 
-        # Simulated data collection (replace with actual API calls)
-        sample_discoveries = [
-            {
-                "track_name": "Viral Track 1",
-                "artist": "Rising Artist",
-                "platform": "tiktok",
-                "score": 0.85,
-                "growth_rate": 2.3,
-                "platform_count": 3,
-                "creator_influence": 0.7,
-                "audio_features": {"danceability": 0.8, "energy": 0.9, "valence": 0.7},
-                "metadata": {"discovered_at": datetime.now().isoformat(), "source_confidence": 0.9},
-            },
-            {
-                "track_name": "Trending Beat",
-                "artist": "Underground Producer",
-                "platform": "youtube",
-                "score": 0.72,
-                "growth_rate": 1.8,
-                "platform_count": 2,
-                "creator_influence": 0.5,
-                "audio_features": {"danceability": 0.9, "energy": 0.8, "valence": 0.6},
-                "metadata": {"discovered_at": datetime.now().isoformat(), "source_confidence": 0.8},
-            },
-        ]
+        discoveries: list[dict[str, Any]] = []
+        now = datetime.now().isoformat()
 
-        # Apply resilience patterns
-        for discovery in sample_discoveries:
-            # Simulate API call with retry logic
-            await asyncio.sleep(0.1)  # Simulate network delay
+        # --- Source 1: Social platforms (TikTok / YouTube / Twitter) ---
+        try:
+            social_results = await self.social_engine.discover_emerging_music(region="US")
+            for platform_name, metrics_list in social_results.items():
+                for m in metrics_list:
+                    # Normalise trend_velocity (0–1) to a 0–100 score
+                    score = min(m.trend_velocity * 100, 100.0)
+                    discoveries.append(
+                        {
+                            "track_name": m.song_title,
+                            "artist": m.artist_name,
+                            "platform": platform_name,
+                            "score": score,
+                            "growth_rate": m.trend_velocity,
+                            "platform_count": 1,
+                            "creator_influence": min(m.video_uses / 1_000_000, 1.0),
+                            "audio_features": {},
+                            "metadata": {
+                                "discovered_at": now,
+                                "source_confidence": 0.8,
+                                "viral_stage": m.viral_stage.value,
+                                "views": m.views,
+                                "likes": m.likes,
+                            },
+                        }
+                    )
+            self.logger.info(f"✅ Social engine: {len(discoveries)} tracks")
+        except Exception as e:
+            self.logger.warning(f"⚠️ Social engine unavailable: {e}")
 
-        return sample_discoveries
+        # --- Source 2: Last.fm global charts ---
+        if self.lastfm_client:
+            try:
+                lastfm_df = self.lastfm_client.get_top_tracks_global(limit=50)
+                if not lastfm_df.empty:
+                    max_pc = lastfm_df["playcount"].max() or 1
+                    before = len(discoveries)
+                    for _, row in lastfm_df.iterrows():
+                        score = float(row["playcount"]) / max_pc * 100
+                        discoveries.append(
+                            {
+                                "track_name": str(row["name"]),
+                                "artist": str(row["artist"]),
+                                "platform": "lastfm",
+                                "score": score,
+                                "growth_rate": score / 100,
+                                "platform_count": 1,
+                                "creator_influence": 0.0,
+                                "audio_features": {},
+                                "metadata": {
+                                    "discovered_at": now,
+                                    "source_confidence": 0.9,
+                                    "playcount": int(row["playcount"]),
+                                    "listeners": int(row.get("listeners", 0)),
+                                },
+                            }
+                        )
+                    self.logger.info(
+                        f"✅ Last.fm: {len(discoveries) - before} tracks"
+                    )
+            except Exception as e:
+                self.logger.warning(f"⚠️ Last.fm unavailable: {e}")
+
+        # --- Fallback: mock data when no API keys are configured ---
+        if not discoveries:
+            self.logger.warning(
+                "No API sources returned data — using mock discovery engine"
+            )
+            mock_engine = create_mock_discovery_data()
+            mock_results = await mock_engine.discover_emerging_music(region="US")
+            for platform_name, metrics_list in mock_results.items():
+                for m in metrics_list:
+                    score = min(m.trend_velocity * 100, 100.0)
+                    discoveries.append(
+                        {
+                            "track_name": m.song_title,
+                            "artist": m.artist_name,
+                            "platform": platform_name,
+                            "score": score,
+                            "growth_rate": m.trend_velocity,
+                            "platform_count": 1,
+                            "creator_influence": min(m.video_uses / 1_000_000, 1.0),
+                            "audio_features": {},
+                            "metadata": {
+                                "discovered_at": now,
+                                "source_confidence": 0.5,
+                                "mock": True,
+                            },
+                        }
+                    )
+
+        return discoveries
 
     async def _store_discoveries(self, discoveries: list[dict[str, Any]]) -> None:
         """Store discoveries in the enhanced data store."""
