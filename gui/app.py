@@ -4,15 +4,20 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
+import hmac
+import ipaddress
+import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -371,6 +376,96 @@ def _get_data_store():
     return EnhancedMusicDataStore(str(db_path))
 
 
+def _is_loopback_request() -> bool:
+    """Return True when request originates from localhost."""
+    try:
+        remote_addr = request.remote_addr or ""
+    except RuntimeError:
+        return False
+
+    if not remote_addr:
+        return False
+
+    try:
+        return ipaddress.ip_address(remote_addr).is_loopback
+    except ValueError:
+        return False
+
+
+def _has_admin_access() -> bool:
+    """Allow local requests or a valid admin token header."""
+    if _is_loopback_request():
+        return True
+
+    required_token = os.getenv("AUDORA_GUI_ADMIN_TOKEN", "").strip()
+    if not required_token:
+        return False
+
+    provided_token = request.headers.get("X-Audora-Admin-Token", "").strip()
+    return bool(provided_token) and hmac.compare_digest(provided_token, required_token)
+
+
+def _is_blocked_destination_ip(ip_text: str) -> bool:
+    """Return True for loopback/private/link-local/reserved destinations."""
+    ip_obj = ipaddress.ip_address(ip_text)
+    return (
+        ip_obj.is_loopback
+        or ip_obj.is_private
+        or ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_reserved
+        or ip_obj.is_unspecified
+    )
+
+
+def _validate_webhook_url(url: str, channel_key: str) -> tuple[bool, str]:
+    """Validate URL and reject unsafe destinations to reduce SSRF risk."""
+    normalized = (url or "").strip()
+    parsed = urlparse(normalized)
+
+    if parsed.scheme.lower() != "https":
+        return False, "Webhook URLs must use HTTPS."
+    if not parsed.hostname:
+        return False, "Webhook URL must include a hostname."
+
+    host = parsed.hostname.lower().rstrip(".")
+
+    if channel_key == "slack":
+        if host not in {"hooks.slack.com", "hooks.slack-gov.com"}:
+            return False, "Slack webhook must use hooks.slack.com."
+
+    if channel_key == "discord":
+        discord_hosts = {"discord.com", "discordapp.com", "ptb.discord.com", "canary.discord.com"}
+        if host not in discord_hosts and not host.endswith(".discord.com"):
+            return False, "Discord webhook must use an official Discord hostname."
+
+    if channel_key == "webhook":
+        if host in {"localhost", "ip6-localhost"} or host.endswith(".local"):
+            return False, "Custom webhook URL cannot target localhost or .local hosts."
+
+        try:
+            literal_ip = ipaddress.ip_address(host)
+            if _is_blocked_destination_ip(str(literal_ip)):
+                return False, "Custom webhook URL cannot target private/internal addresses."
+        except ValueError:
+            try:
+                resolved = {
+                    info[4][0]
+                    for info in socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
+                }
+            except socket.gaierror:
+                return False, "Custom webhook hostname could not be resolved."
+
+            for resolved_ip in resolved:
+                if _is_blocked_destination_ip(resolved_ip):
+                    return (
+                        False,
+                        "Custom webhook URL cannot resolve to private/internal addresses.",
+                    )
+
+    return True, normalized
+
+
 # ---------------------------------------------------------------------------
 # Callbacks — sidebar actions
 # ---------------------------------------------------------------------------
@@ -392,6 +487,9 @@ def run_action(
     _validate_clicks,
     demo_value,
 ):
+    if not _has_admin_access():
+        return "Forbidden", "Administrative access required."
+
     triggered = ctx.triggered_id
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
@@ -585,15 +683,27 @@ def export_csv(_n, table_data):
     prevent_initial_call=True,
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+    if not _has_admin_access():
+        return "Forbidden"
+
     try:
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
-            svc.config["slack"]["webhook_url"] = slack_url
+            ok, validated = _validate_webhook_url(slack_url, "slack")
+            if not ok:
+                return f"Error: {validated}"
+            svc.config["slack"]["webhook_url"] = validated
         if discord_url:
-            svc.config["discord"]["webhook_url"] = discord_url
+            ok, validated = _validate_webhook_url(discord_url, "discord")
+            if not ok:
+                return f"Error: {validated}"
+            svc.config["discord"]["webhook_url"] = validated
         if webhook_url:
-            svc.config["webhook"]["url"] = webhook_url
+            ok, validated = _validate_webhook_url(webhook_url, "webhook")
+            if not ok:
+                return f"Error: {validated}"
+            svc.config["webhook"]["url"] = validated
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
         if smtp_port:
@@ -618,8 +728,16 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         prevent_initial_call=True,
     )
     def _cb(_n, url):
+        if not _has_admin_access():
+            return "Forbidden"
+
         if not url:
             return "No URL"
+
+        ok, validated = _validate_webhook_url(url, channel_key)
+        if not ok:
+            return f"Invalid URL: {validated}"
+
         try:
             import asyncio
             from core.notification_service import (
@@ -629,7 +747,10 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
                 NotificationPriority,
             )
             svc = EnhancedNotificationService()
-            svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
+            svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = validated
+            if channel_key == "webhook":
+                # Prevent leaking shared bearer tokens during ad-hoc URL tests.
+                svc.config["webhook"]["headers"] = {"Content-Type": "application/json"}
             channel = getattr(NotificationChannel, channel_enum_name)
             msg = NotificationMessage(
                 title="Audora test notification",

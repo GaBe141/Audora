@@ -4,6 +4,7 @@ import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +81,20 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for Redis cache serialization."""
+
+    def test_json_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = backend._serialize_value({"artist": "A", "score": 92.5})
+        assert backend._deserialize_value(payload) == {"artist": "A", "score": 92.5}
+
+    def test_rejects_non_json_payload(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        # Simulate legacy/unsafe binary payload (e.g., pickle stream header).
+        assert backend._deserialize_value(b"\x80\x04\x95\x10unsafe") is None
 
 
 class TestCachedDecorator:

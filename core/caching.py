@@ -7,7 +7,6 @@ fallback to in-memory caching when Redis is unavailable.
 import hashlib
 import json
 import logging
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -156,7 +155,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Store encoded JSON bytes
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +173,7 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            return self._deserialize_value(value)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,13 +181,25 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    def _serialize_value(self, value: Any) -> bytes:
+        """Serialize values as JSON bytes to avoid unsafe pickle deserialization."""
+        return json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
+
+    def _deserialize_value(self, payload: bytes) -> Any | None:
+        """Deserialize JSON payload from Redis safely."""
+        try:
+            return json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            logger.warning(f"Ignoring non-JSON Redis cache payload: {e}")
+            return None
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
@@ -277,7 +288,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (JSON-serializable recommended)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
