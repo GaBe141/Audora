@@ -1025,6 +1025,141 @@ class EnhancedMusicDataStore:
                 "issue_count": len(quality_issues),
             }
 
+    def update_prediction_outcome(self, track_id: str, actual_peak_score: float) -> None:
+        """Record the actual peak score for a prediction and compute accuracy.
+
+        Args:
+            track_id: ID of the track whose prediction to update.
+            actual_peak_score: The true peak score observed (0–100).
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT predicted_peak_score FROM viral_predictions WHERE track_id = ?",
+                (track_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return
+
+            predicted = float(row[0])
+            error = abs(predicted - actual_peak_score) / 100.0
+            accuracy = max(0.0, 1.0 - error)
+            status = "confirmed" if error <= 0.2 else "failed"
+
+            cursor.execute(
+                """
+                UPDATE viral_predictions
+                SET actual_peak_score = ?,
+                    accuracy_score = ?,
+                    status = ?,
+                    actual_peak_date = ?
+                WHERE track_id = ?
+                """,
+                (actual_peak_score, accuracy, status, datetime.now().isoformat(), track_id),
+            )
+            conn.commit()
+            self.logger.debug(
+                f"Updated prediction for {track_id}: accuracy={accuracy:.2f}, status={status}"
+            )
+
+    def evaluate_prediction_accuracy(self, days_back: int = 30) -> dict[str, Any]:
+        """Evaluate pending predictions whose peak date has passed.
+
+        For each pending prediction whose predicted_peak_date is in the past,
+        looks up the best actual score from the trends table and calls
+        update_prediction_outcome.  Returns aggregate accuracy metrics.
+
+        Args:
+            days_back: How many days back to look for pending predictions.
+
+        Returns:
+            Dictionary with total_evaluated, confirmed_count, failed_count,
+            mean_accuracy, mae, rmse, accuracy_by_platform.
+        """
+        with self.get_connection() as conn:
+            # Find pending predictions whose predicted peak date has passed
+            pending_df = pd.read_sql_query(
+                """
+                SELECT track_id, track_name, artist, predicted_peak_score,
+                       predicted_peak_date, prediction_features
+                FROM viral_predictions
+                WHERE status = 'pending'
+                  AND datetime(predicted_peak_date) <= datetime('now')
+                  AND datetime(prediction_date) >= datetime('now', ?)
+                """,
+                conn,
+                params=(f"-{days_back} days",),
+            )
+
+        # For each pending prediction, look up actual peak score from trends
+        for _, pred_row in pending_df.iterrows():
+            with self.get_connection() as conn:
+                result = pd.read_sql_query(
+                    """
+                    SELECT MAX(score) as best_score
+                    FROM trends
+                    WHERE track_name = ? AND artist = ?
+                    """,
+                    conn,
+                    params=(pred_row["track_name"], pred_row["artist"]),
+                )
+            if not result.empty and result["best_score"].iloc[0] is not None:
+                actual = float(result["best_score"].iloc[0])
+                self.update_prediction_outcome(str(pred_row["track_id"]), actual)
+
+        # Now collect all evaluated predictions to compute metrics
+        with self.get_connection() as conn:
+            evaluated_df = pd.read_sql_query(
+                """
+                SELECT vp.track_name, vp.artist, vp.predicted_peak_score,
+                       vp.actual_peak_score, vp.accuracy_score, vp.status,
+                       t.platform
+                FROM viral_predictions vp
+                LEFT JOIN trends t ON vp.track_name = t.track_name AND vp.artist = t.artist
+                WHERE vp.status IN ('confirmed', 'failed')
+                  AND datetime(vp.prediction_date) >= datetime('now', ?)
+                """,
+                conn,
+                params=(f"-{days_back} days",),
+            )
+
+        if evaluated_df.empty:
+            return {
+                "total_evaluated": 0,
+                "confirmed_count": 0,
+                "failed_count": 0,
+                "mean_accuracy": 0.0,
+                "mae": 0.0,
+                "rmse": 0.0,
+                "accuracy_by_platform": {},
+            }
+
+        confirmed = int((evaluated_df["status"] == "confirmed").sum())
+        failed = int((evaluated_df["status"] == "failed").sum())
+        mean_acc = float(evaluated_df["accuracy_score"].mean())
+
+        errors = (evaluated_df["predicted_peak_score"] - evaluated_df["actual_peak_score"]).abs()
+        mae = float(errors.mean())
+        rmse = float((errors**2).mean() ** 0.5)
+
+        acc_by_platform = (
+            evaluated_df.groupby("platform")["accuracy_score"]
+            .mean()
+            .round(3)
+            .to_dict()
+        )
+
+        return {
+            "total_evaluated": len(evaluated_df),
+            "confirmed_count": confirmed,
+            "failed_count": failed,
+            "mean_accuracy": round(mean_acc, 3),
+            "mae": round(mae, 3),
+            "rmse": round(rmse, 3),
+            "accuracy_by_platform": acc_by_platform,
+        }
+
 
 # Example usage
 if __name__ == "__main__":

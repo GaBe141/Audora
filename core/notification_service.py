@@ -166,7 +166,36 @@ class EnhancedNotificationService:
             except Exception as e:
                 self.logger.error(f"Failed to load config file {config_file}: {e}")
 
+        # Also attempt to load from default config path
+        default_path = Path("config/notification_config.json")
+        if default_path.exists() and not config_file:
+            try:
+                with default_path.open() as f:
+                    user_config = json.load(f)
+                    self._deep_merge(default_config, user_config)
+            except Exception as e:
+                self.logger.warning(f"Could not load {default_path}: {e}")
+
         return default_config
+
+    def save_config(self, path: str = "config/notification_config.json") -> None:
+        """Persist the current channel configuration to a JSON file.
+
+        Args:
+            path: File path to write the configuration to.
+        """
+        config_path = Path(path)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        # Only save channel-specific sections (not internal runtime state)
+        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
+                         "default_channels", "rate_limit_per_hour"]
+        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        try:
+            with config_path.open("w") as f:
+                json.dump(to_save, f, indent=2)
+            self.logger.info(f"Notification config saved to {config_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to save notification config: {e}")
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
