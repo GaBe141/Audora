@@ -1,6 +1,7 @@
 """Regression tests for security hardening changes."""
 
 import asyncio
+import importlib
 import socket
 import ssl
 
@@ -11,6 +12,8 @@ from core.notification_service import (
     NotificationPriority,
 )
 from gui.app import _validate_webhook_url
+
+gui_app_module = importlib.import_module("gui.app")
 
 
 class TestWebhookUrlValidation:
@@ -33,7 +36,7 @@ class TestWebhookUrlValidation:
         def fake_getaddrinfo(*_args, **_kwargs):
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.1.2.3", 443))]
 
-        monkeypatch.setattr("gui.app.socket.getaddrinfo", fake_getaddrinfo)
+        monkeypatch.setattr(gui_app_module.socket, "getaddrinfo", fake_getaddrinfo)
         ok, msg = _validate_webhook_url("https://example.com/hook", "webhook")
         assert ok is False
         assert "private/internal" in msg
@@ -42,7 +45,7 @@ class TestWebhookUrlValidation:
         def fake_getaddrinfo(*_args, **_kwargs):
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
 
-        monkeypatch.setattr("gui.app.socket.getaddrinfo", fake_getaddrinfo)
+        monkeypatch.setattr(gui_app_module.socket, "getaddrinfo", fake_getaddrinfo)
         ok, normalized = _validate_webhook_url("https://example.com/hook", "webhook")
         assert ok is True
         assert normalized == "https://example.com/hook"
