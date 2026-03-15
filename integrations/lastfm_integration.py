@@ -1,12 +1,17 @@
 """Last.fm API integration for global music trends and historical data."""
 
 import json
+import logging
 import time
 
 import pandas as pd
 import requests
 
+from core.exceptions import APIConnectionError, APIResponseError
+
 from .config import get_config
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = "http://ws.audioscrobbler.com/2.0/"
 
@@ -40,16 +45,28 @@ class LastFmAPI:
             data = response.json()
 
             if "error" in data:
-                print(f"Last.fm API error: {data.get('message', 'Unknown error')}")
-                return {}
+                msg = data.get("message", "Unknown error")
+                logger.warning("Last.fm API error on %s: %s", method, msg)
+                raise APIResponseError(
+                    message=f"Last.fm API error: {msg}",
+                    details={"method": method, "error_code": data.get("error")},
+                )
 
             return data
+        except APIResponseError:
+            raise
         except requests.exceptions.RequestException as e:
-            print(f"Request error: {e}")
-            return {}
+            logger.error("Last.fm request failed for %s: %s", method, e)
+            raise APIConnectionError(
+                message=f"Last.fm request failed: {e}",
+                details={"method": method},
+            ) from e
         except json.JSONDecodeError as e:
-            print(f"JSON decode error: {e}")
-            return {}
+            logger.error("Last.fm returned invalid JSON for %s: %s", method, e)
+            raise APIResponseError(
+                message=f"Last.fm returned invalid JSON: {e}",
+                details={"method": method},
+            ) from e
 
     def get_top_artists_global(self, limit: int = 50) -> pd.DataFrame:
         """Get global top artists chart."""
@@ -205,9 +222,11 @@ def get_lastfm_client() -> LastFmAPI | None:
     lastfm_config = config_manager.get_lastfm_config()
 
     if not lastfm_config:
-        print("❌ Last.fm API key not configured!")
-        print("Get a free API key from: https://www.last.fm/api/account/create")
-        print("Then add it to your .env file as LASTFM_API_KEY=your_key_here")
+        logger.warning(
+            "Last.fm API key not configured. "
+            "Get a free key at https://www.last.fm/api/account/create "
+            "and add LASTFM_API_KEY to your .env file."
+        )
         return None
 
     return LastFmAPI(lastfm_config["api_key"])
@@ -219,33 +238,30 @@ def fetch_global_trends() -> dict[str, pd.DataFrame]:
     if not client:
         return {}
 
-    print("🌍 Fetching global music trends from Last.fm...")
+    logger.info("Fetching global music trends from Last.fm...")
 
-    trends = {}
+    trends: dict[str, pd.DataFrame] = {}
 
     try:
-        # Global top artists
-        print("   📊 Getting global top artists...")
+        logger.info("Getting global top artists...")
         trends["global_top_artists"] = client.get_top_artists_global(limit=50)
 
-        # Global top tracks
-        print("   🎵 Getting global top tracks...")
+        logger.info("Getting global top tracks...")
         trends["global_top_tracks"] = client.get_top_tracks_global(limit=50)
 
-        # Genre-specific trends
-        print("   🎭 Getting genre-specific trends...")
+        logger.info("Getting genre-specific trends...")
         popular_genres = ["rock", "pop", "electronic", "hip hop", "indie", "alternative"]
 
         for genre in popular_genres:
-            print(f"      • {genre}...")
+            logger.debug("Fetching top artists for genre: %s", genre)
             genre_artists = client.get_tag_top_artists(genre, limit=20)
             if not genre_artists.empty:
                 trends[f"genre_{genre.replace(' ', '_')}"] = genre_artists
 
-        print(f"✅ Fetched trends for {len(trends)} categories")
+        logger.info("Fetched trends for %d categories", len(trends))
 
-    except Exception as e:
-        print(f"❌ Error fetching trends: {e}")
+    except (APIConnectionError, APIResponseError) as e:
+        logger.error("Error fetching trends: %s", e)
 
     return trends
 
@@ -256,14 +272,18 @@ def enrich_spotify_artists_with_lastfm(spotify_artists: pd.DataFrame) -> pd.Data
     if not client or spotify_artists.empty:
         return spotify_artists
 
-    print("🔗 Enriching Spotify data with Last.fm global stats...")
+    logger.info("Enriching Spotify data with Last.fm global stats...")
 
     enriched_data = []
 
     for _, artist in spotify_artists.iterrows():
-        print(f"   📊 Looking up {artist['name']}...")
+        logger.debug("Looking up Last.fm info for %s", artist["name"])
 
-        lastfm_info = client.get_artist_info(artist["name"])
+        try:
+            lastfm_info = client.get_artist_info(artist["name"])
+        except (APIConnectionError, APIResponseError):
+            logger.warning("Could not fetch Last.fm info for %s, skipping", artist["name"])
+            lastfm_info = {}
 
         enriched_row = artist.to_dict()
         enriched_row.update(

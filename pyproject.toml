@@ -74,7 +74,7 @@ select = [
 ignore = [
     "E501",  # Line too long (handled by Black)
     "B008",  # Do not perform function calls in argument defaults
-    "B904",  # Within an except clause, raise exceptions with raise ... from err
+    # B904 enabled: use `raise ... from err` for proper exception chaining
     "N802",  # Function name should be lowercase
     "N803",  # Argument name should be lowercase
     "N806",  # Variable in function should be lowercase

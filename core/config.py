@@ -98,8 +98,6 @@ class SecureConfig:
 
     def get_audiodb_config(self) -> dict[str, str] | None:
         """Get AudioDB API configuration with validation."""
-        import os
-
         api_key = os.getenv("AUDIODB_API_KEY")
 
         # AudioDB provides a free API key (123) that everyone can use
@@ -130,7 +128,7 @@ class SecureConfig:
             spotify_config = self.get_spotify_config()
             status["spotify"]["configured"] = True
             status["spotify"]["scopes"] = spotify_config["scopes"].split()
-        except Exception as e:
+        except (ValueError, KeyError, OSError) as e:
             status["spotify"]["error"] = str(e)
 
         # Test Last.fm config
@@ -140,7 +138,7 @@ class SecureConfig:
                 status["lastfm"]["configured"] = True
             else:
                 status["lastfm"]["error"] = "API key not configured"
-        except Exception as e:
+        except (ValueError, KeyError, OSError) as e:
             status["lastfm"]["error"] = str(e)
 
         # Test AudioDB config
@@ -151,7 +149,7 @@ class SecureConfig:
                 status["audiodb"]["tier"] = audiodb_config["tier"]
             else:
                 status["audiodb"]["error"] = "API configuration failed"
-        except Exception as e:
+        except (ValueError, KeyError, OSError) as e:
             status["audiodb"]["error"] = str(e)
 
         return status
