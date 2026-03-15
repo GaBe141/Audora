@@ -1,0 +1,74 @@
+{
+  "tiktok": {
+    "api_key": "",
+    "secret_key": "",
+    "access_token": "",
+    "refresh_token": "",
+    "requests_per_minute": 60,
+    "requests_per_hour": 1000,
+    "requests_per_day": 10000,
+    "enabled": false,
+    "last_error": "",
+    "error_count": 0
+  },
+  "youtube": {
+    "api_key": "",
+    "secret_key": "",
+    "access_token": "",
+    "refresh_token": "",
+    "requests_per_minute": 100,
+    "requests_per_hour": 10000,
+    "requests_per_day": 1000000,
+    "enabled": false,
+    "last_error": "",
+    "error_count": 0
+  },
+  "twitter": {
+    "api_key": "",
+    "secret_key": "",
+    "access_token": "",
+    "refresh_token": "",
+    "requests_per_minute": 300,
+    "requests_per_hour": 300,
+    "requests_per_day": 300,
+    "enabled": false,
+    "last_error": "",
+    "error_count": 0
+  },
+  "instagram": {
+    "api_key": "",
+    "secret_key": "",
+    "access_token": "",
+    "refresh_token": "",
+    "requests_per_minute": 60,
+    "requests_per_hour": 200,
+    "requests_per_day": 200,
+    "enabled": false,
+    "last_error": "",
+    "error_count": 0
+  },
+  "reddit": {
+    "api_key": "",
+    "secret_key": "",
+    "access_token": "",
+    "refresh_token": "",
+    "requests_per_minute": 60,
+    "requests_per_hour": 1000,
+    "requests_per_day": 1000,
+    "enabled": false,
+    "last_error": "",
+    "error_count": 0
+  },
+  "tumblr": {
+    "api_key": "",
+    "secret_key": "",
+    "access_token": "",
+    "refresh_token": "",
+    "requests_per_minute": 60,
+    "requests_per_hour": 1000,
+    "requests_per_day": 5000,
+    "enabled": false,
+    "last_error": "",
+    "error_count": 0
+  }
+}
