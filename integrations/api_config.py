@@ -3,6 +3,8 @@ Configuration management for social media APIs.
 Handles API keys, rate limiting, and platform-specific settings.
 """
 
+import os
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -55,6 +57,8 @@ class SocialAPIManager:
                 self.configs[platform] = APIConfig(platform=platform, **config_data)
         else:
             self._create_default_configs()
+
+        self._enforce_secure_permissions()
 
     def _create_default_configs(self):
         """Create default configuration template."""
@@ -130,7 +134,20 @@ class SocialAPIManager:
                 "error_count": config.error_count,
             }
 
+        self.config_file.parent.mkdir(parents=True, exist_ok=True)
         write_json(self.config_file, config_data)
+        self._enforce_secure_permissions()
+
+    def _enforce_secure_permissions(self) -> None:
+        """Restrict credential file permissions on Unix-like systems."""
+        if sys.platform.startswith("win"):
+            return
+        if not self.config_file.exists():
+            return
+
+        file_mode = self.config_file.stat().st_mode & 0o777
+        if file_mode != 0o600:
+            os.chmod(self.config_file, 0o600)
 
     def get_config(self, platform: str) -> APIConfig | None:
         """Get configuration for a platform."""
