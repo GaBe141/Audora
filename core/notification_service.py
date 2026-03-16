@@ -4,9 +4,11 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,6 +19,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -355,6 +358,74 @@ System status: {{ system_status }}
             ),
         ]
 
+    def _is_public_ip_address(self, ip_text: str) -> bool:
+        """Return True if IP is publicly routable."""
+        ip_obj = ipaddress.ip_address(ip_text)
+        return not (
+            ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_reserved
+            or ip_obj.is_unspecified
+        )
+
+    def _validate_webhook_url(
+        self,
+        url: str,
+        *,
+        require_https: bool = True,
+        allowed_host_suffixes: tuple[str, ...] | None = None,
+    ) -> tuple[bool, str | None]:
+        """Validate webhook URL to reduce SSRF and local-network abuse risk."""
+        try:
+            parsed = urlparse(url.strip())
+        except Exception:
+            return False, "Malformed URL"
+
+        if parsed.scheme not in {"http", "https"}:
+            return False, "Unsupported URL scheme"
+        if require_https and parsed.scheme != "https":
+            return False, "URL must use HTTPS"
+        if parsed.username or parsed.password:
+            return False, "Credentials in URL are not allowed"
+
+        host = (parsed.hostname or "").strip().lower()
+        if not host:
+            return False, "Webhook host is missing"
+        if host == "localhost" or host.endswith(".local"):
+            return False, "Localhost and .local hosts are not allowed"
+
+        if allowed_host_suffixes:
+            matched = any(host == suffix or host.endswith(f".{suffix}") for suffix in allowed_host_suffixes)
+            if not matched:
+                return False, "Host is not allowed for this channel"
+
+        try:
+            # Reject direct private/reserved IP literals.
+            ip_obj = ipaddress.ip_address(host)
+            if not self._is_public_ip_address(str(ip_obj)):
+                return False, "Webhook host resolves to a non-public IP"
+        except ValueError:
+            # Hostname: resolve all records and ensure every address is public.
+            try:
+                addr_info = socket.getaddrinfo(
+                    host,
+                    parsed.port or (443 if parsed.scheme == "https" else 80),
+                    type=socket.SOCK_STREAM,
+                )
+            except socket.gaierror:
+                return False, "Webhook host could not be resolved"
+
+            resolved_ips = {info[4][0] for info in addr_info if info and info[4]}
+            if not resolved_ips:
+                return False, "Webhook host could not be resolved"
+            for ip_text in resolved_ips:
+                if not self._is_public_ip_address(ip_text):
+                    return False, "Webhook host resolves to a non-public IP"
+
+        return True, None
+
     async def send_notification(self, message: NotificationMessage) -> dict[str, Any]:
         """
         Send notification through configured channels.
@@ -541,6 +612,14 @@ System status: {{ system_status }}
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
 
+        valid, error = self._validate_webhook_url(
+            webhook_url,
+            require_https=True,
+            allowed_host_suffixes=("slack.com", "slack-gov.com"),
+        )
+        if not valid:
+            return {"success": False, "error": f"Invalid Slack webhook URL: {error}"}
+
         try:
             # Create Slack message format
             color_map = {
@@ -614,6 +693,14 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+
+        valid, error = self._validate_webhook_url(
+            webhook_url,
+            require_https=True,
+            allowed_host_suffixes=("discord.com", "discordapp.com"),
+        )
+        if not valid:
+            return {"success": False, "error": f"Invalid Discord webhook URL: {error}"}
 
         try:
             # Format content for Discord
@@ -690,6 +777,10 @@ System status: {{ system_status }}
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
+
+        valid, error = self._validate_webhook_url(url, require_https=True)
+        if not valid:
+            return {"success": False, "error": f"Invalid webhook URL: {error}"}
 
         try:
             # Prepare payload
