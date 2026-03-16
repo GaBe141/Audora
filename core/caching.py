@@ -5,9 +5,12 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import hmac
 import json
 import logging
+import os
 import pickle
+import secrets
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -27,6 +30,55 @@ except ImportError:
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+_CACHE_BLOB_VERSION = b"v1"
+_CACHE_SIGNING_KEY_ENV = "AUDORA_CACHE_SIGNING_KEY"
+_runtime_cache_signing_key: bytes | None = None
+
+
+def _get_cache_signing_key() -> bytes:
+    """Get HMAC key used to authenticate serialized cache payloads."""
+    env_key = os.getenv(_CACHE_SIGNING_KEY_ENV)
+    if env_key:
+        return env_key.encode("utf-8")
+
+    # Fallback keeps caches process-local when env key isn't configured.
+    global _runtime_cache_signing_key
+    if _runtime_cache_signing_key is None:
+        _runtime_cache_signing_key = secrets.token_bytes(32)
+        logger.warning(
+            "No %s configured; using ephemeral cache signing key (Redis cache won't persist across restarts)",
+            _CACHE_SIGNING_KEY_ENV,
+        )
+    return _runtime_cache_signing_key
+
+
+def _serialize_cache_value(value: Any) -> bytes:
+    """Serialize and sign cache payload to prevent tampering."""
+    payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    signature = (
+        hmac.new(_get_cache_signing_key(), payload, hashlib.sha256).hexdigest().encode("ascii")
+    )
+    return b":".join([_CACHE_BLOB_VERSION, signature, payload])
+
+
+def _deserialize_cache_value(raw_value: bytes | bytearray) -> Any:
+    """Verify signature and deserialize cache payload."""
+    if not isinstance(raw_value, (bytes, bytearray)):
+        raise ValueError("Cache payload must be bytes")
+
+    parts = bytes(raw_value).split(b":", 2)
+    if len(parts) != 3 or parts[0] != _CACHE_BLOB_VERSION:
+        raise ValueError("Unsigned or unsupported cache payload format")
+
+    _version, signature, payload = parts
+    expected_signature = hmac.new(_get_cache_signing_key(), payload, hashlib.sha256).hexdigest().encode(
+        "ascii"
+    )
+    if not hmac.compare_digest(signature, expected_signature):
+        raise ValueError("Cache payload signature verification failed")
+
+    return pickle.loads(payload)
 
 
 class CacheBackend:
@@ -156,7 +208,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Keep binary mode for signed payloads
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +226,10 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            return _deserialize_cache_value(value)
+        except ValueError as e:
+            logger.warning(f"Rejected Redis cache value for key {key}: {e}")
+            return None
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,7 +237,7 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = _serialize_cache_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
@@ -372,12 +427,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
