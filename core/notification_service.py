@@ -4,9 +4,11 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,6 +19,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -193,9 +196,64 @@ class EnhancedNotificationService:
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
+            if os.name != "nt":
+                os.chmod(config_path, 0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _allow_private_webhooks(self) -> bool:
+        """Whether private network webhook targets are allowed."""
+        return os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _is_restricted_ip(self, ip: str) -> bool:
+        """Return True when the IP belongs to a non-public range."""
+        try:
+            parsed = ipaddress.ip_address(ip)
+            return (
+                parsed.is_private
+                or parsed.is_loopback
+                or parsed.is_link_local
+                or parsed.is_multicast
+                or parsed.is_reserved
+                or parsed.is_unspecified
+            )
+        except ValueError:
+            return True
+
+    def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
+        """Validate outbound webhook URL to reduce SSRF risk."""
+        parsed = urlparse(url.strip())
+        if parsed.scheme != "https":
+            raise ValueError("Webhook URL must use HTTPS")
+        if not parsed.hostname:
+            raise ValueError("Webhook URL must include a valid hostname")
+
+        hostname = parsed.hostname
+        if hostname.lower() == "localhost":
+            raise ValueError("Localhost webhook URLs are not allowed")
+
+        resolved_ips = set()
+        try:
+            # Validate all resolved addresses to avoid DNS-based bypass.
+            for info in socket.getaddrinfo(hostname, parsed.port or 443, proto=socket.IPPROTO_TCP):
+                resolved_ips.add(info[4][0])
+        except socket.gaierror as e:
+            raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
+
+        if not allow_private:
+            for ip in resolved_ips:
+                if self._is_restricted_ip(ip):
+                    raise ValueError(
+                        "Webhook URL resolves to a private or restricted network address"
+                    )
+
+        return url
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -542,6 +600,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Slack webhook URL not configured"}
 
         try:
+            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
             # Create Slack message format
             color_map = {
                 NotificationPriority.LOW: "good",
@@ -616,6 +675,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Discord webhook URL not configured"}
 
         try:
+            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
             # Format content for Discord
             content = message.content
             if message.template_vars:
@@ -692,6 +752,9 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
+            url = self._validate_webhook_url(
+                url, allow_private=self._allow_private_webhooks()
+            )
             # Prepare payload
             payload = {
                 "title": message.title,
