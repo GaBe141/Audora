@@ -7,7 +7,6 @@ fallback to in-memory caching when Redis is unavailable.
 import hashlib
 import json
 import logging
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -128,7 +127,10 @@ class LocalCacheBackend(CacheBackend):
 
 
 class RedisCacheBackend(CacheBackend):
-    """Redis cache backend with connection pooling."""
+    """Redis cache backend with connection pooling.
+
+    Uses JSON serialization to avoid unsafe pickle-based deserialization.
+    """
 
     def __init__(
         self,
@@ -156,7 +158,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Keep bytes; decode explicitly for JSON parsing.
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +176,20 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            raw_value = value.decode("utf-8") if isinstance(value, bytes) else value
+            payload = json.loads(raw_value)
+
+            # Treat malformed payloads as cache misses and remove bad entries.
+            if not isinstance(payload, dict) or payload.get("format") != "json" or "data" not in payload:
+                logger.warning(f"Invalid Redis cache payload for key {key}; deleting entry")
+                self.delete(key)
+                return None
+
+            return payload["data"]
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            logger.warning(f"Invalid Redis cache encoding for key {key}: {e}; deleting entry")
+            self.delete(key)
+            return None
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,7 +197,12 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = json.dumps({"format": "json", "data": value}, ensure_ascii=True).encode("utf-8")
+        except (TypeError, ValueError) as e:
+            logger.warning(f"Skipping Redis cache set for key {key}: value is not JSON-serializable ({e})")
+            return
+
+        try:
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
@@ -277,7 +297,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable for Redis backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)

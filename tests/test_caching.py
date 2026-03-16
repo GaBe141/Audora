@@ -4,6 +4,7 @@ import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +81,58 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+
+class _FakeRedisClient:
+    """Minimal Redis client double for serialization behavior tests."""
+
+    def __init__(self):
+        self.store: dict[str, bytes] = {}
+
+    def get(self, key: str):
+        return self.store.get(key)
+
+    def set(self, key: str, value: bytes):
+        self.store[key] = value
+
+    def setex(self, key: str, _ttl: int, value: bytes):
+        self.store[key] = value
+
+    def delete(self, key: str):
+        self.store.pop(key, None)
+
+    def exists(self, key: str):
+        return int(key in self.store)
+
+
+class TestRedisCacheBackendSerialization:
+    """Tests for RedisCacheBackend safe JSON serialization/deserialization."""
+
+    def _backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._client = _FakeRedisClient()
+        return backend
+
+    def test_set_get_round_trip_json_payload(self):
+        backend = self._backend()
+        payload = {"track": "Song", "score": 91, "tags": ["viral", "new"]}
+
+        backend.set("k1", payload, ttl=60)
+
+        assert backend.get("k1") == payload
+
+    def test_get_invalid_payload_returns_none_and_removes_entry(self):
+        backend = self._backend()
+        backend._client.set("bad", b"not-json")
+
+        assert backend.get("bad") is None
+        assert backend._client.get("bad") is None
+
+    def test_set_non_json_serializable_value_is_skipped(self):
+        backend = self._backend()
+        backend.set("bad", {"items": {1, 2, 3}})
+
+        assert backend.get("bad") is None
 
 
 class TestCachedDecorator:
