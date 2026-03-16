@@ -4,9 +4,11 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,6 +19,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -112,6 +115,11 @@ class EnhancedNotificationService:
 
     def _load_config(self, config_file: str | None) -> dict[str, Any]:
         """Load notification configuration."""
+        webhook_token = os.getenv("WEBHOOK_TOKEN", "").strip()
+        webhook_headers = {"Content-Type": "application/json"}
+        if webhook_token:
+            webhook_headers["Authorization"] = f"Bearer {webhook_token}"
+
         default_config = {
             "enabled": True,
             "default_channels": ["console"],
@@ -142,10 +150,7 @@ class EnhancedNotificationService:
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
-                },
+                "headers": webhook_headers,
                 "timeout": 30,
             },
             "sms": {
@@ -204,6 +209,53 @@ class EnhancedNotificationService:
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    @staticmethod
+    def _is_disallowed_ip(ip_str: str) -> bool:
+        """Reject non-global IPs to prevent SSRF to internal networks."""
+        try:
+            return not ipaddress.ip_address(ip_str).is_global
+        except ValueError:
+            return True
+
+    def _is_safe_webhook_url(self, url: str) -> tuple[bool, str]:
+        """Validate webhook URL to mitigate SSRF."""
+        parsed = urlparse(str(url).strip())
+        if parsed.scheme.lower() != "https":
+            return False, "webhook URL must use https"
+
+        if parsed.username or parsed.password:
+            return False, "URL credentials are not allowed"
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False, "missing hostname"
+
+        normalized_host = hostname.lower().rstrip(".")
+        if normalized_host == "localhost" or normalized_host.endswith(".local"):
+            return False, "local hostnames are not allowed"
+
+        # Direct IPs are fast to validate.
+        if self._is_disallowed_ip(normalized_host):
+            try:
+                ipaddress.ip_address(normalized_host)
+            except ValueError:
+                pass
+            else:
+                return False, "non-public IPs are not allowed"
+
+        # Resolve DNS and block private/link-local/loopback ranges.
+        try:
+            records = socket.getaddrinfo(hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+        except socket.gaierror:
+            return False, "hostname could not be resolved"
+
+        for record in records:
+            resolved_ip = record[4][0]
+            if self._is_disallowed_ip(resolved_ip):
+                return False, "hostname resolves to a non-public IP"
+
+        return True, ""
 
     def _load_templates(self) -> dict[str, str]:
         """Load message templates."""
@@ -541,6 +593,11 @@ System status: {{ system_status }}
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
 
+        is_safe, error = self._is_safe_webhook_url(webhook_url)
+        if not is_safe:
+            self.logger.warning(f"Rejected Slack webhook URL: {error}")
+            return {"success": False, "error": f"Invalid Slack webhook URL: {error}"}
+
         try:
             # Create Slack message format
             color_map = {
@@ -614,6 +671,11 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+
+        is_safe, error = self._is_safe_webhook_url(webhook_url)
+        if not is_safe:
+            self.logger.warning(f"Rejected Discord webhook URL: {error}")
+            return {"success": False, "error": f"Invalid Discord webhook URL: {error}"}
 
         try:
             # Format content for Discord
@@ -690,6 +752,11 @@ System status: {{ system_status }}
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
+
+        is_safe, error = self._is_safe_webhook_url(url)
+        if not is_safe:
+            self.logger.warning(f"Rejected custom webhook URL: {error}")
+            return {"success": False, "error": f"Invalid webhook URL: {error}"}
 
         try:
             # Prepare payload
