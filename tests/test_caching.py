@@ -2,8 +2,12 @@
 
 import time
 
+import pandas as pd
+
 from core.caching import (
     LocalCacheBackend,
+    _deserialize_cache_value,
+    _serialize_cache_value,
 )
 
 
@@ -118,3 +122,37 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSafeCacheSerialization:
+    """Tests for safe JSON serialization used by Redis backend."""
+
+    def test_round_trip_primitives_and_collections(self):
+        value = {
+            "name": "track",
+            "scores": [1, 2, 3],
+            "tuple_data": ("a", "b"),
+            "set_data": {"x", "y"},
+            "bytes_data": b"abc",
+        }
+        encoded = _serialize_cache_value(value)
+        decoded = _deserialize_cache_value(encoded)
+
+        assert decoded["name"] == value["name"]
+        assert decoded["scores"] == value["scores"]
+        assert decoded["tuple_data"] == value["tuple_data"]
+        assert set(decoded["set_data"]) == value["set_data"]
+        assert decoded["bytes_data"] == value["bytes_data"]
+
+    def test_round_trip_pandas_dataframe(self):
+        df = pd.DataFrame(
+            {
+                "track_name": ["Song A", "Song B"],
+                "score": [95.2, 89.7],
+            }
+        )
+        encoded = _serialize_cache_value(df)
+        decoded = _deserialize_cache_value(encoded)
+
+        assert isinstance(decoded, pd.DataFrame)
+        assert decoded.equals(df)
