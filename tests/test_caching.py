@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,38 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisPayloadSigning:
+    """Tests for signed Redis payload handling without requiring a Redis server."""
+
+    @staticmethod
+    def _backend_with_key() -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key-32-bytes-minimum"
+        return backend
+
+    def test_signed_payload_round_trip(self):
+        backend = self._backend_with_key()
+        value = {"track": "Song A", "score": 92}
+        payload = backend._serialize(value)
+        assert backend._deserialize(payload) == value
+
+    def test_rejects_tampered_payload(self):
+        backend = self._backend_with_key()
+        payload = bytearray(backend._serialize({"ok": True}))
+        payload[-1] ^= 0x01
+        try:
+            backend._deserialize(bytes(payload))
+            assert False, "Expected ValueError for tampered cache payload"
+        except ValueError as exc:
+            assert "signature mismatch" in str(exc)
+
+    def test_rejects_legacy_unsigned_pickle_payload(self):
+        backend = self._backend_with_key()
+        legacy_payload = pickle.dumps({"legacy": True})
+        try:
+            backend._deserialize(legacy_payload)
+            assert False, "Expected ValueError for legacy unsigned payload"
+        except ValueError as exc:
+            assert "legacy or unknown cache payload format" in str(exc)
