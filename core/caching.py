@@ -159,16 +159,10 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Keep binary mode for signed payloads
         )
         self._client = redis.Redis(connection_pool=self._pool)
-        signing_key = os.getenv("AUDORA_CACHE_SIGNING_KEY") or password
-        if not signing_key:
-            raise ValueError(
-                "Redis cache requires AUDORA_CACHE_SIGNING_KEY "
-                "(or Redis password) for signed cache payloads"
-            )
-        self._signing_key = signing_key.encode("utf-8")
+        self._signing_key = self._get_signing_key()
 
         # Test connection
         try:
@@ -177,6 +171,62 @@ class RedisCacheBackend(CacheBackend):
         except redis.ConnectionError as e:
             logger.error(f"Failed to connect to Redis: {e}")
             raise
+
+    def _get_signing_key(self) -> bytes:
+        """Get cache signing key used to verify serialized payload integrity."""
+        configured_key = os.getenv("AUDORA_CACHE_SIGNING_KEY", "").strip()
+        if configured_key:
+            return configured_key.encode("utf-8")
+
+        # Fallback to process-local random key to prevent unsigned pickle loading.
+        # This keeps the cache safe by default, with only a reduced cross-process hit rate.
+        logger.warning(
+            "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
+            "Set AUDORA_CACHE_SIGNING_KEY for shared Redis cache across processes."
+        )
+        return os.urandom(32)
+
+    def _serialize(self, value: Any) -> bytes:
+        """Serialize cache value with integrity protection."""
+        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+    def _deserialize(self, value: bytes) -> Any | None:
+        """Deserialize cache value only after signature verification."""
+        try:
+            envelope = json.loads(value.decode("utf-8"))
+            if (
+                not isinstance(envelope, dict)
+                or envelope.get("v") != 1
+                or envelope.get("alg") != "HMAC-SHA256"
+                or "sig" not in envelope
+                or "payload" not in envelope
+            ):
+                logger.warning("Rejected cache entry with invalid serialization envelope")
+                return None
+
+            payload_b64 = envelope["payload"]
+            if not isinstance(payload_b64, str):
+                logger.warning("Rejected cache entry with non-string payload")
+                return None
+
+            payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
+                logger.warning("Rejected cache entry with invalid signature")
+                return None
+
+            return pickle.loads(payload)
+        except Exception as e:
+            logger.error(f"Failed to deserialize cache entry: {e}")
+            return None
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
@@ -203,44 +253,6 @@ class RedisCacheBackend(CacheBackend):
                 self._client.set(key, serialized)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
-
-    def _serialize(self, value: Any) -> bytes:
-        """Serialize and sign cache payload to prevent Redis tampering."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
-        envelope = {
-            "version": 1,
-            "signature": signature,
-            "payload": base64.b64encode(payload).decode("ascii"),
-        }
-        return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
-
-    def _deserialize(self, value: bytes) -> Any | None:
-        """Verify and deserialize signed cache payload."""
-        try:
-            envelope = json.loads(value.decode("utf-8"))
-            payload_b64 = envelope["payload"]
-            signature = envelope["signature"]
-            version = envelope["version"]
-        except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
-            return None
-
-        if version != 1 or not isinstance(payload_b64, str) or not isinstance(signature, str):
-            return None
-
-        try:
-            payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
-        except Exception:
-            return None
-
-        expected_signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected_signature):
-            return None
-
-        try:
-            return pickle.loads(payload)
-        except Exception:
-            return None
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
