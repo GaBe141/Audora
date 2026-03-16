@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+import pytest
+
 from core.data_store import EnhancedMusicDataStore
 
 
@@ -100,3 +102,12 @@ class TestUpdateTrendsBulk:
     def test_update_trends_bulk_empty_returns_zero(self, data_store):
         assert data_store.update_trends_bulk([], {"score": 1}) == 0
         assert data_store.update_trends_bulk(["x"], {}) == 0
+
+    def test_update_trends_bulk_rejects_invalid_field_name(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        track_id = sample_trends[0].track_id
+
+        # Simulates SQL identifier injection through untrusted update keys.
+        malicious_updates = {"score = 0, is_active": 1}
+        with pytest.raises(ValueError):
+            data_store.update_trends_bulk([track_id], malicious_updates)
