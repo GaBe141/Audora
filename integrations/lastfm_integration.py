@@ -8,7 +8,8 @@ import requests
 
 from .config import get_config
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+# Last.fm supports HTTPS; enforce TLS to protect API keys in transit.
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
 class LastFmAPI:
@@ -17,6 +18,7 @@ class LastFmAPI:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.session = requests.Session()
+        self.session.headers.update({"User-Agent": "Audora/1.0"})
         self.last_request_time = 0
         self.rate_limit_delay = 0.2  # 5 requests per second max
 
@@ -35,7 +37,7 @@ class LastFmAPI:
         request_params = {"method": method, "api_key": self.api_key, "format": "json", **params}
 
         try:
-            response = self.session.get(BASE_URL, params=request_params, timeout=10)
+            response = self.session.get(BASE_URL, params=request_params, timeout=10, verify=True)
             response.raise_for_status()
             data = response.json()
 
