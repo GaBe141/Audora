@@ -9,7 +9,6 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import secrets
 import time
 from collections.abc import Callable
@@ -200,6 +199,53 @@ class RedisCacheBackend(CacheBackend):
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).digest()
         return signature + payload
 
+    def _serialize_value(self, value: Any) -> bytes | None:
+        """Serialize cache value into a JSON payload.
+
+        Redis cache payloads intentionally avoid pickle to prevent unsafe
+        deserialization paths. Unsupported objects are skipped gracefully.
+        """
+        # Keep common JSON-safe values fast-path.
+        if isinstance(value, (dict, list, tuple, str, int, float, bool, type(None))):
+            record = {"type": "json", "value": value}
+        # Optional pandas DataFrame support for cached query results.
+        elif value.__class__.__name__ == "DataFrame":
+            record = {"type": "dataframe_split", "value": value.to_dict(orient="split")}
+        else:
+            return None
+
+        return json.dumps(record, default=str, separators=(",", ":")).encode("utf-8")
+
+    def _deserialize_value(self, payload: bytes) -> Any | None:
+        """Deserialize JSON payload back to Python values."""
+        try:
+            record = json.loads(payload.decode("utf-8"))
+        except Exception:
+            return None
+
+        record_type = record.get("type")
+        if record_type == "json":
+            return record.get("value")
+
+        if record_type == "dataframe_split":
+            split_data = record.get("value")
+            if not isinstance(split_data, dict):
+                return None
+            if not {"data", "columns", "index"}.issubset(split_data):
+                return None
+            try:
+                import pandas as pd
+
+                return pd.DataFrame(
+                    data=split_data["data"],
+                    columns=split_data["columns"],
+                    index=split_data["index"],
+                )
+            except Exception:
+                return None
+
+        return None
+
     def _verify_signed_payload(self, signed_payload: bytes) -> bytes | None:
         """Verify payload signature and return original payload if valid."""
         if len(signed_payload) <= 32:
@@ -231,7 +277,13 @@ class RedisCacheBackend(CacheBackend):
                 self._client.delete(key)
                 return None
 
-            return pickle.loads(payload)
+            deserialized = self._deserialize_value(payload)
+            if deserialized is None:
+                logger.warning("Rejected invalid Redis cache payload format for key %s", key)
+                self._client.delete(key)
+                return None
+
+            return deserialized
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -239,7 +291,14 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
+            if serialized is None:
+                logger.debug(
+                    "Skipping Redis cache set for unsupported value type %s on key %s",
+                    type(value).__name__,
+                    key,
+                )
+                return
             if len(serialized) > self._max_payload_bytes:
                 logger.warning("Skipping cache set for oversized payload on key %s", key)
                 return
@@ -339,7 +398,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (JSON-serializable for Redis backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
