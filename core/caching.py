@@ -4,12 +4,13 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
+import base64
 import hashlib
 import json
 import logging
-import pickle
 import time
 from collections.abc import Callable
+from datetime import date, datetime
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
@@ -25,8 +26,14 @@ except ImportError:
     REDIS_AVAILABLE = False
     logger.warning("Redis not available, using local cache fallback")
 
+try:
+    import pandas as pd
+except ImportError:  # pragma: no cover - optional dependency
+    pd = None
+
 P = ParamSpec("P")
 R = TypeVar("R")
+_INVALID_CACHE_PAYLOAD = object()
 
 
 class CacheBackend:
@@ -156,7 +163,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Store encoded JSON bytes
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +181,12 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            deserialized = self._deserialize_value(value)
+            if deserialized is _INVALID_CACHE_PAYLOAD:
+                # Remove malformed payloads to avoid repeated decode work.
+                self._client.delete(key)
+                return None
+            return deserialized
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,13 +194,114 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    def _serialize_value(self, value: Any) -> bytes:
+        """Serialize value as JSON bytes using explicit type metadata."""
+        payload = self._encode_json_value(value)
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    def _deserialize_value(self, payload: bytes) -> Any | object:
+        """Deserialize typed JSON payload from Redis safely."""
+        try:
+            decoded = json.loads(payload.decode("utf-8"))
+            return self._decode_json_value(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.warning(f"Ignoring invalid Redis cache payload: {e}")
+            return _INVALID_CACHE_PAYLOAD
+
+    def _encode_json_value(self, value: Any) -> Any:
+        """Recursively encode Python objects into JSON-safe typed payloads."""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return {"type": "primitive", "value": value}
+
+        if isinstance(value, bytes):
+            return {"type": "bytes", "value": base64.b64encode(value).decode("ascii")}
+
+        if isinstance(value, tuple):
+            return {"type": "tuple", "value": [self._encode_json_value(item) for item in value]}
+
+        if isinstance(value, list):
+            return {"type": "list", "value": [self._encode_json_value(item) for item in value]}
+
+        if isinstance(value, dict):
+            return {
+                "type": "dict",
+                "value": {str(k): self._encode_json_value(v) for k, v in value.items()},
+            }
+
+        if isinstance(value, datetime):
+            return {"type": "datetime", "value": value.isoformat()}
+
+        if isinstance(value, date):
+            return {"type": "date", "value": value.isoformat()}
+
+        if pd is not None and isinstance(value, pd.DataFrame):
+            return {"type": "pandas_dataframe", "value": value.to_json(orient="split", date_format="iso")}
+
+        if pd is not None and isinstance(value, pd.Series):
+            return {"type": "pandas_series", "value": value.to_json(orient="split", date_format="iso")}
+
+        # Fallback preserves cacheability without unsafe object reconstruction.
+        return {"type": "string_repr", "value": str(value)}
+
+    def _decode_json_value(self, payload: Any) -> Any:
+        """Recursively decode typed JSON payloads back to Python objects."""
+        if not isinstance(payload, dict):
+            raise TypeError("Cache payload must be a dict")
+        value_type = payload.get("type")
+        value = payload.get("value")
+
+        if value_type == "primitive":
+            return value
+        if value_type == "bytes":
+            if not isinstance(value, str):
+                raise TypeError("Invalid bytes payload")
+            return base64.b64decode(value.encode("ascii"))
+        if value_type == "tuple":
+            if not isinstance(value, list):
+                raise TypeError("Invalid tuple payload")
+            return tuple(self._decode_json_value(item) for item in value)
+        if value_type == "list":
+            if not isinstance(value, list):
+                raise TypeError("Invalid list payload")
+            return [self._decode_json_value(item) for item in value]
+        if value_type == "dict":
+            if not isinstance(value, dict):
+                raise TypeError("Invalid dict payload")
+            return {k: self._decode_json_value(v) for k, v in value.items()}
+        if value_type == "datetime":
+            if not isinstance(value, str):
+                raise TypeError("Invalid datetime payload")
+            return datetime.fromisoformat(value)
+        if value_type == "date":
+            if not isinstance(value, str):
+                raise TypeError("Invalid date payload")
+            return date.fromisoformat(value)
+        if value_type == "pandas_dataframe":
+            if pd is None:
+                raise TypeError("pandas is not available")
+            if not isinstance(value, str):
+                raise TypeError("Invalid pandas DataFrame payload")
+            return pd.read_json(value, orient="split")
+        if value_type == "pandas_series":
+            if pd is None:
+                raise TypeError("pandas is not available")
+            if not isinstance(value, str):
+                raise TypeError("Invalid pandas Series payload")
+            return pd.read_json(value, orient="split", typ="series")
+        if value_type == "string_repr":
+            if not isinstance(value, str):
+                raise TypeError("Invalid string representation payload")
+            return value
+
+        raise TypeError(f"Unsupported cache payload type: {value_type}")
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
@@ -277,7 +390,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +485,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

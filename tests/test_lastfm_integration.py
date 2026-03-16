@@ -9,11 +9,14 @@ if "integrations.config" not in sys.modules:
     _config_mock.get_config = lambda: MagicMock(get_lastfm_config=lambda: {"api_key": "test_key"})
     sys.modules["integrations.config"] = _config_mock
 
-from integrations.lastfm_integration import LastFmAPI
+from integrations.lastfm_integration import BASE_URL, LastFmAPI
 
 
 class TestLastFmAPISuccess:
     """Test successful API responses with mocked session.get."""
+
+    def test_base_url_uses_https(self):
+        assert BASE_URL.startswith("https://")
 
     def test_get_top_artists_global_parses_response(self):
         api = LastFmAPI(api_key="test_key")
@@ -34,6 +37,9 @@ class TestLastFmAPISuccess:
         }
         with patch.object(api.session, "get", return_value=mock_response):
             df = api.get_top_artists_global(limit=5)
+
+        called_url = api.session.get.call_args.args[0]
+        assert called_url.startswith("https://")
         assert not df.empty
         assert len(df) == 1
         assert df.iloc[0]["name"] == "Artist One"
