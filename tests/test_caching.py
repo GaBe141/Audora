@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
 import time
+from datetime import date, datetime
+from unittest.mock import MagicMock
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,44 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSecurity:
+    """Security-focused tests for Redis cache serialization/deserialization."""
+
+    def test_serialize_deserialize_typed_payload(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = {
+            "bytes": b"secret-bytes",
+            "tuple": (1, "two"),
+            "date": date(2026, 1, 1),
+            "datetime": datetime(2026, 1, 1, 12, 30, 0),
+        }
+        serialized = backend._serialize_value(payload)
+        restored = backend._deserialize_value(serialized)
+        assert restored["bytes"] == b"secret-bytes"
+        assert restored["tuple"] == (1, "two")
+        assert restored["date"] == date(2026, 1, 1)
+        assert restored["datetime"] == datetime(2026, 1, 1, 12, 30, 0)
+
+    def test_get_invalid_payload_deletes_cache_key(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._client = MagicMock()
+        backend._client.get.return_value = b"not-json-payload"
+
+        assert backend.get("poisoned") is None
+        backend._client.delete.assert_called_once_with("poisoned")
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", args=("a", 1), kwargs={"b": 2})
+        parts = key.split(":")
+        assert len(parts) == 3
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+
+        expected_args = hashlib.sha256(json.dumps(("a", 1), sort_keys=True, default=str).encode()).hexdigest()
+        expected_kwargs = hashlib.sha256(
+            json.dumps({"b": 2}, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert parts[1] == expected_args
+        assert parts[2] == expected_kwargs
