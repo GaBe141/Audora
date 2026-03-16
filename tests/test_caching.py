@@ -1,9 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
 import time
+from datetime import datetime
 
 from core.caching import (
     LocalCacheBackend,
+    _deserialize_cache_value,
+    _serialize_cache_value,
 )
 
 
@@ -80,6 +83,36 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+    def test_build_cache_key_uses_strong_hash(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", args=("value",), kwargs={"x": 1})
+        key_parts = key.split(":")
+        assert len(key_parts) == 3
+        # SHA-256 digest length (hex)
+        assert len(key_parts[1]) == 64
+        assert len(key_parts[2]) == 64
+
+
+class TestCacheSerialization:
+    """Tests for secure cache serialization helpers."""
+
+    def test_round_trip_supported_types(self):
+        payload = {
+            "message": "ok",
+            "count": 3,
+            "created_at": datetime(2026, 1, 1, 12, 0, 0),
+            "tags": ("a", "b"),
+            "blob": b"hello",
+            "flags": {"x", "y"},
+        }
+        encoded = _serialize_cache_value(payload)
+        decoded = _deserialize_cache_value(encoded)
+        assert decoded["message"] == "ok"
+        assert decoded["count"] == 3
+        assert decoded["created_at"] == datetime(2026, 1, 1, 12, 0, 0)
+        assert decoded["tags"] == ("a", "b")
+        assert decoded["blob"] == b"hello"
+        assert decoded["flags"] == {"x", "y"}
 
 
 class TestCachedDecorator:
