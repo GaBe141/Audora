@@ -3,7 +3,9 @@
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,45 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for RedisCacheBackend serialization."""
+
+    def test_secure_json_roundtrip_for_supported_types(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        original = {
+            "text": "value",
+            "bytes": b"hello",
+            "tuple": (1, "a"),
+            "set": {1, 2, 3},
+            "list": [1, 2, 3],
+        }
+
+        serialized = backend._serialize_value(original)
+        restored = backend._deserialize_value(serialized)
+
+        assert restored is not None
+        assert restored["text"] == original["text"]
+        assert restored["bytes"] == original["bytes"]
+        assert restored["tuple"] == original["tuple"]
+        assert restored["set"] == original["set"]
+        assert restored["list"] == original["list"]
+
+    def test_deserialize_rejects_legacy_non_json_payload(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        assert backend._deserialize_value(b"\x80\x04legacy-pickle-data") is None
+
+
+class TestCacheKeySecurity:
+    """Tests for secure cache key hashing behavior."""
+
+    def test_cache_key_uses_sha256_hash_segments(self):
+        backend = LocalCacheBackend(max_size=10)
+        manager = CacheManager(backend=backend, default_ttl=60, key_prefix="test")
+        key = manager._build_cache_key("fn", (1, 2), {"a": 3})
+        parts = key.split(":")
+
+        assert parts[0] == "fn"
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
