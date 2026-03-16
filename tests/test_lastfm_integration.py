@@ -35,10 +35,10 @@ class TestLastFmAPISuccess:
                 ],
             },
         }
-        with patch.object(api.session, "get", return_value=mock_response):
+        with patch.object(api.session, "get", return_value=mock_response) as mock_get:
             df = api.get_top_artists_global(limit=5)
 
-        called_url = api.session.get.call_args.args[0]
+        called_url = mock_get.call_args.args[0]
         assert called_url.startswith("https://")
         assert not df.empty
         assert len(df) == 1
