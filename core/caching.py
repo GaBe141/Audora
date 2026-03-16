@@ -5,6 +5,7 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -160,7 +161,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Return bytes so decoding stays explicit
         )
         self._client = redis.Redis(connection_pool=self._pool)
         signing_key = os.getenv("AUDORA_CACHE_SIGNING_KEY")
@@ -188,7 +189,7 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            decoded_value = value.decode("utf-8")
+            decoded_value = value.decode("utf-8") if isinstance(value, bytes) else str(value)
             payload = json.loads(decoded_value)
             if not isinstance(payload, dict):
                 logger.warning(f"Invalid cache payload format for key {key}, deleting entry")
@@ -206,8 +207,9 @@ class RedisCacheBackend(CacheBackend):
                 self._client.delete(key)
                 return None
 
-            return pickle.loads(serialized)  # nosec B301 - verified with HMAC first
-        except (KeyError, ValueError, TypeError) as e:
+            # Payload authenticity is verified with HMAC before deserialization.
+            return pickle.loads(serialized)  # nosec B301
+        except (KeyError, ValueError, TypeError, UnicodeDecodeError, binascii.Error) as e:
             logger.warning(f"Invalid serialized cache payload for key {key}: {e}")
             self._client.delete(key)
             return None
