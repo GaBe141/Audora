@@ -4,10 +4,12 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 import smtplib
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -17,6 +19,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -204,6 +207,68 @@ class EnhancedNotificationService:
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    def _is_non_public_ip(self, ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+        """Return True if IP belongs to non-public/risky ranges for outbound webhooks."""
+        return (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        )
+
+    def _validate_outbound_webhook_url(
+        self,
+        raw_url: str,
+        channel_name: str,
+    ) -> tuple[bool, str | None]:
+        """Validate webhook URL to mitigate SSRF and insecure transport."""
+        if not raw_url:
+            return False, f"{channel_name} webhook URL not configured"
+
+        parsed = urlparse(raw_url.strip())
+        if parsed.scheme.lower() != "https":
+            return False, f"{channel_name} webhook URL must use HTTPS"
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False, f"{channel_name} webhook URL is missing host"
+
+        hostname = hostname.strip().lower()
+        if hostname == "localhost" or hostname.endswith(".local"):
+            return False, f"{channel_name} webhook URL targets a local address"
+
+        # If host is an IP literal, validate it directly.
+        try:
+            ip_obj = ipaddress.ip_address(hostname)
+            if self._is_non_public_ip(ip_obj):
+                return False, f"{channel_name} webhook URL targets non-public IP space"
+            return True, None
+        except ValueError:
+            pass
+
+        # Resolve DNS and ensure it doesn't map to private/internal IP ranges.
+        try:
+            resolved = socket.getaddrinfo(
+                hostname,
+                parsed.port or 443,
+                type=socket.SOCK_STREAM,
+            )
+        except socket.gaierror:
+            return False, f"{channel_name} webhook URL host cannot be resolved"
+
+        for addr_info in resolved:
+            ip_str = addr_info[4][0]
+            try:
+                ip_obj = ipaddress.ip_address(ip_str)
+            except ValueError:
+                continue
+            if self._is_non_public_ip(ip_obj):
+                return False, f"{channel_name} webhook URL resolves to non-public IP space"
+
+        return True, None
 
     def _load_templates(self) -> dict[str, str]:
         """Load message templates."""
@@ -540,6 +605,9 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
+        is_valid_url, error = self._validate_outbound_webhook_url(webhook_url, "Slack")
+        if not is_valid_url:
+            return {"success": False, "error": error}
 
         try:
             # Create Slack message format
@@ -614,6 +682,9 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+        is_valid_url, error = self._validate_outbound_webhook_url(webhook_url, "Discord")
+        if not is_valid_url:
+            return {"success": False, "error": error}
 
         try:
             # Format content for Discord
@@ -690,6 +761,9 @@ System status: {{ system_status }}
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
+        is_valid_url, error = self._validate_outbound_webhook_url(url, "Custom")
+        if not is_valid_url:
+            return {"success": False, "error": error}
 
         try:
             # Prepare payload
