@@ -775,6 +775,24 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
+        # Restrict dynamic column names to known-safe trend columns.
+        allowed_update_fields = {
+            "platform",
+            "track_name",
+            "artist",
+            "score",
+            "rank",
+            "region",
+            "trend_date",
+            "first_detected",
+            "metadata",
+            "is_active",
+        }
+        invalid_fields = set(updates) - allowed_update_fields
+        if invalid_fields:
+            invalid_list = ", ".join(sorted(invalid_fields))
+            raise ValueError(f"Invalid update field(s): {invalid_list}")
+
         # Build SET clause
         set_clauses = [f"{field} = ?" for field in updates]
         params = list(updates.values())
