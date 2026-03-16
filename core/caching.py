@@ -9,7 +9,8 @@ import hmac
 import json
 import logging
 import os
-import pickle
+# Redis values are signed with HMAC before deserialization.
+import pickle  # nosec B403
 import secrets
 import time
 from collections.abc import Callable
@@ -235,7 +236,7 @@ class RedisCacheBackend(CacheBackend):
             if payload is None:
                 return None
 
-            return pickle.loads(payload)
+            return pickle.loads(payload)  # nosec B301
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
