@@ -1,5 +1,14 @@
 """Security tests for outbound webhook URL validation."""
 
+import sys
+import types
+
+# Allow importing notification service in minimal test environments.
+if "aiohttp" not in sys.modules:
+    aiohttp_stub = types.ModuleType("aiohttp")
+    aiohttp_stub.ClientTimeout = object  # type: ignore[attr-defined]
+    sys.modules["aiohttp"] = aiohttp_stub
+
 from core.notification_service import EnhancedNotificationService
 
 
