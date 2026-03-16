@@ -3,7 +3,9 @@
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,34 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSerialization:
+    """Security-focused serialization tests for Redis cache backend."""
+
+    def test_json_round_trip_serialization(self):
+        value = {"name": "track", "score": 88, "tags": ["pop", "indie"]}
+        serialized = RedisCacheBackend._serialize_cache_value(value)
+        restored = RedisCacheBackend._deserialize_cache_value(serialized)
+
+        assert isinstance(serialized, bytes)
+        assert restored == value
+
+    def test_legacy_pickle_payload_is_rejected(self):
+        # Typical pickle header bytes should no longer be accepted.
+        payload = b"\x80\x04K\x01."
+        restored = RedisCacheBackend._deserialize_cache_value(payload)
+        assert restored is None
+
+
+class TestCacheKeyHashing:
+    """Ensure cache keys use strong hashing."""
+
+    def test_build_cache_key_uses_sha256_hashes(self):
+        cache = CacheManager(backend=LocalCacheBackend())
+        key = cache._build_cache_key("prefix", ("a", 1), {"flag": True})
+        parts = key.split(":")
+
+        # prefix + positional hash + keyword hash
+        assert len(parts) == 3
+        assert all(len(part) == 64 for part in parts[1:])
