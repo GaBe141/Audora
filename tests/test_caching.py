@@ -1,7 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
 
+import pytest
+
+import core.caching as caching
 from core.caching import (
     LocalCacheBackend,
 )
@@ -118,3 +122,31 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedCacheSerialization:
+    """Security-focused tests for signed cache payload handling."""
+
+    def test_signed_payload_round_trip(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "unit-test-signing-key")
+        payload = {"track": "Example", "score": 98.5}
+
+        serialized = caching._serialize_cache_value(payload)
+
+        assert caching._deserialize_cache_value(serialized) == payload
+
+    def test_rejects_unsigned_pickle_payload(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "unit-test-signing-key")
+        legacy_payload = pickle.dumps({"legacy": True})
+
+        with pytest.raises(ValueError, match="Unsigned or unsupported"):
+            caching._deserialize_cache_value(legacy_payload)
+
+    def test_rejects_tampered_signed_payload(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "unit-test-signing-key")
+        serialized = caching._serialize_cache_value({"safe": True})
+        tampered = bytearray(serialized)
+        tampered[-1] = tampered[-1] ^ 0x01
+
+        with pytest.raises(ValueError, match="signature verification failed"):
+            caching._deserialize_cache_value(bytes(tampered))
