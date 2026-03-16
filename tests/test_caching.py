@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,30 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for signed Redis payload serialization helpers."""
+
+    def test_serialize_deserialize_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        payload = backend._serialize({"k": "v", "n": 7})
+
+        assert isinstance(payload, bytes)
+        assert backend._deserialize(payload) == {"k": "v", "n": 7}
+
+    def test_deserialize_rejects_tampered_payload(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        payload = backend._serialize({"safe": True})
+        tampered_payload = payload[:-1] + bytes([payload[-1] ^ 0x01])
+
+        assert backend._deserialize(tampered_payload) is None
+
+    def test_deserialize_rejects_legacy_unsigned_pickle(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        legacy = pickle.dumps({"legacy": "value"})
+
+        assert backend._deserialize(legacy) is None
