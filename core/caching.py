@@ -4,11 +4,13 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
+import base64
 import hashlib
 import json
 import logging
-import pickle
 import time
+from datetime import date, datetime
+from io import StringIO
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -27,6 +29,113 @@ except ImportError:
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+
+def _encode_cache_value(value: Any) -> Any:
+    """Encode Python values into a JSON-safe, typed structure."""
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+
+    if isinstance(value, bytes):
+        return {
+            "__audora_type__": "bytes",
+            "value": base64.b64encode(value).decode("ascii"),
+        }
+
+    if isinstance(value, datetime):
+        return {"__audora_type__": "datetime", "value": value.isoformat()}
+
+    if isinstance(value, date):
+        return {"__audora_type__": "date", "value": value.isoformat()}
+
+    if isinstance(value, tuple):
+        return {"__audora_type__": "tuple", "value": [_encode_cache_value(v) for v in value]}
+
+    if isinstance(value, list):
+        return [_encode_cache_value(v) for v in value]
+
+    if isinstance(value, dict):
+        if not all(isinstance(k, str) for k in value):
+            raise TypeError("Cache only supports dictionaries with string keys")
+        return {k: _encode_cache_value(v) for k, v in value.items()}
+
+    try:
+        import pandas as pd
+
+        if isinstance(value, pd.DataFrame):
+            return {
+                "__audora_type__": "dataframe",
+                "orient": "split",
+                "value": value.to_json(orient="split", date_format="iso"),
+            }
+        if isinstance(value, pd.Series):
+            return {
+                "__audora_type__": "series",
+                "value": value.to_json(date_format="iso"),
+            }
+    except ImportError:
+        pass
+
+    raise TypeError(f"Unsupported cache value type: {type(value).__name__}")
+
+
+def _decode_cache_value(value: Any) -> Any:
+    """Decode JSON-safe cache payloads back into Python values."""
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+
+    if isinstance(value, list):
+        return [_decode_cache_value(v) for v in value]
+
+    if not isinstance(value, dict):
+        raise ValueError(f"Invalid cached payload type: {type(value).__name__}")
+
+    type_tag = value.get("__audora_type__")
+    if type_tag is None:
+        return {k: _decode_cache_value(v) for k, v in value.items()}
+
+    if type_tag == "bytes":
+        encoded = value.get("value")
+        if not isinstance(encoded, str):
+            raise ValueError("Invalid bytes payload")
+        return base64.b64decode(encoded.encode("ascii"))
+
+    if type_tag == "datetime":
+        raw = value.get("value")
+        if not isinstance(raw, str):
+            raise ValueError("Invalid datetime payload")
+        return datetime.fromisoformat(raw)
+
+    if type_tag == "date":
+        raw = value.get("value")
+        if not isinstance(raw, str):
+            raise ValueError("Invalid date payload")
+        return date.fromisoformat(raw)
+
+    if type_tag == "tuple":
+        tuple_values = value.get("value")
+        if not isinstance(tuple_values, list):
+            raise ValueError("Invalid tuple payload")
+        return tuple(_decode_cache_value(v) for v in tuple_values)
+
+    if type_tag == "dataframe":
+        import pandas as pd
+
+        dataframe_json = value.get("value")
+        orient = value.get("orient", "split")
+        if not isinstance(dataframe_json, str):
+            raise ValueError("Invalid dataframe payload")
+        return pd.read_json(StringIO(dataframe_json), orient=orient)
+
+    if type_tag == "series":
+        import pandas as pd
+
+        series_json = value.get("value")
+        if not isinstance(series_json, str):
+            raise ValueError("Invalid series payload")
+        return pd.read_json(StringIO(series_json), typ="series")
+
+    raise ValueError(f"Unsupported cached type tag: {type_tag}")
 
 
 class CacheBackend:
@@ -156,7 +265,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Keep raw bytes for explicit JSON decoding
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +283,12 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            try:
+                return self._deserialize(value)
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as e:
+                logger.warning(f"Discarding invalid cache payload for key {key}: {e}")
+                self.delete(key)
+                return None
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,13 +296,33 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
+        except TypeError as e:
+            logger.warning(f"Skipping cache set for unsupported value type at key {key}: {e}")
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    @staticmethod
+    def _serialize(value: Any) -> bytes:
+        """Serialize cache values to a typed JSON payload."""
+        payload = {"version": 1, "value": _encode_cache_value(value)}
+        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+    @staticmethod
+    def _deserialize(raw_value: bytes) -> Any:
+        """Deserialize typed JSON payloads from cache."""
+        payload = json.loads(raw_value.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Cache payload must be a JSON object")
+        if payload.get("version") != 1:
+            raise ValueError("Unsupported cache payload version")
+        if "value" not in payload:
+            raise ValueError("Cache payload missing value field")
+        return _decode_cache_value(payload["value"])
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
@@ -372,12 +506,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
