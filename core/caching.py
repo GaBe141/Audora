@@ -4,13 +4,15 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
+import base64
 import hashlib
 import json
 import logging
-import pickle
 import time
 from collections.abc import Callable
+from datetime import date, datetime, time as dt_time
 from functools import wraps
+from io import StringIO
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,120 @@ except ImportError:
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+_TYPE_KEY = "__audora_cache_type__"
+_VALUE_KEY = "value"
+
+
+def _to_json_safe(value: Any) -> Any:
+    """Convert supported Python objects into JSON-safe structures."""
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+
+    if isinstance(value, list):
+        return [_to_json_safe(item) for item in value]
+
+    if isinstance(value, tuple):
+        return {_TYPE_KEY: "tuple", _VALUE_KEY: [_to_json_safe(item) for item in value]}
+
+    if isinstance(value, set):
+        return {_TYPE_KEY: "set", _VALUE_KEY: [_to_json_safe(item) for item in value]}
+
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("Only dictionaries with string keys can be cached safely")
+        return {key: _to_json_safe(item) for key, item in value.items()}
+
+    if isinstance(value, bytes):
+        return {
+            _TYPE_KEY: "bytes",
+            _VALUE_KEY: base64.b64encode(value).decode("ascii"),
+        }
+
+    if isinstance(value, datetime):
+        return {_TYPE_KEY: "datetime", _VALUE_KEY: value.isoformat()}
+
+    if isinstance(value, date):
+        return {_TYPE_KEY: "date", _VALUE_KEY: value.isoformat()}
+
+    if isinstance(value, dt_time):
+        return {_TYPE_KEY: "time", _VALUE_KEY: value.isoformat()}
+
+    try:
+        import numpy as np
+
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return {_TYPE_KEY: "ndarray", _VALUE_KEY: value.tolist()}
+    except ImportError:
+        pass
+
+    try:
+        import pandas as pd
+
+        if isinstance(value, pd.DataFrame):
+            return {
+                _TYPE_KEY: "dataframe",
+                _VALUE_KEY: value.to_json(orient="split", date_format="iso"),
+            }
+        if isinstance(value, pd.Series):
+            return {_TYPE_KEY: "series", _VALUE_KEY: value.to_json(date_format="iso")}
+    except ImportError:
+        pass
+
+    raise TypeError(f"Unsupported cache value type: {type(value).__name__}")
+
+
+def _from_json_safe(value: Any) -> Any:
+    """Restore Python objects from JSON-safe structures."""
+    if isinstance(value, list):
+        return [_from_json_safe(item) for item in value]
+
+    if isinstance(value, dict):
+        cache_type = value.get(_TYPE_KEY)
+        if cache_type == "tuple":
+            return tuple(_from_json_safe(item) for item in value[_VALUE_KEY])
+        if cache_type == "set":
+            return set(_from_json_safe(item) for item in value[_VALUE_KEY])
+        if cache_type == "bytes":
+            return base64.b64decode(value[_VALUE_KEY].encode("ascii"))
+        if cache_type == "datetime":
+            return datetime.fromisoformat(value[_VALUE_KEY])
+        if cache_type == "date":
+            return date.fromisoformat(value[_VALUE_KEY])
+        if cache_type == "time":
+            return dt_time.fromisoformat(value[_VALUE_KEY])
+        if cache_type == "ndarray":
+            try:
+                import numpy as np
+
+                return np.array(value[_VALUE_KEY])
+            except ImportError:
+                return value[_VALUE_KEY]
+        if cache_type == "dataframe":
+            import pandas as pd
+
+            return pd.read_json(StringIO(value[_VALUE_KEY]), orient="split")
+        if cache_type == "series":
+            import pandas as pd
+
+            return pd.read_json(StringIO(value[_VALUE_KEY]), typ="series")
+        return {key: _from_json_safe(item) for key, item in value.items()}
+
+    return value
+
+
+def _serialize_cache_value(value: Any) -> bytes:
+    """Serialize cache value to UTF-8 JSON bytes."""
+    encoded = _to_json_safe(value)
+    return json.dumps(encoded, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
+def _deserialize_cache_value(payload: bytes) -> Any:
+    """Deserialize UTF-8 JSON bytes into Python objects."""
+    decoded = json.loads(payload.decode("utf-8"))
+    return _from_json_safe(decoded)
 
 
 class CacheBackend:
@@ -156,7 +272,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Keep raw bytes for explicit JSON decoding
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +290,7 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            return _deserialize_cache_value(value)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,7 +298,7 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = _serialize_cache_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
@@ -277,7 +393,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable by cache encoder)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +488,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode("utf-8")).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode("utf-8")).hexdigest())
 
         return ":".join(key_parts)
 
