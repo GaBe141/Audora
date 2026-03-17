@@ -4,10 +4,13 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -17,6 +20,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -465,6 +469,36 @@ System status: {{ system_status }}
 
         return datetime.now() - last_sent < cooldown_period
 
+    def _validate_outbound_url(self, url: str) -> None:
+        """Validate webhook URL to reduce SSRF risk."""
+        parsed = urlparse(url)
+        if parsed.scheme.lower() != "https":
+            raise ValueError("Only HTTPS webhook URLs are allowed")
+        if not parsed.hostname:
+            raise ValueError("Webhook URL must include a hostname")
+
+        hostname = parsed.hostname.strip().lower()
+        if hostname in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError("Localhost webhook URLs are not allowed")
+
+        try:
+            addr_info = socket.getaddrinfo(hostname, None)
+        except socket.gaierror as exc:
+            raise ValueError(f"Unable to resolve webhook hostname: {hostname}") from exc
+
+        for info in addr_info:
+            ip_text = info[4][0]
+            ip_obj = ipaddress.ip_address(ip_text)
+            if (
+                ip_obj.is_loopback
+                or ip_obj.is_private
+                or ip_obj.is_link_local
+                or ip_obj.is_multicast
+                or ip_obj.is_reserved
+                or ip_obj.is_unspecified
+            ):
+                raise ValueError(f"Webhook URL resolves to disallowed address: {ip_text}")
+
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
         email_config = self.config.get("email", {})
@@ -516,7 +550,10 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                tls_context = ssl.create_default_context()
+                server.ehlo()
+                server.starttls(context=tls_context)
+                server.ehlo()
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -542,6 +579,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Slack webhook URL not configured"}
 
         try:
+            self._validate_outbound_url(webhook_url)
             # Create Slack message format
             color_map = {
                 NotificationPriority.LOW: "good",
@@ -616,6 +654,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Discord webhook URL not configured"}
 
         try:
+            self._validate_outbound_url(webhook_url)
             # Format content for Discord
             content = message.content
             if message.template_vars:
@@ -692,6 +731,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
+            self._validate_outbound_url(url)
             # Prepare payload
             payload = {
                 "title": message.title,
