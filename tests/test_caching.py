@@ -2,7 +2,7 @@
 
 import time
 
-import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
@@ -134,6 +134,7 @@ class TestRedisCacheSerialization:
         assert backend._deserialize_value(serialized) == payload
 
     def test_dataframe_round_trip(self):
+        pd = pytest.importorskip("pandas")
         backend = RedisCacheBackend.__new__(RedisCacheBackend)
         df = pd.DataFrame({"track": ["A", "B"], "score": [95.5, 87.0]})
         serialized = backend._serialize_value(df)
