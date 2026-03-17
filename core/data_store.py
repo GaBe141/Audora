@@ -518,7 +518,7 @@ class EnhancedMusicDataStore:
                 conditions.append("region = ?")
                 params.append(region)
 
-            query = f"""  # nosec B608
+            query = f"""
             SELECT
                 platform, track_name, artist, score, rank, region, trend_date,
                 metadata, first_detected,
@@ -528,7 +528,7 @@ class EnhancedMusicDataStore:
             WHERE {' AND '.join(conditions)}
             ORDER BY score DESC, trend_date DESC
             LIMIT ?
-            """
+            """  # nosec B608
             params.append(limit)
 
             df = pd.read_sql_query(query, conn, params=tuple(params))
@@ -555,7 +555,7 @@ class EnhancedMusicDataStore:
                 conditions.append("status = ?")
                 params.append(status)
 
-            query = f"""  # nosec B608
+            query = f"""
             SELECT
                 track_name, artist, confidence, prediction_date,
                 predicted_peak_date, predicted_peak_score,
@@ -565,7 +565,7 @@ class EnhancedMusicDataStore:
             WHERE {' AND '.join(conditions)}
             ORDER BY prediction_date DESC, confidence DESC
             LIMIT ?
-            """
+            """  # nosec B608
             params.append(limit)
 
             df = pd.read_sql_query(query, conn, params=tuple(params))
@@ -670,7 +670,7 @@ class EnhancedMusicDataStore:
                 conditions.append("(track_name LIKE ? AND artist LIKE ?)")
                 params.extend([f"%{track_name}%", f"%{artist}%"])
 
-            query = f"""  # nosec B608
+            query = f"""
             SELECT
                 platform, track_id, track_name, artist, score, rank,
                 region, trend_date, metadata, first_detected
@@ -678,7 +678,7 @@ class EnhancedMusicDataStore:
             WHERE ({' OR '.join(conditions)})
             AND is_active = 1
             ORDER BY score DESC
-            """
+            """  # nosec B608
 
             df = pd.read_sql_query(query, conn, params=tuple(params))
 
@@ -723,7 +723,7 @@ class EnhancedMusicDataStore:
                 params.append(platform)
 
             # Get aggregate stats
-            stats_query = f"""  # nosec B608
+            stats_query = f"""
             SELECT
                 COUNT(DISTINCT track_name || artist) as unique_tracks,
                 COUNT(DISTINCT platform) as platforms,
@@ -732,19 +732,19 @@ class EnhancedMusicDataStore:
                 COUNT(*) as total_entries
             FROM trends
             WHERE {' AND '.join(conditions)}
-            """
+            """  # nosec B608
 
             stats = pd.read_sql_query(stats_query, conn, params=tuple(params)).to_dict("records")[0]
 
             # Get top tracks
-            top_tracks_query = f"""  # nosec B608
+            top_tracks_query = f"""
             SELECT
                 track_name, artist, platform, score, rank
             FROM trends
             WHERE {' AND '.join(conditions)}
             ORDER BY score DESC
             LIMIT 10
-            """
+            """  # nosec B608
 
             top_tracks = pd.read_sql_query(top_tracks_query, conn, params=tuple(params)).to_dict(
                 "records"
@@ -804,11 +804,11 @@ class EnhancedMusicDataStore:
         params.extend(track_ids)
 
         with self.get_connection() as conn:
-            query = f"""  # nosec B608
+            query = f"""
             UPDATE trends
             SET {', '.join(set_clauses)}, last_updated = CURRENT_TIMESTAMP
             WHERE track_id IN ({placeholders})
-            """
+            """  # nosec B608
 
             cursor = conn.cursor()
             cursor.execute(query, params)
@@ -956,11 +956,11 @@ class EnhancedMusicDataStore:
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
-                query = f"""  # nosec B608
+                query = f"""
                 SELECT * FROM {table}
                 WHERE datetime(created_at) >= datetime('now', ?)
                 ORDER BY created_at DESC
-                """
+                """  # nosec B608
                 df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
             else:
                 # Table name is validated above, safe to use in query
