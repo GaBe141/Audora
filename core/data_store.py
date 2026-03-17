@@ -66,6 +66,7 @@ class EnhancedMusicDataStore:
         self.db_path = db_path
         self.backup_dir = Path(backup_dir)
         self.backup_dir.mkdir(exist_ok=True)
+        self.workspace_root = Path.cwd().resolve()
         self.logger = logging.getLogger(__name__)
 
         # Initialize cache
@@ -775,6 +776,25 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
+        allowed_update_fields = {
+            "platform",
+            "track_name",
+            "artist",
+            "score",
+            "rank",
+            "region",
+            "trend_date",
+            "first_detected",
+            "metadata",
+            "is_active",
+        }
+        invalid_fields = set(updates).difference(allowed_update_fields)
+        if invalid_fields:
+            raise ValueError(
+                f"Invalid update fields: {sorted(invalid_fields)}. "
+                f"Allowed fields: {sorted(allowed_update_fields)}"
+            )
+
         # Build SET clause
         set_clauses = [f"{field} = ?" for field in updates]
         params = list(updates.values())
@@ -797,6 +817,18 @@ class EnhancedMusicDataStore:
             updated_count = cursor.rowcount
             self.logger.info(f"Bulk updated {updated_count} trends")
             return updated_count
+
+    def _resolve_workspace_path(self, filepath: str) -> Path:
+        """Resolve output path and keep writes inside the workspace root."""
+        requested = Path(filepath)
+        resolved = requested.resolve() if requested.is_absolute() else (self.workspace_root / requested).resolve()
+        try:
+            resolved.relative_to(self.workspace_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"Output path must stay within workspace root: {self.workspace_root}"
+            ) from exc
+        return resolved
 
     def analyze_cross_platform_spread(
         self, track_name: str, artist: str, days: int = 30
@@ -935,13 +967,13 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            safe_output_path = self._resolve_workspace_path(filepath)
+            safe_output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(safe_output_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {safe_output_path}")
 
-        return filepath
+        return str(safe_output_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
