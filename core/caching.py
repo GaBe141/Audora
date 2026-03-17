@@ -5,9 +5,12 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import hmac
 import json
 import logging
+import os
 import pickle
+import secrets
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -130,6 +133,9 @@ class LocalCacheBackend(CacheBackend):
 class RedisCacheBackend(CacheBackend):
     """Redis cache backend with connection pooling."""
 
+    _SIGNED_PAYLOAD_PREFIX = b"AUDORA1:"
+    _HMAC_HEX_LENGTH = 64
+
     def __init__(
         self,
         host: str = "localhost",
@@ -137,6 +143,7 @@ class RedisCacheBackend(CacheBackend):
         db: int = 0,
         password: str | None = None,
         max_connections: int = 10,
+        signing_key: str | bytes | None = None,
     ) -> None:
         """Initialize Redis cache.
 
@@ -146,9 +153,24 @@ class RedisCacheBackend(CacheBackend):
             db: Redis database number
             password: Redis password (if required)
             max_connections: Maximum connections in pool
+            signing_key: HMAC signing key for Redis payload integrity
         """
         if not REDIS_AVAILABLE:
             raise ImportError("Redis package not installed")
+
+        raw_signing_key: str | bytes | None = signing_key or os.getenv("AUDORA_CACHE_SIGNING_KEY")
+        if raw_signing_key is None:
+            # Ephemeral key prevents loading stale/tampered payloads across restarts.
+            raw_signing_key = secrets.token_bytes(32)
+            logger.warning(
+                "AUDORA_CACHE_SIGNING_KEY not set; using ephemeral cache signing key. "
+                "Redis cache entries will be invalid after process restart."
+            )
+        self._signing_key = (
+            raw_signing_key.encode("utf-8")
+            if isinstance(raw_signing_key, str)
+            else bytes(raw_signing_key)
+        )
 
         self._pool = ConnectionPool(
             host=host,
@@ -171,10 +193,10 @@ class RedisCacheBackend(CacheBackend):
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
         try:
-            value = self._client.get(key)
-            if value is None:
+            payload = self._client.get(key)
+            if payload is None:
                 return None
-            return pickle.loads(value)
+            return self._deserialize_payload(payload)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,13 +204,46 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_payload(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    def _serialize_payload(self, value: Any) -> bytes:
+        """Serialize and sign payload before storing in Redis."""
+        raw_payload = pickle.dumps(value)
+        signature = hmac.new(self._signing_key, raw_payload, hashlib.sha256).hexdigest().encode("ascii")
+        return self._SIGNED_PAYLOAD_PREFIX + signature + b":" + raw_payload
+
+    def _deserialize_payload(self, payload: bytes) -> Any | None:
+        """Verify payload signature before deserializing."""
+        if not payload.startswith(self._SIGNED_PAYLOAD_PREFIX):
+            # Treat legacy/unsigned values as cache misses to avoid unsafe loads.
+            logger.warning("Unsigned Redis cache payload rejected")
+            return None
+
+        signed_section = payload[len(self._SIGNED_PAYLOAD_PREFIX) :]
+        try:
+            signature_hex, raw_payload = signed_section.split(b":", 1)
+        except ValueError:
+            logger.warning("Malformed signed Redis cache payload rejected")
+            return None
+
+        if len(signature_hex) != self._HMAC_HEX_LENGTH:
+            logger.warning("Invalid Redis cache signature length")
+            return None
+
+        expected_signature = hmac.new(self._signing_key, raw_payload, hashlib.sha256).hexdigest().encode(
+            "ascii"
+        )
+        if not hmac.compare_digest(signature_hex, expected_signature):
+            logger.warning("Redis cache payload signature verification failed")
+            return None
+
+        return pickle.loads(raw_payload)
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
@@ -372,12 +427,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
