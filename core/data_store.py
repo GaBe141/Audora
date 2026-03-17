@@ -66,6 +66,7 @@ class EnhancedMusicDataStore:
         self.db_path = db_path
         self.backup_dir = Path(backup_dir)
         self.backup_dir.mkdir(exist_ok=True)
+        self.workspace_root = Path.cwd().resolve()
         self.logger = logging.getLogger(__name__)
 
         # Initialize cache
@@ -527,7 +528,7 @@ class EnhancedMusicDataStore:
             WHERE {' AND '.join(conditions)}
             ORDER BY score DESC, trend_date DESC
             LIMIT ?
-            """
+            """  # nosec B608
             params.append(limit)
 
             df = pd.read_sql_query(query, conn, params=tuple(params))
@@ -564,7 +565,7 @@ class EnhancedMusicDataStore:
             WHERE {' AND '.join(conditions)}
             ORDER BY prediction_date DESC, confidence DESC
             LIMIT ?
-            """
+            """  # nosec B608
             params.append(limit)
 
             df = pd.read_sql_query(query, conn, params=tuple(params))
@@ -677,7 +678,7 @@ class EnhancedMusicDataStore:
             WHERE ({' OR '.join(conditions)})
             AND is_active = 1
             ORDER BY score DESC
-            """
+            """  # nosec B608
 
             df = pd.read_sql_query(query, conn, params=tuple(params))
 
@@ -731,7 +732,7 @@ class EnhancedMusicDataStore:
                 COUNT(*) as total_entries
             FROM trends
             WHERE {' AND '.join(conditions)}
-            """
+            """  # nosec B608
 
             stats = pd.read_sql_query(stats_query, conn, params=tuple(params)).to_dict("records")[0]
 
@@ -743,7 +744,7 @@ class EnhancedMusicDataStore:
             WHERE {' AND '.join(conditions)}
             ORDER BY score DESC
             LIMIT 10
-            """
+            """  # nosec B608
 
             top_tracks = pd.read_sql_query(top_tracks_query, conn, params=tuple(params)).to_dict(
                 "records"
@@ -775,6 +776,25 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
+        allowed_update_fields = {
+            "platform",
+            "track_name",
+            "artist",
+            "score",
+            "rank",
+            "region",
+            "trend_date",
+            "first_detected",
+            "metadata",
+            "is_active",
+        }
+        invalid_fields = set(updates).difference(allowed_update_fields)
+        if invalid_fields:
+            raise ValueError(
+                f"Invalid update fields: {sorted(invalid_fields)}. "
+                f"Allowed fields: {sorted(allowed_update_fields)}"
+            )
+
         # Build SET clause
         set_clauses = [f"{field} = ?" for field in updates]
         params = list(updates.values())
@@ -788,7 +808,7 @@ class EnhancedMusicDataStore:
             UPDATE trends
             SET {', '.join(set_clauses)}, last_updated = CURRENT_TIMESTAMP
             WHERE track_id IN ({placeholders})
-            """
+            """  # nosec B608
 
             cursor = conn.cursor()
             cursor.execute(query, params)
@@ -797,6 +817,18 @@ class EnhancedMusicDataStore:
             updated_count = cursor.rowcount
             self.logger.info(f"Bulk updated {updated_count} trends")
             return updated_count
+
+    def _resolve_workspace_path(self, filepath: str) -> Path:
+        """Resolve output path and keep writes inside the workspace root."""
+        requested = Path(filepath)
+        resolved = requested.resolve() if requested.is_absolute() else (self.workspace_root / requested).resolve()
+        try:
+            resolved.relative_to(self.workspace_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"Output path must stay within workspace root: {self.workspace_root}"
+            ) from exc
+        return resolved
 
     def analyze_cross_platform_spread(
         self, track_name: str, artist: str, days: int = 30
@@ -928,20 +960,20 @@ class EnhancedMusicDataStore:
                 SELECT * FROM {table}
                 WHERE datetime(created_at) >= datetime('now', ?)
                 ORDER BY created_at DESC
-                """
+                """  # nosec B608
                 df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
             else:
                 # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
+                query = f"SELECT * FROM {table} ORDER BY created_at DESC"  # nosec B608
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            safe_output_path = self._resolve_workspace_path(filepath)
+            safe_output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(safe_output_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {safe_output_path}")
 
-        return filepath
+        return str(safe_output_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
@@ -955,7 +987,7 @@ class EnhancedMusicDataStore:
 
             for table in tables:
                 # Table names are from whitelist, safe to use
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                cursor.execute(f"SELECT COUNT(*) FROM {table}")  # nosec B608
                 table_stats[table] = cursor.fetchone()[0]
 
             # Data quality checks

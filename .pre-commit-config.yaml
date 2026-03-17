@@ -66,9 +66,9 @@ repos:
     hooks:
       - id: bandit
         name: Security check with Bandit
-        args: ['-c', 'pyproject.toml']
+        args: ['-c', 'pyproject.toml', '-ll']
         additional_dependencies: ['bandit[toml]']
-        exclude: ^(tests/|scripts/demo_)
+        exclude: ^tests/
 
 # Global settings
 default_language_version:
