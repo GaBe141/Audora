@@ -51,6 +51,16 @@ class ViralPrediction:
 
 class EnhancedMusicDataStore:
     """
+    Enhanced data persistence system for music discovery.
+
+    Features:
+    - ACID transactions
+    - Data validation
+    - Efficient querying with indexes
+    - Backup and restore capabilities
+    - Data export in multiple formats
+    - Analytics-ready data structures
+    """
 
     _UPDATABLE_TREND_FIELDS = {
         "platform",
@@ -64,16 +74,6 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
-    Enhanced data persistence system for music discovery.
-
-    Features:
-    - ACID transactions
-    - Data validation
-    - Efficient querying with indexes
-    - Backup and restore capabilities
-    - Data export in multiple formats
-    - Analytics-ready data structures
-    """
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
