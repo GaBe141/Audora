@@ -5,9 +5,12 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import hmac
 import json
 import logging
+import os
 import pickle
+import secrets
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -137,6 +140,7 @@ class RedisCacheBackend(CacheBackend):
         db: int = 0,
         password: str | None = None,
         max_connections: int = 10,
+        signing_key: bytes | None = None,
     ) -> None:
         """Initialize Redis cache.
 
@@ -146,6 +150,7 @@ class RedisCacheBackend(CacheBackend):
             db: Redis database number
             password: Redis password (if required)
             max_connections: Maximum connections in pool
+            signing_key: Key used to sign cache payloads before unpickling
         """
         if not REDIS_AVAILABLE:
             raise ImportError("Redis package not installed")
@@ -159,6 +164,7 @@ class RedisCacheBackend(CacheBackend):
             decode_responses=False,  # Use binary mode for pickle
         )
         self._client = redis.Redis(connection_pool=self._pool)
+        self._signing_key = signing_key or self._get_signing_key()
 
         # Test connection
         try:
@@ -174,7 +180,10 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            payload = self._verify_and_extract_payload(value)
+            if payload is None:
+                return None
+            return pickle.loads(payload)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,13 +191,50 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._sign_payload(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    def _get_signing_key(self) -> bytes:
+        """Return HMAC signing key for Redis cache payloads."""
+        env_key = os.getenv("AUDORA_CACHE_SIGNING_KEY")
+        if env_key:
+            return env_key.encode("utf-8")
+
+        # Use an ephemeral key when none is configured. This keeps cache values
+        # signed in-process and avoids loading unsigned payloads from Redis.
+        logger.warning(
+            "AUDORA_CACHE_SIGNING_KEY is not set; using ephemeral cache signing key. "
+            "Redis cache entries will be invalid after restart."
+        )
+        return secrets.token_bytes(32)
+
+    def _sign_payload(self, payload: bytes) -> bytes:
+        """Attach a versioned HMAC signature to serialized payload."""
+        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest().encode("ascii")
+        return b"v1:" + signature + b":" + payload
+
+    def _verify_and_extract_payload(self, stored_value: bytes) -> bytes | None:
+        """Verify payload signature and return the signed pickle payload."""
+        if not stored_value.startswith(b"v1:"):
+            logger.warning("Rejected unsigned Redis cache payload for security reasons.")
+            return None
+
+        _, _, remainder = stored_value.partition(b":")
+        signature_hex, sep, payload = remainder.partition(b":")
+        if not sep or not signature_hex or not payload:
+            logger.warning("Rejected malformed Redis cache payload.")
+            return None
+
+        expected = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest().encode("ascii")
+        if not hmac.compare_digest(signature_hex, expected):
+            logger.warning("Rejected Redis cache payload with invalid signature.")
+            return None
+        return payload
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
@@ -372,12 +418,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
