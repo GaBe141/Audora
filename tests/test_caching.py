@@ -2,7 +2,7 @@
 
 import time
 
-import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
@@ -138,6 +138,7 @@ class TestSecureCacheSerialization:
         assert restored == {"name": "track", "scores": [1, 2, 3], "pair": ("artist", 98)}
 
     def test_roundtrip_dataframe(self):
+        pd = pytest.importorskip("pandas")
         original_df = pd.DataFrame(
             [
                 {"track_name": "A", "score": 90.5},

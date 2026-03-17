@@ -15,8 +15,6 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
-import pandas as pd
-
 logger = logging.getLogger(__name__)
 
 # Try to import Redis, fall back to local cache if unavailable
@@ -28,6 +26,11 @@ try:
 except ImportError:
     REDIS_AVAILABLE = False
     logger.warning("Redis not available, using local cache fallback")
+
+try:
+    import pandas as pd
+except ImportError:  # pragma: no cover - optional dependency in minimal environments
+    pd = None
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -42,7 +45,7 @@ def _serialize_cache_value(value: Any) -> bytes:
     """
 
     def _encode(obj: Any) -> Any:
-        if isinstance(obj, pd.DataFrame):
+        if pd is not None and isinstance(obj, pd.DataFrame):
             return {
                 "__audora_cache_type__": "pandas.DataFrame",
                 "data": obj.to_json(orient="split", date_format="iso"),
@@ -79,6 +82,8 @@ def _deserialize_cache_value(payload: bytes) -> Any:
                 frame_json = obj.get("data")
                 if not isinstance(frame_json, str):
                     raise ValueError("Invalid DataFrame payload format")
+                if pd is None:
+                    raise ValueError("pandas is required to deserialize cached DataFrame values")
                 return pd.read_json(io.StringIO(frame_json), orient="split")
             if tagged_type == "tuple" and set(obj.keys()) == {"__audora_cache_type__", "items"}:
                 items = obj.get("items", [])
