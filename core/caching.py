@@ -7,8 +7,8 @@ fallback to in-memory caching when Redis is unavailable.
 import hashlib
 import json
 import logging
-import pickle
 import time
+from io import StringIO
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -156,7 +156,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Use binary mode for explicit serialization format
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +174,11 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            deserialized = self._deserialize_value(value)
+            if deserialized is None:
+                # Prevent repeated processing of malformed/stale cache entries.
+                self._client.delete(key)
+            return deserialized
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,13 +186,64 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
+            if serialized is None:
+                logger.debug(f"Skipped caching unsupported value type for key {key}")
+                return
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    def _serialize_value(self, value: Any) -> bytes | None:
+        """Serialize cache values without unsafe code execution semantics."""
+        payload: dict[str, Any]
+
+        # Support pandas DataFrame explicitly since data-store caching uses it.
+        if value.__class__.__name__ == "DataFrame":
+            if value.__class__.__module__.split(".")[0] != "pandas":
+                return None
+            payload = {
+                "format": "pandas_dataframe_split",
+                "value": value.to_json(orient="split", date_format="iso"),
+            }
+        else:
+            try:
+                json.dumps(value)
+            except (TypeError, ValueError):
+                return None
+            payload = {"format": "json", "value": value}
+
+        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+    def _deserialize_value(self, value: bytes) -> Any | None:
+        """Deserialize cache values from strict, known formats."""
+        try:
+            payload = json.loads(value.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        data_format = payload.get("format")
+        if data_format == "json":
+            return payload.get("value")
+
+        if data_format == "pandas_dataframe_split":
+            dataframe_json = payload.get("value")
+            if not isinstance(dataframe_json, str):
+                return None
+            try:
+                import pandas as pd
+
+                return pd.read_json(StringIO(dataframe_json), orient="split")
+            except Exception:
+                return None
+
+        return None
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
@@ -372,12 +427,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

@@ -2,8 +2,11 @@
 
 import time
 
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,30 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for safe Redis serialization/deserialization helpers."""
+
+    def test_json_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = {"a": 1, "b": ["x", "y"], "c": {"nested": True}}
+        serialized = backend._serialize_value(payload)
+        assert serialized is not None
+        assert backend._deserialize_value(serialized) == payload
+
+    def test_dataframe_round_trip(self):
+        pd = pytest.importorskip("pandas")
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        df = pd.DataFrame({"track": ["A", "B"], "score": [95.5, 87.0]})
+        serialized = backend._serialize_value(df)
+        assert serialized is not None
+
+        restored = backend._deserialize_value(serialized)
+        assert isinstance(restored, pd.DataFrame)
+        assert restored.to_dict(orient="records") == df.to_dict(orient="records")
+
+    def test_unsupported_type_not_serialized(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        serialized = backend._serialize_value(object())
+        assert serialized is None
