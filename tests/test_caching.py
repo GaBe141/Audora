@@ -2,8 +2,11 @@
 
 import time
 
+import pandas as pd
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,50 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for signed Redis payload serialization/deserialization."""
+
+    def _backend(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_signed_payload_roundtrip_dict(self):
+        backend = self._backend()
+        data = {"artist": "Taylor Swift", "score": 99.3, "tags": ["pop", "viral"]}
+
+        serialized = backend._serialize_value(data)
+        assert serialized is not None
+
+        deserialized = backend._deserialize_value(serialized)
+        assert deserialized == data
+
+    def test_signed_payload_roundtrip_dataframe(self):
+        backend = self._backend()
+        df = pd.DataFrame(
+            {
+                "track_name": ["Song A", "Song B"],
+                "score": [88.1, 91.4],
+            }
+        )
+
+        serialized = backend._serialize_value(df)
+        assert serialized is not None
+
+        deserialized = backend._deserialize_value(serialized)
+        assert isinstance(deserialized, pd.DataFrame)
+        assert deserialized.equals(df)
+
+    def test_tampered_payload_is_rejected(self):
+        backend = self._backend()
+        original = backend._serialize_value({"k": "safe-value"})
+        assert original is not None
+        tampered = original.replace(b"safe-value", b"pwned-value")
+
+        assert backend._deserialize_value(tampered) is None
+
+    def test_legacy_unsigned_payload_is_rejected(self):
+        backend = self._backend()
+        assert backend._deserialize_value(b"legacy-format-payload") is None

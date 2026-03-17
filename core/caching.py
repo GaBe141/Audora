@@ -4,16 +4,27 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
+import base64
 import hashlib
+import hmac
 import json
 import logging
-import pickle
+import os
+import secrets
 import time
 from collections.abc import Callable
+from datetime import date, datetime
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
+
+_SIGNED_BLOB_PREFIX = b"audora:v1:"
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 
 # Try to import Redis, fall back to local cache if unavailable
 try:
@@ -150,13 +161,14 @@ class RedisCacheBackend(CacheBackend):
         if not REDIS_AVAILABLE:
             raise ImportError("Redis package not installed")
 
+        self._signing_key = self._load_signing_key()
         self._pool = ConnectionPool(
             host=host,
             port=port,
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Keep binary mode for signed payloads
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +186,11 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            deserialized = self._deserialize_value(value)
+            if deserialized is None:
+                logger.warning(f"Discarding invalid or tampered cache value for key: {key}")
+                self._client.delete(key)
+            return deserialized
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,7 +198,12 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
+            if serialized is None:
+                logger.warning(
+                    f"Skipping cache write for unsupported value type: {type(value).__name__}"
+                )
+                return
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
@@ -212,6 +233,99 @@ class RedisCacheBackend(CacheBackend):
         except Exception as e:
             logger.error(f"Redis exists error for key {key}: {e}")
             return False
+
+    def _load_signing_key(self) -> bytes:
+        """Load a key used to sign cache payloads and prevent tampering."""
+        configured_key = os.getenv("AUDORA_CACHE_SIGNING_KEY")
+        if configured_key:
+            return configured_key.encode("utf-8")
+
+        logger.warning(
+            "AUDORA_CACHE_SIGNING_KEY is not set; using ephemeral in-memory key. "
+            "Configure this env var for multi-process/shared Redis deployments."
+        )
+        return secrets.token_bytes(32)
+
+    def _serialize_value(self, value: Any) -> bytes | None:
+        """Serialize and sign a cache value."""
+        try:
+            payload = json.dumps(value, default=self._json_default, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        except (TypeError, ValueError) as e:
+            logger.debug(f"Cache serialization failed: {e}")
+            return None
+
+        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest().encode(
+            "ascii"
+        )
+        return b"".join([_SIGNED_BLOB_PREFIX, signature, b":", payload])
+
+    def _deserialize_value(self, value: bytes) -> Any | None:
+        """Validate signature and deserialize cache value."""
+        if not value.startswith(_SIGNED_BLOB_PREFIX):
+            # Reject legacy/unknown formats to avoid unsafe deserialization.
+            return None
+
+        remainder = value[len(_SIGNED_BLOB_PREFIX) :]
+        signature, separator, payload = remainder.partition(b":")
+        if separator != b":":
+            return None
+
+        expected_signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest().encode(
+            "ascii"
+        )
+        if not hmac.compare_digest(signature, expected_signature):
+            return None
+
+        try:
+            return json.loads(payload.decode("utf-8"), object_hook=self._json_object_hook)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            return None
+
+    def _json_default(self, obj: Any) -> Any:
+        """JSON serializer for supported non-primitive types."""
+        if isinstance(obj, datetime):
+            return {"__audora_type__": "datetime", "value": obj.isoformat()}
+        if isinstance(obj, date):
+            return {"__audora_type__": "date", "value": obj.isoformat()}
+        if isinstance(obj, tuple):
+            return {"__audora_type__": "tuple", "value": list(obj)}
+        if isinstance(obj, set):
+            return {"__audora_type__": "set", "value": list(obj)}
+
+        if pd is not None:
+            if isinstance(obj, pd.DataFrame):
+                frame_json = obj.to_json(orient="split", date_format="iso")
+                return {"__audora_type__": "dataframe", "value": base64.b64encode(frame_json.encode("utf-8")).decode("ascii")}
+            if isinstance(obj, pd.Series):
+                series_json = obj.to_json(date_format="iso")
+                return {"__audora_type__": "series", "value": base64.b64encode(series_json.encode("utf-8")).decode("ascii")}
+
+        raise TypeError(f"Type {type(obj).__name__} is not JSON serializable")
+
+    def _json_object_hook(self, obj: dict[str, Any]) -> Any:
+        """Restore supported tagged types from JSON."""
+        type_marker = obj.get("__audora_type__")
+        if type_marker == "datetime":
+            return datetime.fromisoformat(obj["value"])
+        if type_marker == "date":
+            return date.fromisoformat(obj["value"])
+        if type_marker == "tuple":
+            return tuple(obj["value"])
+        if type_marker == "set":
+            return set(obj["value"])
+        if type_marker == "dataframe" and pd is not None:
+            from io import StringIO
+
+            frame_json = base64.b64decode(obj["value"].encode("ascii")).decode("utf-8")
+            return pd.read_json(StringIO(frame_json), orient="split")
+        if type_marker == "series" and pd is not None:
+            from io import StringIO
+
+            series_json = base64.b64decode(obj["value"].encode("ascii")).decode("utf-8")
+            return pd.read_json(StringIO(series_json), typ="series")
+        return obj
 
 
 class CacheManager:
@@ -277,7 +391,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable by cache backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +486,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
