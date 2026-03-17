@@ -4,6 +4,7 @@ import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +81,32 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+
+class TestRedisCacheSigning:
+    """Tests for Redis payload signing and verification."""
+
+    @staticmethod
+    def _backend_with_test_key() -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_signed_payload_round_trip(self):
+        backend = self._backend_with_test_key()
+        value = {"k": "v", "n": 1}
+        payload = backend._serialize_payload(value)
+        assert backend._deserialize_payload(payload) == value
+
+    def test_tampered_payload_is_rejected(self):
+        backend = self._backend_with_test_key()
+        payload = backend._serialize_payload({"safe": True})
+        tampered = payload[:-1] + bytes([payload[-1] ^ 0x01])
+        assert backend._deserialize_payload(tampered) is None
+
+    def test_unsigned_payload_is_rejected(self):
+        backend = self._backend_with_test_key()
+        assert backend._deserialize_payload(b"legacy-unsigned-payload") is None
 
 
 class TestCachedDecorator:
