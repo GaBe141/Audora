@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,40 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSecurity:
+    """Security tests for RedisCacheBackend signed serialization."""
+
+    def test_rejects_unsigned_payload(self):
+        class DummyClient:
+            def __init__(self):
+                self.deleted = []
+
+            def get(self, _key):
+                return pickle.dumps({"unsafe": True})
+
+            def delete(self, key):
+                self.deleted.append(key)
+
+        backend = object.__new__(RedisCacheBackend)
+        backend._client = DummyClient()
+        backend._signing_key = b"test-signing-key"
+
+        assert backend.get("k1") is None
+        assert backend._client.deleted == ["k1"]
+
+    def test_accepts_valid_signed_payload(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        payload = backend._serialize_value({"ok": 1})
+
+        class DummyClient:
+            def __init__(self, value):
+                self._value = value
+
+            def get(self, _key):
+                return self._value
+
+        backend._client = DummyClient(payload)
+        assert backend.get("k2") == {"ok": 1}
