@@ -4,10 +4,12 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -17,6 +19,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -455,6 +458,48 @@ System status: {{ system_status }}
         content_hash = hash(f"{message.title}:{message.content[:100]}")
         return f"{content_hash}:{message.priority.value}"
 
+    def _validate_destination_url(
+        self, url: str, allowed_domains: set[str] | None = None
+    ) -> tuple[bool, str]:
+        """Validate outbound webhook destination to reduce SSRF risk."""
+        if not isinstance(url, str) or not url.strip():
+            return False, "URL is empty"
+
+        parsed = urlparse(url.strip())
+        if parsed.scheme.lower() != "https":
+            return False, "Only HTTPS URLs are allowed"
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False, "URL hostname is missing"
+
+        host = hostname.lower()
+        if host in {"localhost", "127.0.0.1", "::1"}:
+            return False, "Localhost URLs are not allowed"
+
+        try:
+            ip_addr = ipaddress.ip_address(host)
+        except ValueError:
+            ip_addr = None
+
+        if ip_addr and (
+            ip_addr.is_private
+            or ip_addr.is_loopback
+            or ip_addr.is_link_local
+            or ip_addr.is_multicast
+            or ip_addr.is_reserved
+            or ip_addr.is_unspecified
+        ):
+            return False, "Private or non-routable IP destinations are not allowed"
+
+        if allowed_domains:
+            normalized_domains = {d.lower() for d in allowed_domains}
+            allowed = any(host == domain or host.endswith(f".{domain}") for domain in normalized_domains)
+            if not allowed:
+                return False, f"Hostname '{host}' is not in allowed domains"
+
+        return True, ""
+
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""
         if message_key not in self.sent_notifications:
@@ -468,14 +513,19 @@ System status: {{ system_status }}
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
         email_config = self.config.get("email", {})
+        recipients = [
+            recipient.strip()
+            for recipient in email_config.get("recipients", [])
+            if isinstance(recipient, str) and recipient.strip()
+        ]
 
-        if not email_config.get("smtp_server") or not email_config.get("recipients"):
+        if not email_config.get("smtp_server") or not recipients:
             return {"success": False, "error": "Email not configured"}
 
         try:
             msg = MIMEMultipart("alternative")
             msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
+            msg["To"] = ", ".join(recipients)
             msg["Subject"] = message.title
 
             # Set priority
@@ -516,7 +566,7 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -525,9 +575,9 @@ System status: {{ system_status }}
             server.quit()
 
             self.logger.info(
-                f"Email notification sent to {len(email_config['recipients'])} recipients"
+                f"Email notification sent to {len(recipients)} recipients"
             )
-            return {"success": True, "recipients": len(email_config["recipients"])}
+            return {"success": True, "recipients": len(recipients)}
 
         except Exception as e:
             self.logger.error(f"Failed to send email notification: {e}")
@@ -540,6 +590,12 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
+
+        valid_url, url_error = self._validate_destination_url(
+            webhook_url, allowed_domains={"hooks.slack.com", "hooks.slack-gov.com"}
+        )
+        if not valid_url:
+            return {"success": False, "error": f"Invalid Slack webhook URL: {url_error}"}
 
         try:
             # Create Slack message format
@@ -591,7 +647,11 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -614,6 +674,13 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+
+        valid_url, url_error = self._validate_destination_url(
+            webhook_url,
+            allowed_domains={"discord.com", "discordapp.com", "canary.discord.com", "ptb.discord.com"},
+        )
+        if not valid_url:
+            return {"success": False, "error": f"Invalid Discord webhook URL: {url_error}"}
 
         try:
             # Format content for Discord
@@ -657,7 +724,11 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -691,6 +762,10 @@ System status: {{ system_status }}
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
 
+        valid_url, url_error = self._validate_destination_url(url)
+        if not valid_url:
+            return {"success": False, "error": f"Invalid webhook URL: {url_error}"}
+
         try:
             # Prepare payload
             payload = {
@@ -709,12 +784,22 @@ System status: {{ system_status }}
                 payload["formatted_content"] = template.render(**message.template_vars)
 
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
+            if not isinstance(headers, dict):
+                headers = {"Content-Type": "application/json"}
+
             timeout = webhook_config.get("timeout", 30)
+            try:
+                timeout_seconds = max(1, min(int(timeout), 120))
+            except (TypeError, ValueError):
+                timeout_seconds = 30
 
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout_seconds),
                 ) as response,
             ):
                 if 200 <= response.status < 300:
