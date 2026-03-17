@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
 import time
+from datetime import date, datetime
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    _deserialize_cache_payload,
+    _serialize_cache_payload,
 )
 
 
@@ -118,3 +123,39 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSecureCacheSerialization:
+    """Security-focused tests for cache serialization and key hashing."""
+
+    def test_secure_payload_roundtrip_for_supported_types(self):
+        original = {
+            "binary": b"\x01\x02",
+            "when": datetime(2026, 3, 17, 12, 0, 0),
+            "day": date(2026, 3, 17),
+            "items": ("a", 1),
+            "tags": {"x", "y"},
+        }
+
+        encoded = _serialize_cache_payload(original)
+        decoded = _deserialize_cache_payload(encoded)
+
+        assert decoded["binary"] == original["binary"]
+        assert decoded["when"] == original["when"]
+        assert decoded["day"] == original["day"]
+        assert decoded["items"] == original["items"]
+        assert decoded["tags"] == original["tags"]
+
+    def test_secure_payload_rejects_unsupported_objects(self):
+        class NotSerializable:
+            pass
+
+        with pytest.raises(TypeError):
+            _serialize_cache_payload(NotSerializable())
+
+    def test_cache_key_builder_uses_sha256_length(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", args=("a", 1), kwargs={"x": "y"})
+        parts = key.split(":")
+        assert parts[0] == "fn"
+        # SHA-256 digest length is 64 hex chars.
+        assert all(len(part) == 64 for part in parts[1:])
