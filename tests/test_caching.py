@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,28 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisPayloadSigning:
+    """Tests for Redis payload signing helpers."""
+
+    def test_sign_and_verify_payload(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"k" * RedisCacheBackend._SIGNATURE_LENGTH
+        value = {"track": "Song", "score": 92.5}
+
+        serialized = backend._serialize_value(value)
+        payload = backend._extract_verified_payload(serialized)
+
+        assert payload is not None
+        assert pickle.loads(payload) == value
+
+    def test_rejects_tampered_payload(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"k" * RedisCacheBackend._SIGNATURE_LENGTH
+        serialized = backend._serialize_value({"safe": True})
+
+        tampered = bytearray(serialized)
+        tampered[-1] ^= 0x01
+
+        assert backend._extract_verified_payload(bytes(tampered)) is None

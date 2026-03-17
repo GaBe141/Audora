@@ -20,7 +20,7 @@ ENHANCED_PACKAGES = [
     "matplotlib>=3.5.0",
     "seaborn>=0.11.0",
     "plotly>=5.0.0",
-    "requests>=2.25.0",
+    "requests>=2.32.5",
     "aiohttp>=3.8.0",
     "aiofiles>=0.8.0",
     # Data science and ML
@@ -32,7 +32,7 @@ ENHANCED_PACKAGES = [
     "dash>=2.0.0",
     "dash-bootstrap-components>=1.0.0",
     # Template engine
-    "jinja2>=3.0.0",
+    "jinja2>=3.1.6",
     # Environment management
     "python-dotenv>=0.19.0",
     # Development tools
