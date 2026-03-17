@@ -7,7 +7,6 @@ fallback to in-memory caching when Redis is unavailable.
 import hashlib
 import json
 import logging
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -130,6 +129,8 @@ class LocalCacheBackend(CacheBackend):
 class RedisCacheBackend(CacheBackend):
     """Redis cache backend with connection pooling."""
 
+    _JSON_PREFIX = b"json:"
+
     def __init__(
         self,
         host: str = "localhost",
@@ -156,7 +157,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Use binary mode for prefixed JSON payloads
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +175,17 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            if not isinstance(value, bytes):
+                logger.warning("Unexpected Redis payload type for key %s: %s", key, type(value))
+                return None
+
+            if not value.startswith(self._JSON_PREFIX):
+                # Treat legacy/unknown payloads as cache misses to avoid unsafe deserialization.
+                logger.warning("Unexpected Redis payload format for key %s; ignoring cached value", key)
+                return None
+
+            payload = value[len(self._JSON_PREFIX) :].decode("utf-8")
+            return json.loads(payload)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,11 +193,15 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            # Store JSON-encoded values only to avoid unsafe deserialization risks.
+            payload = json.dumps(value, separators=(",", ":"))
+            serialized = self._JSON_PREFIX + payload.encode("utf-8")
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
+        except (TypeError, ValueError) as e:
+            logger.warning("Skipping Redis cache set for non-JSON value on key %s: %s", key, e)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 
@@ -277,7 +292,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (JSON-serializable for Redis backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +387,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
