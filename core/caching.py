@@ -5,9 +5,12 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import hmac
 import json
 import logging
+import os
 import pickle
+import secrets
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -128,7 +131,11 @@ class LocalCacheBackend(CacheBackend):
 
 
 class RedisCacheBackend(CacheBackend):
-    """Redis cache backend with connection pooling."""
+    """Redis cache backend with signed payload validation.
+
+    Pickle deserialization is protected with an HMAC signature to prevent
+    execution of tampered cache payloads.
+    """
 
     def __init__(
         self,
@@ -137,6 +144,7 @@ class RedisCacheBackend(CacheBackend):
         db: int = 0,
         password: str | None = None,
         max_connections: int = 10,
+        signing_key: str | None = None,
     ) -> None:
         """Initialize Redis cache.
 
@@ -146,9 +154,12 @@ class RedisCacheBackend(CacheBackend):
             db: Redis database number
             password: Redis password (if required)
             max_connections: Maximum connections in pool
+            signing_key: Optional HMAC signing key for cache payload integrity
         """
         if not REDIS_AVAILABLE:
             raise ImportError("Redis package not installed")
+
+        self._signing_key = self._resolve_signing_key(signing_key)
 
         self._pool = ConnectionPool(
             host=host,
@@ -168,13 +179,51 @@ class RedisCacheBackend(CacheBackend):
             logger.error(f"Failed to connect to Redis: {e}")
             raise
 
+    @staticmethod
+    def _resolve_signing_key(signing_key: str | None) -> bytes:
+        """Resolve signing key from argument, env, or secure fallback."""
+        key = signing_key or os.getenv("AUDORA_CACHE_SIGNING_KEY")
+        if key:
+            return key.encode("utf-8")
+
+        # Fallback key protects in-process integrity but is not persistent.
+        logger.warning(
+            "AUDORA_CACHE_SIGNING_KEY not set; using ephemeral key. "
+            "Set AUDORA_CACHE_SIGNING_KEY for persistent signed cache entries."
+        )
+        return secrets.token_bytes(32)
+
+    @staticmethod
+    def _sign_payload(payload: bytes, signing_key: bytes) -> bytes:
+        """Prefix payload with an HMAC-SHA256 signature."""
+        signature = hmac.new(signing_key, payload, hashlib.sha256).hexdigest().encode("ascii")
+        return signature + b":" + payload
+
+    @staticmethod
+    def _verify_and_extract_payload(signed_payload: bytes, signing_key: bytes) -> bytes:
+        """Verify signed payload and return trusted payload bytes."""
+        try:
+            signature, payload = signed_payload.split(b":", 1)
+        except ValueError as exc:
+            raise ValueError("Malformed cache payload") from exc
+
+        expected = hmac.new(signing_key, payload, hashlib.sha256).hexdigest().encode("ascii")
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError("Cache payload signature mismatch")
+        return payload
+
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
         try:
-            value = self._client.get(key)
-            if value is None:
+            signed_value = self._client.get(key)
+            if signed_value is None:
                 return None
-            return pickle.loads(value)
+            payload = self._verify_and_extract_payload(signed_value, self._signing_key)
+            return pickle.loads(payload)
+        except ValueError as e:
+            logger.warning(f"Discarding tampered Redis cache value for key {key}: {e}")
+            self.delete(key)
+            return None
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,11 +231,12 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+            signed_payload = self._sign_payload(serialized, self._signing_key)
             if ttl:
-                self._client.setex(key, ttl, serialized)
+                self._client.setex(key, ttl, signed_payload)
             else:
-                self._client.set(key, serialized)
+                self._client.set(key, signed_payload)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 
@@ -372,12 +422,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

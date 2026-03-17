@@ -2,8 +2,11 @@
 
 import time
 
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,34 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_hash_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"a": "b"})
+        key_parts = key.split(":")
+        assert len(key_parts) == 3
+        # SHA-256 hex digest length
+        assert len(key_parts[1]) == 64
+        assert len(key_parts[2]) == 64
+
+
+class TestRedisCacheSigning:
+    """Tests for signed Redis payload helpers."""
+
+    def test_signed_payload_round_trip(self):
+        payload = b"trusted-cache-payload"
+        signing_key = b"unit-test-signing-key"
+
+        signed = RedisCacheBackend._sign_payload(payload, signing_key)
+        extracted = RedisCacheBackend._verify_and_extract_payload(signed, signing_key)
+
+        assert extracted == payload
+
+    def test_tampered_payload_is_rejected(self):
+        payload = b"trusted-cache-payload"
+        signing_key = b"unit-test-signing-key"
+
+        signed = RedisCacheBackend._sign_payload(payload, signing_key)
+        tampered = signed[:-1] + (b"0" if signed[-1:] != b"0" else b"1")
+
+        with pytest.raises(ValueError, match="signature mismatch"):
+            RedisCacheBackend._verify_and_extract_payload(tampered, signing_key)
