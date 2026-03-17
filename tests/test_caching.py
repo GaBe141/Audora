@@ -4,6 +4,7 @@ import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +119,29 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCachePayloadSigning:
+    """Security-focused tests for Redis cache payload integrity checks."""
+
+    def _build_backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_signed_payload_round_trip(self):
+        backend = self._build_backend()
+        payload = b"safe-pickle-payload"
+        signed = backend._sign_payload(payload)
+        assert backend._verify_and_extract_payload(signed) == payload
+
+    def test_unsigned_payload_rejected(self):
+        backend = self._build_backend()
+        assert backend._verify_and_extract_payload(b"legacy-unsigned-payload") is None
+
+    def test_tampered_payload_rejected(self):
+        backend = self._build_backend()
+        payload = b"safe-pickle-payload"
+        signed = backend._sign_payload(payload)
+        tampered = signed[:-1] + (b"x" if signed[-1:] != b"x" else b"y")
+        assert backend._verify_and_extract_payload(tampered) is None
