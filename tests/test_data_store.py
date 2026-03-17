@@ -100,3 +100,14 @@ class TestUpdateTrendsBulk:
     def test_update_trends_bulk_empty_returns_zero(self, data_store):
         assert data_store.update_trends_bulk([], {"score": 1}) == 0
         assert data_store.update_trends_bulk(["x"], {}) == 0
+
+    def test_update_trends_bulk_invalid_field_raises(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        track_id = sample_trends[0].track_id
+
+        try:
+            data_store.update_trends_bulk([track_id], {"score = 1; DROP TABLE trends; --": 99.0})
+        except ValueError as exc:
+            assert "Invalid bulk update field(s)" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError for invalid bulk update field")

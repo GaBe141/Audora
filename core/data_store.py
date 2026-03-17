@@ -61,6 +61,19 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+    _ALLOWED_BULK_UPDATE_FIELDS = {
+        "platform",
+        "track_id",
+        "track_name",
+        "artist",
+        "score",
+        "rank",
+        "region",
+        "trend_date",
+        "first_detected",
+        "metadata",
+        "is_active",
+    }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
@@ -774,6 +787,15 @@ class EnhancedMusicDataStore:
         """
         if not track_ids or not updates:
             return 0
+
+        invalid_fields = sorted(
+            field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS
+        )
+        if invalid_fields:
+            raise ValueError(
+                f"Invalid bulk update field(s): {', '.join(invalid_fields)}. "
+                f"Allowed fields: {sorted(self._ALLOWED_BULK_UPDATE_FIELDS)}"
+            )
 
         # Build SET clause
         set_clauses = [f"{field} = ?" for field in updates]
