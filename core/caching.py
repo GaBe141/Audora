@@ -5,10 +5,11 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import io
 import json
 import logging
-import pickle
 import time
+from datetime import date, datetime
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -128,7 +129,10 @@ class LocalCacheBackend(CacheBackend):
 
 
 class RedisCacheBackend(CacheBackend):
-    """Redis cache backend with connection pooling."""
+    """Redis cache backend with connection pooling.
+
+    Values are stored as JSON payloads to avoid unsafe deserialization.
+    """
 
     def __init__(
         self,
@@ -156,7 +160,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Use bytes mode for explicit JSON decode
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,21 +178,68 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            return self._deserialize_value(value)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
 
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
-        """Set value in cache with optional TTL."""
+        """Set value in cache with optional TTL.
+
+        Redis backend accepts JSON-serializable values and pandas DataFrames.
+        """
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    @staticmethod
+    def _json_default(value: Any) -> Any:
+        """Custom serializer for non-primitive values supported by cache."""
+        if isinstance(value, (datetime, date)):
+            return {"__audora_type__": "iso_datetime", "value": value.isoformat()}
+        raise TypeError(f"Value of type {type(value).__name__} is not JSON serializable")
+
+    @staticmethod
+    def _json_object_hook(payload: dict[str, Any]) -> Any:
+        """Restore tagged values during JSON deserialization."""
+        if payload.get("__audora_type__") == "iso_datetime":
+            return payload.get("value")
+        return payload
+
+    def _serialize_value(self, value: Any) -> bytes:
+        """Serialize cache values as JSON bytes."""
+        if value.__class__.__name__ == "DataFrame":
+            dataframe_json = value.to_json(orient="split", date_format="iso")
+            payload = {"__audora_type__": "dataframe_split", "value": dataframe_json}
+        else:
+            payload = {"__audora_type__": "json", "value": value}
+
+        return json.dumps(payload, default=self._json_default).encode("utf-8")
+
+    def _deserialize_value(self, value: bytes) -> Any:
+        """Deserialize cache values from JSON bytes."""
+        payload = json.loads(value.decode("utf-8"), object_hook=self._json_object_hook)
+        payload_type = payload.get("__audora_type__")
+
+        if payload_type == "dataframe_split":
+            try:
+                import pandas as pd
+
+                return pd.read_json(io.StringIO(payload["value"]), orient="split")
+            except Exception as exc:
+                logger.error(f"Failed to deserialize cached DataFrame: {exc}")
+                return None
+
+        if payload_type == "json":
+            return payload.get("value")
+
+        logger.warning("Unknown cache payload type, treating as cache miss")
+        return None
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
@@ -372,12 +423,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode("utf-8")).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode("utf-8")).hexdigest())
 
         return ":".join(key_parts)
 
