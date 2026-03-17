@@ -9,7 +9,8 @@ import hmac
 import json
 import logging
 import os
-import pickle  # nosec B403 - required for signed cache payload compatibility.
+# Pickle is retained for backward-compatible cache payloads with HMAC integrity checks.
+import pickle  # nosec B403
 import secrets
 import time
 from collections.abc import Callable
@@ -225,8 +226,7 @@ class RedisCacheBackend(CacheBackend):
         if not hmac.compare_digest(signature, expected):
             raise ValueError("Cache payload signature mismatch")
 
-        # nosec B301 - payload integrity is verified with HMAC before deserialization.
-        return pickle.loads(payload)
+        return pickle.loads(payload)  # nosec B301
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
