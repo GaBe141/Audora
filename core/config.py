@@ -175,6 +175,10 @@ LASTFM_SHARED_SECRET=your_lastfm_shared_secret_here
 # Free tier (123) provides basic access, premium unlocks additional features
 AUDIODB_API_KEY=123
 
+# Redis cache payload integrity (required when Redis cache backend is enabled)
+# Use a long random value (at least 32 characters)
+AUDORA_CACHE_SIGNING_KEY=replace_with_random_secret_key
+
 # Security Notes:
 # - Never commit this file to version control
 # - Keep file permissions restrictive (chmod 600 on Unix systems)
