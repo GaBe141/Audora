@@ -2,8 +2,14 @@
 
 import time
 
+import pandas as pd
+
 from core.caching import (
     LocalCacheBackend,
+    _deserialize_cache_value,
+    _serialize_cache_value,
+    _sign_cache_payload,
+    _verify_cache_payload,
 )
 
 
@@ -118,3 +124,39 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSecureCacheSerialization:
+    """Security-focused tests for cache payload handling."""
+
+    def test_roundtrip_dict_and_tuple(self):
+        original = {"name": "track", "scores": [1, 2, 3], "pair": ("artist", 98)}
+
+        payload = _serialize_cache_value(original)
+        restored = _deserialize_cache_value(payload)
+
+        assert restored == {"name": "track", "scores": [1, 2, 3], "pair": ("artist", 98)}
+
+    def test_roundtrip_dataframe(self):
+        original_df = pd.DataFrame(
+            [
+                {"track_name": "A", "score": 90.5},
+                {"track_name": "B", "score": 87.0},
+            ]
+        )
+
+        payload = _serialize_cache_value(original_df)
+        restored_df = _deserialize_cache_value(payload)
+
+        pd.testing.assert_frame_equal(restored_df, original_df)
+
+    def test_signed_payload_verification_rejects_tampering(self):
+        signing_key = b"unit-test-signing-key"
+        payload = _serialize_cache_value({"k": "v"})
+        signed_payload = _sign_cache_payload(payload, signing_key)
+
+        # Simulate attacker-modified payload bytes.
+        tampered_payload = signed_payload[:-1] + (b"x" if signed_payload[-1:] != b"x" else b"y")
+
+        assert _verify_cache_payload(signed_payload, signing_key) == payload
+        assert _verify_cache_payload(tampered_payload, signing_key) is None
