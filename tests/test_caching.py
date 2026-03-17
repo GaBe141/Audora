@@ -2,8 +2,12 @@
 
 import time
 
+import pandas as pd
+
 from core.caching import (
     LocalCacheBackend,
+    _deserialize_cache_value,
+    _serialize_cache_value,
 )
 
 
@@ -118,3 +122,29 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSafeCacheSerialization:
+    """Tests for safe (non-pickle) cache serialization helpers."""
+
+    def test_json_round_trip(self):
+        value = {"a": 1, "b": ["x", "y"], "nested": {"ok": True}}
+        payload = _serialize_cache_value(value)
+        assert payload is not None
+        assert _deserialize_cache_value(payload, "json_key") == value
+
+    def test_dataframe_round_trip(self):
+        df = pd.DataFrame({"track": ["a", "b"], "score": [10, 20]})
+        payload = _serialize_cache_value(df)
+        assert payload is not None
+
+        restored = _deserialize_cache_value(payload, "df_key")
+        assert isinstance(restored, pd.DataFrame)
+        assert restored.to_dict("records") == df.to_dict("records")
+
+    def test_invalid_payload_returns_none(self):
+        assert _deserialize_cache_value("not-json", "bad_key") is None
+
+    def test_unknown_format_returns_none(self):
+        payload = '{"format":"unknown","type":"json","value":{"a":1}}'
+        assert _deserialize_cache_value(payload, "unknown_key") is None
