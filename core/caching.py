@@ -5,9 +5,12 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import hmac
 import json
 import logging
+import os
 import pickle
+import secrets
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -130,6 +133,9 @@ class LocalCacheBackend(CacheBackend):
 class RedisCacheBackend(CacheBackend):
     """Redis cache backend with connection pooling."""
 
+    _SIGNED_PAYLOAD_PREFIX = b"audora-cache-v1:"
+    _SIGNATURE_LENGTH = hashlib.sha256().digest_size
+
     def __init__(
         self,
         host: str = "localhost",
@@ -150,13 +156,14 @@ class RedisCacheBackend(CacheBackend):
         if not REDIS_AVAILABLE:
             raise ImportError("Redis package not installed")
 
+        self._signing_key = self._load_signing_key()
         self._pool = ConnectionPool(
             host=host,
             port=port,
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Use binary mode for signed payloads
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -168,13 +175,63 @@ class RedisCacheBackend(CacheBackend):
             logger.error(f"Failed to connect to Redis: {e}")
             raise
 
+    @staticmethod
+    def _load_signing_key() -> bytes:
+        """Load cache signing key used for payload integrity checks."""
+        configured_key = os.getenv("AUDORA_CACHE_SIGNING_KEY")
+        if configured_key:
+            return configured_key.encode("utf-8")
+
+        # Ephemeral fallback preserves safety but avoids persisting cache across restarts.
+        logger.warning(
+            "AUDORA_CACHE_SIGNING_KEY is not set. Using an ephemeral key; "
+            "Redis cache entries created by this process will be invalid after restart."
+        )
+        return secrets.token_bytes(32)
+
+    def _sign_payload(self, payload: bytes) -> bytes:
+        """Return an HMAC signature for cache payload bytes."""
+        return hmac.new(self._signing_key, payload, hashlib.sha256).digest()
+
+    def _serialize_value(self, value: Any) -> bytes:
+        """Serialize and sign cache value for secure storage."""
+        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        signature = self._sign_payload(payload)
+        return self._SIGNED_PAYLOAD_PREFIX + signature + payload
+
+    def _deserialize_value(self, raw_value: bytes) -> Any:
+        """Verify and deserialize cached value."""
+        if not raw_value.startswith(self._SIGNED_PAYLOAD_PREFIX):
+            raise ValueError("Unsigned or legacy cache payload rejected")
+
+        signed_payload = raw_value[len(self._SIGNED_PAYLOAD_PREFIX) :]
+        if len(signed_payload) <= self._SIGNATURE_LENGTH:
+            raise ValueError("Malformed signed cache payload")
+
+        signature = signed_payload[: self._SIGNATURE_LENGTH]
+        payload = signed_payload[self._SIGNATURE_LENGTH :]
+        expected_signature = self._sign_payload(payload)
+        if not hmac.compare_digest(signature, expected_signature):
+            raise ValueError("Invalid cache payload signature")
+
+        try:
+            return pickle.loads(payload)
+        except Exception as e:
+            raise ValueError(f"Failed to deserialize signed cache payload: {e}") from e
+
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
         try:
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+
+            try:
+                return self._deserialize_value(value)
+            except ValueError as e:
+                logger.warning(f"Rejected untrusted Redis cache payload for key {key}: {e}")
+                self.delete(key)
+                return None
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,7 +239,7 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
