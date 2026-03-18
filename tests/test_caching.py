@@ -1,10 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
 import time
+from datetime import datetime
 
-from core.caching import (
-    LocalCacheBackend,
-)
+import pytest
+
+from core.caching import LocalCacheBackend, RedisCacheBackend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +119,31 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for secure Redis serialization helpers."""
+
+    def test_round_trip_json_payload(self):
+        payload = {"track": "Song A", "score": 98.5, "tags": ["viral", "pop"]}
+        serialized = RedisCacheBackend._serialize_value(payload)
+        restored = RedisCacheBackend._deserialize_value(serialized)
+        assert restored == payload
+
+    def test_round_trip_datetime_and_set(self):
+        payload = {"when": datetime(2026, 3, 18, 12, 0, 0), "platforms": {"spotify", "tiktok"}}
+        serialized = RedisCacheBackend._serialize_value(payload)
+        restored = RedisCacheBackend._deserialize_value(serialized)
+        assert restored["when"] == payload["when"]
+        assert restored["platforms"] == payload["platforms"]
+
+    def test_non_json_serializable_value_raises_type_error(self):
+        class Unserializable:
+            pass
+
+        with pytest.raises(TypeError):
+            RedisCacheBackend._serialize_value(Unserializable())
+
+    def test_invalid_payload_format_raises_value_error(self):
+        with pytest.raises(ValueError):
+            RedisCacheBackend._deserialize_value(b'{"version":999,"value":"x"}')
