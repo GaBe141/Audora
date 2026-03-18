@@ -227,8 +227,8 @@ class RedisCacheBackend(CacheBackend):
         elif self._is_pandas_dataframe(value):
             payload = {
                 "type": "pandas_dataframe",
-                "orient": "split",
-                "value": value.to_json(orient="split", date_format="iso"),
+                "orient": "table",
+                "value": value.to_json(orient="table", date_format="iso"),
             }
         else:
             raise TypeError(
