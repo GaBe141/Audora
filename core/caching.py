@@ -5,8 +5,10 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import hmac
 import json
 import logging
+import os
 import pickle
 import time
 from collections.abc import Callable
@@ -27,6 +29,29 @@ except ImportError:
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+_SIGNED_PAYLOAD_PREFIX = b"audora:v1:"
+_ENV_CACHE_SIGNING_KEY = "AUDORA_CACHE_SIGNING_KEY"
+_PROCESS_SIGNING_KEY = os.urandom(32)
+_WARNED_FALLBACK_SIGNING_KEY = False
+
+
+def _resolve_cache_signing_key() -> bytes:
+    """Resolve Redis payload signing key from env with safe fallback."""
+    global _WARNED_FALLBACK_SIGNING_KEY
+
+    env_key = os.getenv(_ENV_CACHE_SIGNING_KEY)
+    if env_key:
+        return env_key.encode("utf-8")
+
+    if not _WARNED_FALLBACK_SIGNING_KEY:
+        logger.warning(
+            "AUDORA_CACHE_SIGNING_KEY is not set; using per-process fallback key. "
+            "Set AUDORA_CACHE_SIGNING_KEY for stable multi-process cache sharing."
+        )
+        _WARNED_FALLBACK_SIGNING_KEY = True
+
+    return _PROCESS_SIGNING_KEY
 
 
 class CacheBackend:
@@ -159,6 +184,7 @@ class RedisCacheBackend(CacheBackend):
             decode_responses=False,  # Use binary mode for pickle
         )
         self._client = redis.Redis(connection_pool=self._pool)
+        self._signing_key = _resolve_cache_signing_key()
 
         # Test connection
         try:
@@ -168,21 +194,46 @@ class RedisCacheBackend(CacheBackend):
             logger.error(f"Failed to connect to Redis: {e}")
             raise
 
+    def _serialize_value(self, value: Any) -> bytes:
+        """Serialize and sign cache payload before storing in Redis."""
+        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest().encode("ascii")
+        return _SIGNED_PAYLOAD_PREFIX + signature + b":" + payload
+
+    def _deserialize_value(self, value: bytes) -> Any:
+        """Verify signed payload and deserialize trusted bytes only."""
+        if not value.startswith(_SIGNED_PAYLOAD_PREFIX):
+            raise ValueError("Unsigned or legacy Redis cache payload")
+
+        signed_payload = value[len(_SIGNED_PAYLOAD_PREFIX) :]
+        signature, payload = signed_payload.split(b":", 1)
+        expected = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest().encode("ascii")
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError("Invalid Redis cache payload signature")
+
+        return pickle.loads(payload)
+
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
         try:
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
+            return None
+
+        try:
+            return self._deserialize_value(value)
+        except Exception as e:
+            logger.warning(f"Discarding invalid Redis cache payload for key {key}: {e}")
+            self.delete(key)
             return None
 
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
@@ -372,12 +423,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

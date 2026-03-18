@@ -4,10 +4,13 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 import smtplib
+import socket
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -17,6 +20,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -204,6 +208,51 @@ class EnhancedNotificationService:
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    def _validate_public_https_url(self, candidate_url: str) -> tuple[bool, str]:
+        """Validate outbound webhook URL to reduce SSRF risk."""
+        try:
+            parsed = urlparse(candidate_url)
+        except ValueError:
+            return False, "Malformed URL"
+
+        if parsed.scheme.lower() != "https":
+            return False, "Only HTTPS URLs are allowed"
+
+        if not parsed.hostname:
+            return False, "URL hostname is missing"
+
+        hostname = parsed.hostname.strip().lower()
+        if hostname == "localhost":
+            return False, "localhost is not allowed"
+
+        try:
+            resolved_addrs = {addr[4][0] for addr in socket.getaddrinfo(hostname, None)}
+        except socket.gaierror as e:
+            return False, f"Hostname resolution failed: {e}"
+
+        if not resolved_addrs:
+            return False, "Hostname did not resolve to any IP addresses"
+
+        for addr in resolved_addrs:
+            # Strip optional IPv6 zone id, e.g. fe80::1%eth0
+            normalized_addr = addr.split("%", 1)[0]
+            try:
+                ip_addr = ipaddress.ip_address(normalized_addr)
+            except ValueError:
+                continue
+
+            if (
+                ip_addr.is_private
+                or ip_addr.is_loopback
+                or ip_addr.is_link_local
+                or ip_addr.is_multicast
+                or ip_addr.is_reserved
+                or ip_addr.is_unspecified
+            ):
+                return False, "URL resolves to a non-public IP address"
+
+        return True, ""
 
     def _load_templates(self) -> dict[str, str]:
         """Load message templates."""
@@ -514,9 +563,11 @@ System status: {{ system_status }}
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            server.ehlo()
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -540,6 +591,10 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
+
+        is_valid, validation_error = self._validate_public_https_url(webhook_url)
+        if not is_valid:
+            return {"success": False, "error": f"Invalid Slack webhook URL: {validation_error}"}
 
         try:
             # Create Slack message format
@@ -591,7 +646,11 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -614,6 +673,10 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+
+        is_valid, validation_error = self._validate_public_https_url(webhook_url)
+        if not is_valid:
+            return {"success": False, "error": f"Invalid Discord webhook URL: {validation_error}"}
 
         try:
             # Format content for Discord
@@ -657,7 +720,11 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -691,6 +758,10 @@ System status: {{ system_status }}
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
 
+        is_valid, validation_error = self._validate_public_https_url(url)
+        if not is_valid:
+            return {"success": False, "error": f"Invalid webhook URL: {validation_error}"}
+
         try:
             # Prepare payload
             payload = {
@@ -709,7 +780,10 @@ System status: {{ system_status }}
                 payload["formatted_content"] = template.render(**message.template_vars)
 
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
-            timeout = webhook_config.get("timeout", 30)
+            try:
+                timeout = max(1, int(webhook_config.get("timeout", 30)))
+            except (TypeError, ValueError):
+                timeout = 30
 
             async with (
                 aiohttp.ClientSession() as session,
