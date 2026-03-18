@@ -2,8 +2,12 @@
 
 import time
 
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    _deserialize_cache_value,
+    _serialize_cache_value,
 )
 
 
@@ -118,3 +122,29 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheSecurity:
+    """Security-focused tests for cache serialization and key hashing."""
+
+    def test_rejects_non_json_legacy_payload(self):
+        # Legacy pickle payload should be rejected outright.
+        legacy_pickle_payload = b"\x80\x04\x95\x0b\x00\x00\x00\x00\x00\x00\x00}\x94\x8c\x01a\x94K\x01s."
+        with pytest.raises(ValueError):
+            _deserialize_cache_value(legacy_pickle_payload)
+
+    def test_build_cache_key_uses_sha256_hashes(self, mock_cache):
+        cache_key = mock_cache._build_cache_key("test_prefix", args=(1, "x"), kwargs={"a": 2})
+        _, args_hash, kwargs_hash = cache_key.split(":")
+        assert len(args_hash) == 64
+        assert len(kwargs_hash) == 64
+
+    def test_dataframe_round_trip_serialization(self):
+        pd = pytest.importorskip("pandas")
+        df = pd.DataFrame({"track_name": ["Song A", "Song B"], "score": [88.5, 91.0]})
+
+        serialized = _serialize_cache_value(df)
+        restored = _deserialize_cache_value(serialized)
+
+        assert hasattr(restored, "equals")
+        assert restored.equals(df)
