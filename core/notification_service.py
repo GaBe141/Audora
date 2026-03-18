@@ -4,9 +4,11 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,6 +19,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -193,6 +196,12 @@ class EnhancedNotificationService:
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
+            if os.name != "nt":
+                try:
+                    os.chmod(config_path, 0o600)
+                except OSError:
+                    # Non-fatal: continue even if chmod is unsupported.
+                    pass
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -540,6 +549,9 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
+        is_safe, reason = self._is_safe_outbound_url(webhook_url)
+        if not is_safe:
+            return {"success": False, "error": f"Unsafe Slack webhook URL: {reason}"}
 
         try:
             # Create Slack message format
@@ -614,6 +626,9 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+        is_safe, reason = self._is_safe_outbound_url(webhook_url)
+        if not is_safe:
+            return {"success": False, "error": f"Unsafe Discord webhook URL: {reason}"}
 
         try:
             # Format content for Discord
@@ -690,6 +705,9 @@ System status: {{ system_status }}
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
+        is_safe, reason = self._is_safe_outbound_url(url)
+        if not is_safe:
+            return {"success": False, "error": f"Unsafe webhook URL: {reason}"}
 
         try:
             # Prepare payload
@@ -730,6 +748,60 @@ System status: {{ system_status }}
         except Exception as e:
             self.logger.error(f"Failed to send webhook notification: {e}")
             return {"success": False, "error": str(e)}
+
+    def _is_safe_outbound_url(self, url: str) -> tuple[bool, str]:
+        """Validate outbound URLs to reduce SSRF risk."""
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False, "URL parsing failed"
+
+        if parsed.scheme.lower() != "https":
+            return False, "only HTTPS URLs are allowed"
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False, "hostname is missing"
+
+        hostname = hostname.lower()
+        if hostname == "localhost" or hostname.endswith(".local"):
+            return False, "localhost/internal hostnames are not allowed"
+
+        try:
+            parsed_ip = ipaddress.ip_address(hostname)
+            if (
+                parsed_ip.is_private
+                or parsed_ip.is_loopback
+                or parsed_ip.is_link_local
+                or parsed_ip.is_multicast
+                or parsed_ip.is_reserved
+                or parsed_ip.is_unspecified
+            ):
+                return False, f"disallowed destination IP: {parsed_ip}"
+            return True, ""
+        except ValueError:
+            # Hostname is not a raw IP; resolve and validate target addresses.
+            pass
+
+        try:
+            addr_info = socket.getaddrinfo(hostname, None)
+        except socket.gaierror:
+            return False, "hostname resolution failed"
+
+        for info in addr_info:
+            resolved_ip_str = info[4][0]
+            resolved_ip = ipaddress.ip_address(resolved_ip_str)
+            if (
+                resolved_ip.is_private
+                or resolved_ip.is_loopback
+                or resolved_ip.is_link_local
+                or resolved_ip.is_multicast
+                or resolved_ip.is_reserved
+                or resolved_ip.is_unspecified
+            ):
+                return False, f"hostname resolves to disallowed IP: {resolved_ip}"
+
+        return True, ""
 
     async def _send_console(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification to console."""

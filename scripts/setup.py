@@ -6,6 +6,7 @@ Installs dependencies, configures services, and validates the system.
 
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -524,6 +525,11 @@ ENABLE_NOTIFICATIONS=True
         try:
             with open(env_path, "w") as f:
                 f.write(env_template.strip())
+            if os.name != "nt":
+                try:
+                    os.chmod(env_path, 0o600)
+                except OSError:
+                    self.logger.warning("  Could not set restrictive permissions on .env.enhanced")
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True
