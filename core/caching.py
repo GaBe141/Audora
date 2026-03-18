@@ -5,9 +5,9 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import io
 import json
 import logging
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -156,7 +156,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Keep binary mode for encoded payloads
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +174,12 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            return self._deserialize_value(value)
+        except ValueError as e:
+            # Handle malformed/legacy payloads defensively and evict them.
+            logger.warning(f"Dropping unsafe cache payload for key {key}: {e}")
+            self.delete(key)
+            return None
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,11 +187,13 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
+        except TypeError as e:
+            logger.warning(f"Skipping unsafe cache payload for key {key}: {e}")
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 
@@ -212,6 +219,71 @@ class RedisCacheBackend(CacheBackend):
         except Exception as e:
             logger.error(f"Redis exists error for key {key}: {e}")
             return False
+
+    def _serialize_value(self, value: Any) -> bytes:
+        """Serialize cache values using safe, non-executable formats."""
+        if self._is_json_serializable(value):
+            payload = {"type": "json", "value": value}
+        elif self._is_pandas_dataframe(value):
+            payload = {
+                "type": "pandas_dataframe",
+                "orient": "split",
+                "value": value.to_json(orient="split", date_format="iso"),
+            }
+        else:
+            raise TypeError(
+                f"Unsupported cache value type: {type(value).__name__}. "
+                "Only JSON-serializable values and pandas DataFrames are supported."
+            )
+
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    def _deserialize_value(self, raw_value: bytes) -> Any:
+        """Deserialize cache payload from safe formats."""
+        try:
+            payload = json.loads(raw_value.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise ValueError("Invalid cache payload format") from e
+
+        if not isinstance(payload, dict) or "type" not in payload:
+            raise ValueError("Malformed cache payload")
+
+        payload_type = payload["type"]
+        if payload_type == "json":
+            return payload.get("value")
+        if payload_type == "pandas_dataframe":
+            dataframe_json = payload.get("value")
+            if not isinstance(dataframe_json, str):
+                raise ValueError("Invalid DataFrame payload")
+            return self._read_dataframe_json(dataframe_json, orient=payload.get("orient", "split"))
+
+        raise ValueError(f"Unsupported cache payload type: {payload_type}")
+
+    @staticmethod
+    def _is_json_serializable(value: Any) -> bool:
+        """Return True if value can be serialized by json.dumps."""
+        try:
+            json.dumps(value)
+            return True
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _is_pandas_dataframe(value: Any) -> bool:
+        """Return True when value is a pandas DataFrame."""
+        try:
+            import pandas as pd
+
+            return isinstance(value, pd.DataFrame)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _read_dataframe_json(dataframe_json: str, orient: str) -> Any:
+        """Parse a DataFrame from a JSON payload."""
+        import pandas as pd
+
+        return pd.read_json(io.StringIO(dataframe_json), orient=orient)
 
 
 class CacheManager:
@@ -277,7 +349,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable or a pandas DataFrame)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +444,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
