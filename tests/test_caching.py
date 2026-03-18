@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
+import pickle
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -81,6 +85,16 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, "x"), {"a": 2})
+        parts = key.split(":")
+        assert len(parts) == 3
+        assert parts[0] == "fn"
+        expected_args = hashlib.sha256(json.dumps((1, "x"), sort_keys=True, default=str).encode())
+        expected_kwargs = hashlib.sha256(json.dumps({"a": 2}, sort_keys=True, default=str).encode())
+        assert parts[1] == expected_args.hexdigest()
+        assert parts[2] == expected_kwargs.hexdigest()
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +132,41 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCachePayloadSigning:
+    """Regression tests for signed Redis payload handling."""
+
+    def _backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_signed_payload_round_trip(self):
+        backend = self._backend()
+        original = {"k": "v", "n": 42}
+
+        serialized = backend._serialize_value(original)
+        is_valid, restored = backend._deserialize_value(serialized)
+
+        assert is_valid is True
+        assert restored == original
+
+    def test_tampered_payload_is_rejected(self):
+        backend = self._backend()
+        serialized = backend._serialize_value({"safe": True})
+        tampered = serialized[:-1] + bytes([serialized[-1] ^ 1])
+
+        is_valid, restored = backend._deserialize_value(tampered)
+
+        assert is_valid is False
+        assert restored is None
+
+    def test_unsigned_payload_is_rejected(self):
+        backend = self._backend()
+        legacy_payload = pickle.dumps({"legacy": True})
+
+        is_valid, restored = backend._deserialize_value(legacy_payload)
+
+        assert is_valid is False
+        assert restored is None
