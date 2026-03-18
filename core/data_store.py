@@ -67,6 +67,18 @@ class EnhancedMusicDataStore:
         self.backup_dir = Path(backup_dir)
         self.backup_dir.mkdir(exist_ok=True)
         self.logger = logging.getLogger(__name__)
+        self._allowed_trend_update_fields = {
+            "platform",
+            "track_name",
+            "artist",
+            "score",
+            "rank",
+            "region",
+            "trend_date",
+            "first_detected",
+            "metadata",
+            "is_active",
+        }
 
         # Initialize cache
         self._cache = get_cache()
@@ -775,9 +787,24 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
+        invalid_fields = sorted(field for field in updates if field not in self._allowed_trend_update_fields)
+        if invalid_fields:
+            raise ValueError(
+                "Invalid update field(s): "
+                f"{', '.join(invalid_fields)}. "
+                f"Allowed fields: {', '.join(sorted(self._allowed_trend_update_fields))}"
+            )
+
+        normalized_updates: dict[str, Any] = {}
+        for field, value in updates.items():
+            if field == "metadata" and isinstance(value, dict):
+                normalized_updates[field] = json.dumps(value)
+            else:
+                normalized_updates[field] = value
+
         # Build SET clause
-        set_clauses = [f"{field} = ?" for field in updates]
-        params = list(updates.values())
+        set_clauses = [f"{field} = ?" for field in normalized_updates]
+        params = list(normalized_updates.values())
 
         # Add track IDs for WHERE clause
         placeholders = ",".join("?" * len(track_ids))

@@ -4,6 +4,7 @@ import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +119,57 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class _FakeRedisClient:
+    """Minimal Redis client stub for unit tests."""
+
+    def __init__(self):
+        self.store = {}
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def set(self, key, value):
+        self.store[key] = value
+
+    def setex(self, key, _ttl, value):
+        self.store[key] = value
+
+    def delete(self, key):
+        self.store.pop(key, None)
+
+
+class TestRedisCacheBackendSecurity:
+    """Security tests for Redis cache serialization."""
+
+    def _build_backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._client = _FakeRedisClient()
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_signed_payload_round_trip(self):
+        backend = self._build_backend()
+        value = {"track": "Song", "score": 98}
+        backend.set("k1", value)
+        assert backend.get("k1") == value
+
+    def test_tampered_payload_is_rejected(self):
+        backend = self._build_backend()
+        backend.set("k2", {"a": 1})
+
+        payload = backend._client.store["k2"]
+        tampered = payload[:-1] + bytes([payload[-1] ^ 0x01])
+        backend._client.store["k2"] = tampered
+
+        assert backend.get("k2") is None
+        assert "k2" not in backend._client.store
+
+    def test_unsigned_legacy_payload_is_rejected(self):
+        import pickle
+
+        backend = self._build_backend()
+        backend._client.store["legacy"] = pickle.dumps({"unsafe": True})
+        assert backend.get("legacy") is None
+        assert "legacy" not in backend._client.store
