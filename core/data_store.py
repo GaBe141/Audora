@@ -775,6 +775,29 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
+        # Only allow updates to known, safe columns to prevent SQL injection.
+        allowed_update_fields = {
+            "platform",
+            "track_id",
+            "track_name",
+            "artist",
+            "score",
+            "rank",
+            "region",
+            "trend_date",
+            "first_detected",
+            "metadata",
+            "is_active",
+        }
+        invalid_fields = set(updates) - allowed_update_fields
+        if invalid_fields:
+            raise ValueError(
+                "Invalid update fields: "
+                + ", ".join(sorted(invalid_fields))
+                + ". Allowed fields are: "
+                + ", ".join(sorted(allowed_update_fields))
+            )
+
         # Build SET clause
         set_clauses = [f"{field} = ?" for field in updates]
         params = list(updates.values())
