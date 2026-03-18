@@ -2,8 +2,12 @@
 
 import time
 
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    _deserialize_cache_value,
+    _serialize_cache_value,
 )
 
 
@@ -118,3 +122,24 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheSerializationSecurity:
+    """Security-focused tests for safe cache serialization."""
+
+    def test_json_payload_round_trip(self):
+        value = {"artist": "Artist A", "score": 98.5, "platforms": ["spotify", "youtube"]}
+        serialized = _serialize_cache_value(value)
+        assert _deserialize_cache_value(serialized) == value
+
+    def test_dataframe_payload_round_trip(self):
+        pd = pytest.importorskip("pandas")
+        value = pd.DataFrame({"track": ["Song A", "Song B"], "score": [91.2, 88.0]})
+        serialized = _serialize_cache_value(value)
+        restored = _deserialize_cache_value(serialized)
+        assert restored.to_dict("records") == value.to_dict("records")
+
+    def test_rejects_legacy_pickle_payload(self):
+        # Pickle protocol bytes should not be accepted by deserializer.
+        with pytest.raises(ValueError):
+            _deserialize_cache_value(b"\x80\x04K*.")
