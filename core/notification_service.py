@@ -4,10 +4,13 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 import smtplib
+import socket
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -17,6 +20,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -355,6 +359,54 @@ System status: {{ system_status }}
             ),
         ]
 
+    def _is_disallowed_ip(self, address: str) -> bool:
+        """Block local/private/link-local and special-purpose address ranges."""
+        ip_obj = ipaddress.ip_address(address)
+        return any(
+            [
+                ip_obj.is_private,
+                ip_obj.is_loopback,
+                ip_obj.is_link_local,
+                ip_obj.is_reserved,
+                ip_obj.is_multicast,
+                ip_obj.is_unspecified,
+            ]
+        )
+
+    def _validate_webhook_url(self, url: str) -> tuple[bool, str]:
+        """Validate webhook destination to reduce SSRF risk."""
+        parsed = urlparse(url)
+        if parsed.scheme.lower() != "https":
+            return False, "Webhook URL must use HTTPS"
+        if not parsed.hostname:
+            return False, "Webhook URL must include a hostname"
+
+        hostname = parsed.hostname.lower()
+        if hostname == "localhost" or hostname.endswith(".localhost"):
+            return False, "Localhost destinations are not allowed"
+
+        try:
+            # If hostname is an IP literal, validate it directly.
+            if self._is_disallowed_ip(hostname):
+                return False, "Private or local network destinations are not allowed"
+        except ValueError:
+            # Resolve hostnames and block if any resolved target is private/local.
+            try:
+                resolved = socket.getaddrinfo(hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+            except socket.gaierror:
+                # Keep behavior non-breaking for transient DNS failures; request will fail naturally later.
+                return True, ""
+
+            for info in resolved:
+                addr = info[4][0]
+                try:
+                    if self._is_disallowed_ip(addr):
+                        return False, "Private or local network destinations are not allowed"
+                except ValueError:
+                    continue
+
+        return True, ""
+
     async def send_notification(self, message: NotificationMessage) -> dict[str, Any]:
         """
         Send notification through configured channels.
@@ -514,9 +566,11 @@ System status: {{ system_status }}
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            server.ehlo()
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -540,6 +594,9 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
+        is_valid_url, validation_error = self._validate_webhook_url(webhook_url)
+        if not is_valid_url:
+            return {"success": False, "error": validation_error}
 
         try:
             # Create Slack message format
@@ -614,6 +671,9 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+        is_valid_url, validation_error = self._validate_webhook_url(webhook_url)
+        if not is_valid_url:
+            return {"success": False, "error": validation_error}
 
         try:
             # Format content for Discord
@@ -690,6 +750,9 @@ System status: {{ system_status }}
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
+        is_valid_url, validation_error = self._validate_webhook_url(url)
+        if not is_valid_url:
+            return {"success": False, "error": validation_error}
 
         try:
             # Prepare payload

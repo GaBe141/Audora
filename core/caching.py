@@ -7,7 +7,6 @@ fallback to in-memory caching when Redis is unavailable.
 import hashlib
 import json
 import logging
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -156,7 +155,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Keep binary payloads for explicit serializers
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -168,13 +167,70 @@ class RedisCacheBackend(CacheBackend):
             logger.error(f"Failed to connect to Redis: {e}")
             raise
 
+    def _serialize_value(self, value: Any) -> bytes:
+        """Serialize cache values using safe, explicit formats."""
+        # Preserve DataFrame structure when pandas is installed.
+        try:
+            import pandas as pd  # type: ignore[import-untyped]
+
+            if isinstance(value, pd.DataFrame):
+                payload = {"serializer": "pandas_split", "data": value.to_dict(orient="split")}
+                return json.dumps(payload).encode("utf-8")
+        except Exception as exc:
+            logger.debug(f"Falling back to JSON serializer: {exc}")
+
+        payload = {"serializer": "json", "data": value}
+        return json.dumps(payload, default=str).encode("utf-8")
+
+    def _deserialize_value(self, value: bytes) -> Any | None:
+        """Deserialize Redis payloads and reject unknown/legacy formats."""
+        loaded = json.loads(value.decode("utf-8"))
+        if not isinstance(loaded, dict):
+            return None
+
+        serializer = loaded.get("serializer")
+        data = loaded.get("data")
+
+        if serializer == "json":
+            return data
+
+        if serializer == "pandas_split":
+            try:
+                import pandas as pd  # type: ignore[import-untyped]
+            except Exception:
+                logger.warning("Pandas payload found in cache but pandas is unavailable")
+                return None
+
+            if not isinstance(data, dict):
+                return None
+
+            required_keys = {"index", "columns", "data"}
+            if not required_keys.issubset(data.keys()):
+                return None
+
+            return pd.DataFrame(
+                data=data["data"],
+                index=data["index"],
+                columns=data["columns"],
+            )
+
+        return None
+
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
         try:
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            if isinstance(value, str):
+                value = value.encode("utf-8")
+
+            parsed_value = self._deserialize_value(value)
+            if parsed_value is None:
+                # Treat unknown/legacy payloads as cache misses and drop them.
+                self._client.delete(key)
+                return None
+            return parsed_value
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,7 +238,7 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
@@ -277,7 +333,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON/pandas serializable)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +428,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

@@ -1,9 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,30 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for explicit Redis serializer helpers."""
+
+    def test_json_serializer_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = {"name": "track", "score": 91, "tags": ["viral", "rising"]}
+        serialized = backend._serialize_value(payload)
+        deserialized = backend._deserialize_value(serialized)
+        assert deserialized == payload
+
+    def test_unknown_serializer_returns_none(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        unknown = json.dumps({"serializer": "unknown", "data": {"a": 1}}).encode("utf-8")
+        assert backend._deserialize_value(unknown) is None
+
+
+class TestCacheKeyHashing:
+    """Tests for deterministic strong cache key hashing."""
+
+    def test_build_cache_key_uses_sha256_length(self):
+        manager = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+        key = manager._build_cache_key("fn", args=(1, "x"), kwargs={"a": 2})
+        segments = key.split(":")
+        assert len(segments) == 3
+        assert all(len(segment) == 64 for segment in segments[1:])
