@@ -4,9 +4,11 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,6 +19,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -305,6 +308,38 @@ System status: {{ system_status }}
 """,
         }
 
+    def _validate_outbound_webhook_url(self, url: str) -> tuple[bool, str]:
+        """Validate outbound webhook URL to reduce SSRF risk."""
+        parsed = urlparse(url)
+        if parsed.scheme.lower() != "https":
+            return False, "Webhook URL must use HTTPS"
+        if not parsed.hostname:
+            return False, "Webhook URL must include a hostname"
+        if parsed.username or parsed.password:
+            return False, "Webhook URL must not include embedded credentials"
+        if parsed.hostname.lower() == "localhost":
+            return False, "Localhost webhook targets are not allowed"
+
+        try:
+            ip = ipaddress.ip_address(parsed.hostname)
+            if not ip.is_global:
+                return False, "Webhook URL points to a non-public IP address"
+            return True, ""
+        except ValueError:
+            # Hostname; resolve and ensure all addresses are public.
+            try:
+                resolved = socket.getaddrinfo(parsed.hostname, parsed.port or 443, proto=socket.IPPROTO_TCP)
+            except socket.gaierror:
+                return False, "Webhook hostname could not be resolved"
+
+            for entry in resolved:
+                addr = entry[4][0]
+                ip = ipaddress.ip_address(addr)
+                if not ip.is_global:
+                    return False, "Webhook hostname resolves to a non-public IP address"
+
+        return True, ""
+
     def _load_notification_rules(self) -> list[NotificationRule]:
         """Load default notification rules."""
         return [
@@ -540,6 +575,9 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
+        is_valid, reason = self._validate_outbound_webhook_url(webhook_url)
+        if not is_valid:
+            return {"success": False, "error": reason}
 
         try:
             # Create Slack message format
@@ -614,6 +652,9 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+        is_valid, reason = self._validate_outbound_webhook_url(webhook_url)
+        if not is_valid:
+            return {"success": False, "error": reason}
 
         try:
             # Format content for Discord
@@ -690,6 +731,9 @@ System status: {{ system_status }}
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
+        is_valid, reason = self._validate_outbound_webhook_url(url)
+        if not is_valid:
+            return {"success": False, "error": reason}
 
         try:
             # Prepare payload
