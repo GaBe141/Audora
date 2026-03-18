@@ -2,8 +2,12 @@
 
 import time
 
+import pandas as pd
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,49 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for secure Redis serialization helpers."""
+
+    def test_json_roundtrip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = {"key": "value", "n": 1}
+        encoded = backend._serialize_value(payload)
+        decoded = backend._deserialize_value(encoded)
+        assert decoded == payload
+
+    def test_bytes_roundtrip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = b"\x00\x01audora"
+        encoded = backend._serialize_value(payload)
+        decoded = backend._deserialize_value(encoded)
+        assert decoded == payload
+
+    def test_dataframe_roundtrip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
+        encoded = backend._serialize_value(payload)
+        decoded = backend._deserialize_value(encoded)
+        assert decoded.equals(payload)
+
+    def test_deserialize_rejects_invalid_payload(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        try:
+            backend._deserialize_value(b"not-json")
+            assert False, "Expected invalid payload to raise ValueError"
+        except ValueError:
+            assert True
+
+
+class TestCacheKeySecurity:
+    """Tests for cache-key hashing hardening."""
+
+    def test_build_cache_key_uses_sha256_length(self):
+        manager = CacheManager(backend=LocalCacheBackend())
+        cache_key = manager._build_cache_key("prefix", args=(1, "x"), kwargs={"k": "v"})
+        parts = cache_key.split(":")
+        # prefix + arg hash + kwarg hash
+        assert parts[0] == "prefix"
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64

@@ -4,10 +4,13 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -17,6 +20,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -465,6 +469,58 @@ System status: {{ system_status }}
 
         return datetime.now() - last_sent < cooldown_period
 
+    def _is_private_or_local_host(self, hostname: str) -> bool:
+        """Return True when hostname resolves to non-public addresses."""
+        normalized = hostname.strip().lower()
+        if not normalized:
+            return True
+
+        if normalized in {"localhost", "localhost.localdomain"}:
+            return True
+
+        try:
+            ip_obj = ipaddress.ip_address(normalized)
+            return not ip_obj.is_global
+        except ValueError:
+            pass
+
+        try:
+            resolved = socket.getaddrinfo(normalized, None, proto=socket.IPPROTO_TCP)
+        except socket.gaierror:
+            return True
+
+        for _, _, _, _, sockaddr in resolved:
+            ip_str = sockaddr[0]
+            try:
+                ip_obj = ipaddress.ip_address(ip_str)
+            except ValueError:
+                return True
+            if not ip_obj.is_global:
+                return True
+
+        return False
+
+    def _validate_webhook_url(self, url: str) -> tuple[bool, str | None]:
+        """Validate webhook URL to reduce SSRF risk."""
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False, "Invalid webhook URL format"
+
+        if parsed.scheme != "https":
+            return False, "Webhook URL must use HTTPS"
+
+        if not parsed.hostname:
+            return False, "Webhook URL must include a hostname"
+
+        if parsed.username or parsed.password:
+            return False, "Webhook URL must not include embedded credentials"
+
+        if self._is_private_or_local_host(parsed.hostname):
+            return False, "Webhook URL host must resolve to a public address"
+
+        return True, None
+
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
         email_config = self.config.get("email", {})
@@ -516,7 +572,7 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -540,6 +596,10 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
+
+        is_valid, validation_error = self._validate_webhook_url(webhook_url)
+        if not is_valid:
+            return {"success": False, "error": validation_error}
 
         try:
             # Create Slack message format
@@ -614,6 +674,10 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+
+        is_valid, validation_error = self._validate_webhook_url(webhook_url)
+        if not is_valid:
+            return {"success": False, "error": validation_error}
 
         try:
             # Format content for Discord
@@ -690,6 +754,10 @@ System status: {{ system_status }}
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
+
+        is_valid, validation_error = self._validate_webhook_url(url)
+        if not is_valid:
+            return {"success": False, "error": validation_error}
 
         try:
             # Prepare payload
