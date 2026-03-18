@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,47 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for safe Redis serialization helpers."""
+
+    def test_json_payload_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = {"track": "Song A", "score": 91.2, "active": True}
+
+        serialized = backend._serialize_value(payload)
+        result = backend._deserialize_value(serialized)
+
+        assert result == payload
+
+    def test_dataframe_payload_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        df = pd.DataFrame(
+            [{"track_name": "Song A", "score": 95.0}, {"track_name": "Song B", "score": 88.0}]
+        )
+
+        serialized = backend._serialize_value(df)
+        result = backend._deserialize_value(serialized)
+
+        pd.testing.assert_frame_equal(result, df)
+
+    def test_serialize_unsupported_type_raises(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError):
+            backend._serialize_value({1, 2, 3})
+
+    def test_deserialize_non_json_payload_raises(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        legacy_pickle_like_bytes = b"\x80\x04\x95\x0f\x00\x00\x00\x00\x00\x00\x00}\x94\x8c\x01x\x94K\x01s."
+
+        with pytest.raises(ValueError):
+            backend._deserialize_value(legacy_pickle_like_bytes)
+
+    def test_deserialize_unknown_payload_type_raises(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        unknown_payload = json.dumps({"type": "mystery", "value": "x"}).encode("utf-8")
+
+        with pytest.raises(ValueError):
+            backend._deserialize_value(unknown_payload)
