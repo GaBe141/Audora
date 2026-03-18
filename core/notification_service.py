@@ -4,6 +4,8 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -17,6 +19,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -191,8 +194,11 @@ class EnhancedNotificationService:
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         try:
-            with config_path.open("w") as f:
+            self._validate_outbound_url_config()
+            with config_path.open("w", encoding="utf-8") as f:
                 json.dump(to_save, f, indent=2)
+            if hasattr(os, "chmod") and not os.name.startswith("nt"):
+                os.chmod(config_path, 0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -451,9 +457,64 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
-        return f"{content_hash}:{message.priority.value}"
+        # Stable cryptographic digest avoids per-process hash randomization.
+        fingerprint = f"{message.title}:{message.content[:100]}:{message.priority.value}"
+        digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
+        return f"{digest}:{message.priority.value}"
+
+    def _validate_webhook_url(self, url: str) -> tuple[bool, str | None]:
+        """Validate outbound webhook URL to reduce SSRF and plaintext transport risks."""
+        parsed = urlparse(url.strip())
+        if not parsed.scheme or not parsed.hostname:
+            return False, "Webhook URL must include scheme and hostname"
+
+        allow_insecure = os.getenv("AUDORA_ALLOW_INSECURE_WEBHOOKS", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if parsed.scheme != "https" and not allow_insecure:
+            return (
+                False,
+                "Webhook URL must use HTTPS (set AUDORA_ALLOW_INSECURE_WEBHOOKS=true to override)",
+            )
+
+        hostname = parsed.hostname.lower()
+        if hostname == "localhost" or hostname.endswith(".localhost"):
+            return False, "Localhost webhook targets are not allowed"
+
+        try:
+            host_ip = ipaddress.ip_address(hostname)
+            if (
+                host_ip.is_loopback
+                or host_ip.is_private
+                or host_ip.is_link_local
+                or host_ip.is_multicast
+                or host_ip.is_reserved
+                or host_ip.is_unspecified
+            ):
+                return False, f"Private or local IP targets are not allowed: {hostname}"
+        except ValueError:
+            # Non-IP hostnames are allowed and resolved by the HTTP client at runtime.
+            pass
+
+        return True, None
+
+    def _validate_outbound_url_config(self) -> None:
+        """Validate webhook-style URL settings before persisting config."""
+        url_mappings = {
+            "slack": "webhook_url",
+            "discord": "webhook_url",
+            "webhook": "url",
+        }
+        for channel, key in url_mappings.items():
+            channel_config = self.config.get(channel, {})
+            url = channel_config.get(key)
+            if not url:
+                continue
+            is_valid, error = self._validate_webhook_url(url)
+            if not is_valid:
+                raise ValueError(f"Unsafe {channel} URL: {error}")
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""
@@ -540,6 +601,9 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
+        is_valid, error = self._validate_webhook_url(webhook_url)
+        if not is_valid:
+            return {"success": False, "error": error}
 
         try:
             # Create Slack message format
@@ -614,6 +678,9 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+        is_valid, error = self._validate_webhook_url(webhook_url)
+        if not is_valid:
+            return {"success": False, "error": error}
 
         try:
             # Format content for Discord
@@ -690,6 +757,9 @@ System status: {{ system_status }}
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
+        is_valid, error = self._validate_webhook_url(url)
+        if not is_valid:
+            return {"success": False, "error": error}
 
         try:
             # Prepare payload
