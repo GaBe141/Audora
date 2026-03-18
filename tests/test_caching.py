@@ -2,8 +2,11 @@
 
 import time
 
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,25 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCachePayloadSigning:
+    """Security tests for Redis cache signed payload handling."""
+
+    def test_signed_payload_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-key"
+
+        payload = backend._serialize({"value": 123})
+        assert backend._deserialize(payload) == {"value": 123}
+
+    def test_signed_payload_tamper_detection(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-key"
+
+        payload = backend._serialize({"value": 123})
+        version, signature, raw = payload.split(b":", 2)
+        tampered_payload = b":".join([version, signature, raw + b"tampered"])
+
+        with pytest.raises(ValueError):
+            backend._deserialize(tampered_payload)
