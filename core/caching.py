@@ -176,8 +176,8 @@ class RedisCacheBackend(CacheBackend):
             if isinstance(value, pd.DataFrame):
                 payload = {"serializer": "pandas_split", "data": value.to_dict(orient="split")}
                 return json.dumps(payload).encode("utf-8")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"Falling back to JSON serializer: {exc}")
 
         payload = {"serializer": "json", "data": value}
         return json.dumps(payload, default=str).encode("utf-8")
