@@ -5,6 +5,7 @@ Handles API keys, rate limiting, and platform-specific settings.
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import Any
 
@@ -131,6 +132,12 @@ class SocialAPIManager:
             }
 
         write_json(self.config_file, config_data)
+        if os.name != "nt":
+            try:
+                os.chmod(self.config_file, 0o600)
+            except OSError:
+                # Non-fatal: some filesystems may not support chmod semantics.
+                pass
 
     def get_config(self, platform: str) -> APIConfig | None:
         """Get configuration for a platform."""

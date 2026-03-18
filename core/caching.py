@@ -7,13 +7,23 @@ fallback to in-memory caching when Redis is unavailable.
 import hashlib
 import json
 import logging
+import os
 import pickle
 import time
 from collections.abc import Callable
+from datetime import date, datetime
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
+
+# Disable unsafe pickle deserialization by default.
+# Set AUDORA_ALLOW_UNSAFE_REDIS_PICKLE=true only for temporary legacy compatibility.
+ALLOW_UNSAFE_REDIS_PICKLE = os.getenv("AUDORA_ALLOW_UNSAFE_REDIS_PICKLE", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 # Try to import Redis, fall back to local cache if unavailable
 try:
@@ -174,7 +184,28 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+
+            # Preferred format: JSON envelope with optional datetime/date markers.
+            try:
+                payload = json.loads(value.decode("utf-8"), object_hook=self._json_object_hook)
+                if isinstance(payload, dict) and payload.get("format") == "json":
+                    return payload.get("value")
+                return payload
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+                if ALLOW_UNSAFE_REDIS_PICKLE:
+                    logger.warning(
+                        "Using unsafe pickle Redis deserialization for key %s. "
+                        "Set AUDORA_ALLOW_UNSAFE_REDIS_PICKLE=false after migration.",
+                        key,
+                    )
+                    return pickle.loads(value)
+
+                logger.error(
+                    "Rejected non-JSON Redis payload for key %s. "
+                    "Legacy pickle payloads require AUDORA_ALLOW_UNSAFE_REDIS_PICKLE=true.",
+                    key,
+                )
+                return None
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,13 +213,65 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
+            if serialized is None:
+                return
+
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    @staticmethod
+    def _json_default(obj: Any) -> Any:
+        """JSON serializer for supported non-primitive types."""
+        if isinstance(obj, datetime):
+            return {"__audora_type__": "datetime", "value": obj.isoformat()}
+        if isinstance(obj, date):
+            return {"__audora_type__": "date", "value": obj.isoformat()}
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+    @staticmethod
+    def _json_object_hook(obj: dict[str, Any]) -> Any:
+        """Deserialize known typed JSON payloads."""
+        marker = obj.get("__audora_type__")
+        value = obj.get("value")
+
+        if marker == "datetime" and isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return obj
+
+        if marker == "date" and isinstance(value, str):
+            try:
+                return date.fromisoformat(value)
+            except ValueError:
+                return obj
+
+        return obj
+
+    def _serialize_value(self, value: Any) -> bytes | None:
+        """Serialize cache value securely for Redis storage."""
+        try:
+            envelope = {"format": "json", "value": value}
+            return json.dumps(envelope, default=self._json_default).encode("utf-8")
+        except (TypeError, ValueError):
+            if ALLOW_UNSAFE_REDIS_PICKLE:
+                logger.warning(
+                    "Falling back to unsafe pickle Redis serialization for %s. "
+                    "This is insecure and should be migrated.",
+                    type(value).__name__,
+                )
+                return pickle.dumps(value)
+
+            logger.warning(
+                "Skipping Redis cache write for non-JSON-serializable value type: %s",
+                type(value).__name__,
+            )
+            return None
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
@@ -372,12 +455,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
