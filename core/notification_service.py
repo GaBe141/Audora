@@ -4,9 +4,12 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import hashlib
+import ipaddress
 import json
 import logging
 import os
+import ssl
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,6 +20,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -186,13 +190,39 @@ class EnhancedNotificationService:
         """
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
+        slack_url = str(self.config.get("slack", {}).get("webhook_url", "") or "").strip()
+        if slack_url:
+            is_valid, error = self._validate_outbound_webhook_url(
+                slack_url, allowed_hosts={"hooks.slack.com", "hooks.slack-gov.com"}
+            )
+            if not is_valid:
+                raise ValueError(f"Invalid Slack webhook URL: {error}")
+
+        discord_url = str(self.config.get("discord", {}).get("webhook_url", "") or "").strip()
+        if discord_url:
+            is_valid, error = self._validate_outbound_webhook_url(
+                discord_url, allowed_hosts={"discord.com", "discordapp.com"}
+            )
+            if not is_valid:
+                raise ValueError(f"Invalid Discord webhook URL: {error}")
+
+        custom_webhook_url = str(self.config.get("webhook", {}).get("url", "") or "").strip()
+        if custom_webhook_url:
+            is_valid, error = self._validate_outbound_webhook_url(custom_webhook_url)
+            if not is_valid:
+                raise ValueError(f"Invalid custom webhook URL: {error}")
+
         # Only save channel-specific sections (not internal runtime state)
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         try:
-            with config_path.open("w") as f:
+            with config_path.open("w", encoding="utf-8") as f:
                 json.dump(to_save, f, indent=2)
+
+            if hasattr(os, "chmod"):
+                os.chmod(config_path, 0o600)
+
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -451,9 +481,9 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
-        return f"{content_hash}:{message.priority.value}"
+        base = f"{message.title}:{message.content[:100]}:{message.priority.value}"
+        content_hash = hashlib.sha256(base.encode("utf-8")).hexdigest()
+        return content_hash
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""
@@ -464,6 +494,47 @@ System status: {{ system_status }}
         cooldown_period = timedelta(minutes=cooldown_minutes)
 
         return datetime.now() - last_sent < cooldown_period
+
+    def _validate_outbound_webhook_url(
+        self, url: str, allowed_hosts: set[str] | None = None
+    ) -> tuple[bool, str | None]:
+        """Validate outbound webhook URLs to reduce SSRF and plaintext leaks."""
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False, "URL parsing failed"
+
+        if parsed.scheme.lower() != "https":
+            return False, "only HTTPS webhook URLs are allowed"
+
+        host = (parsed.hostname or "").strip().lower()
+        if not host:
+            return False, "webhook URL is missing a hostname"
+
+        if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".local"):
+            return False, "localhost/private hostnames are not allowed"
+
+        try:
+            host_ip = ipaddress.ip_address(host)
+            if (
+                host_ip.is_private
+                or host_ip.is_loopback
+                or host_ip.is_link_local
+                or host_ip.is_multicast
+                or host_ip.is_reserved
+                or host_ip.is_unspecified
+            ):
+                return False, "private or non-routable IP webhook targets are not allowed"
+        except ValueError:
+            # Non-literal hostnames are validated by scheme/hostname + optional allowlist.
+            pass
+
+        if allowed_hosts:
+            lowered = {h.lower() for h in allowed_hosts}
+            if not any(host == h or host.endswith(f".{h}") for h in lowered):
+                return False, f"host must match one of: {', '.join(sorted(lowered))}"
+
+        return True, None
 
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
@@ -513,10 +584,12 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            server = smtplib.SMTP(
+                email_config["smtp_server"], email_config.get("port", 587), timeout=10
+            )
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -536,12 +609,18 @@ System status: {{ system_status }}
     async def _send_slack(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification to Slack."""
         slack_config = self.config.get("slack", {})
-        webhook_url = slack_config.get("webhook_url")
+        webhook_url = str(slack_config.get("webhook_url") or "")
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
 
         try:
+            is_valid_url, error = self._validate_outbound_webhook_url(
+                webhook_url, allowed_hosts={"hooks.slack.com", "hooks.slack-gov.com"}
+            )
+            if not is_valid_url:
+                return {"success": False, "error": f"Invalid Slack webhook URL: {error}"}
+
             # Create Slack message format
             color_map = {
                 NotificationPriority.LOW: "good",
@@ -591,7 +670,11 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -610,12 +693,18 @@ System status: {{ system_status }}
     async def _send_discord(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification to Discord."""
         discord_config = self.config.get("discord", {})
-        webhook_url = discord_config.get("webhook_url")
+        webhook_url = str(discord_config.get("webhook_url") or "")
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
 
         try:
+            is_valid_url, error = self._validate_outbound_webhook_url(
+                webhook_url, allowed_hosts={"discord.com", "discordapp.com"}
+            )
+            if not is_valid_url:
+                return {"success": False, "error": f"Invalid Discord webhook URL: {error}"}
+
             # Format content for Discord
             content = message.content
             if message.template_vars:
@@ -657,7 +746,11 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -686,12 +779,16 @@ System status: {{ system_status }}
     async def _send_webhook(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification to custom webhook."""
         webhook_config = self.config.get("webhook", {})
-        url = webhook_config.get("url")
+        url = str(webhook_config.get("url") or "")
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
+            is_valid_url, error = self._validate_outbound_webhook_url(url)
+            if not is_valid_url:
+                return {"success": False, "error": f"Invalid webhook URL: {error}"}
+
             # Prepare payload
             payload = {
                 "title": message.title,
@@ -709,6 +806,10 @@ System status: {{ system_status }}
                 payload["formatted_content"] = template.render(**message.template_vars)
 
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
+            if not isinstance(headers, dict):
+                headers = {"Content-Type": "application/json"}
+            headers = {str(k): str(v) for k, v in headers.items() if str(v).strip()}
+            headers.setdefault("Content-Type", "application/json")
             timeout = webhook_config.get("timeout", 30)
 
             async with (
