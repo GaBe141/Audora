@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
 import time
+from datetime import date, datetime
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,52 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis-safe serialization helpers."""
+
+    def test_round_trip_complex_types(self):
+        payload = {
+            "track": "Song A",
+            "score": 99.2,
+            "when": datetime(2026, 3, 18, 1, 2, 3),
+            "day": date(2026, 3, 18),
+            "blob": b"\x00\xff",
+            "pair": ("artist", 123),
+            "tags": {"viral", "trending"},
+        }
+
+        encoded = RedisCacheBackend._serialize(payload)
+        assert encoded is not None
+
+        decoded = RedisCacheBackend._deserialize(encoded)
+        assert decoded is not None
+        assert decoded["track"] == payload["track"]
+        assert decoded["score"] == payload["score"]
+        assert decoded["when"] == payload["when"]
+        assert decoded["day"] == payload["day"]
+        assert decoded["blob"] == payload["blob"]
+        assert decoded["pair"] == payload["pair"]
+        assert decoded["tags"] == payload["tags"]
+
+    def test_round_trip_pandas_dataframe(self):
+        frame = pd.DataFrame(
+            {
+                "track_name": ["Alpha", "Beta"],
+                "score": [91.1, 84.6],
+            }
+        )
+
+        encoded = RedisCacheBackend._serialize(frame)
+        assert encoded is not None
+
+        decoded = RedisCacheBackend._deserialize(encoded)
+        assert isinstance(decoded, pd.DataFrame)
+        pd.testing.assert_frame_equal(decoded, frame)
+
+    def test_skip_unsupported_type(self):
+        class Unsupported:
+            pass
+
+        assert RedisCacheBackend._serialize(Unsupported()) is None

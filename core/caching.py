@@ -7,10 +7,11 @@ fallback to in-memory caching when Redis is unavailable.
 import hashlib
 import json
 import logging
-import pickle
 import time
 from collections.abc import Callable
+from datetime import date, datetime
 from functools import wraps
+from io import StringIO
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -156,7 +157,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Keep binary mode for encoded payloads
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +175,7 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            return self._deserialize(value)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,13 +183,132 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize(value)
+            if serialized is None:
+                return
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    @classmethod
+    def _serialize(cls, value: Any) -> bytes | None:
+        """Serialize cache value safely without executable payloads."""
+        try:
+            payload = cls._to_serializable(value)
+        except TypeError:
+            logger.warning(f"Skipping Redis cache for unsupported type: {type(value).__name__}")
+            return None
+        return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+    @classmethod
+    def _deserialize(cls, raw_value: bytes) -> Any | None:
+        """Deserialize cache value from trusted JSON-only format."""
+        try:
+            payload = json.loads(raw_value.decode("utf-8"))
+            return cls._from_serializable(payload)
+        except Exception as e:
+            logger.warning(f"Invalid Redis cache payload, treating as miss: {e}")
+            return None
+
+    @classmethod
+    def _to_serializable(cls, value: Any) -> Any:
+        """Convert Python objects to JSON-serializable tagged payloads."""
+        if value is None or isinstance(value, bool | int | float | str):
+            return value
+
+        if isinstance(value, bytes):
+            return {
+                "__audora_type__": "bytes",
+                "value": value.hex(),
+            }
+
+        if isinstance(value, tuple):
+            return {
+                "__audora_type__": "tuple",
+                "items": [cls._to_serializable(item) for item in value],
+            }
+
+        if isinstance(value, set):
+            return {
+                "__audora_type__": "set",
+                "items": [cls._to_serializable(item) for item in sorted(value, key=repr)],
+            }
+
+        if isinstance(value, list):
+            return [cls._to_serializable(item) for item in value]
+
+        if isinstance(value, dict):
+            return {
+                "__audora_type__": "dict",
+                "items": [
+                    [cls._to_serializable(key), cls._to_serializable(item)]
+                    for key, item in value.items()
+                ],
+            }
+
+        if isinstance(value, datetime):
+            return {
+                "__audora_type__": "datetime",
+                "value": value.isoformat(),
+            }
+
+        if isinstance(value, date):
+            return {
+                "__audora_type__": "date",
+                "value": value.isoformat(),
+            }
+
+        if value.__class__.__name__ == "DataFrame" and hasattr(value, "to_json"):
+            return {
+                "__audora_type__": "pandas.DataFrame",
+                "value": value.to_json(orient="split", date_format="iso"),
+            }
+
+        raise TypeError(f"Unsupported cache value type: {type(value).__name__}")
+
+    @classmethod
+    def _from_serializable(cls, payload: Any) -> Any:
+        """Reconstruct Python objects from tagged JSON payloads."""
+        if isinstance(payload, list):
+            return [cls._from_serializable(item) for item in payload]
+
+        if not isinstance(payload, dict):
+            return payload
+
+        type_tag = payload.get("__audora_type__")
+        if type_tag is None:
+            return {key: cls._from_serializable(item) for key, item in payload.items()}
+
+        if type_tag == "bytes":
+            return bytes.fromhex(payload["value"])
+
+        if type_tag == "tuple":
+            return tuple(cls._from_serializable(item) for item in payload.get("items", []))
+
+        if type_tag == "set":
+            return {cls._from_serializable(item) for item in payload.get("items", [])}
+
+        if type_tag == "dict":
+            items = payload.get("items", [])
+            return {
+                cls._from_serializable(key): cls._from_serializable(value) for key, value in items
+            }
+
+        if type_tag == "datetime":
+            return datetime.fromisoformat(payload["value"])
+
+        if type_tag == "date":
+            return date.fromisoformat(payload["value"])
+
+        if type_tag == "pandas.DataFrame":
+            import pandas as pd
+
+            return pd.read_json(StringIO(payload["value"]), orient="split")
+
+        return payload
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
@@ -277,7 +397,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +492,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
