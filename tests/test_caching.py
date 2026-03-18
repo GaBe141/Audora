@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
 import time
+import json
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    _SignedPickleSerializer,
 )
 
 
@@ -118,3 +122,27 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedPickleSerializer:
+    """Security tests for signed cache serialization."""
+
+    def test_round_trip(self):
+        serializer = _SignedPickleSerializer(b"test-signing-key")
+        payload = {"track": "x", "score": 99.0}
+        encoded = serializer.dumps(payload)
+        assert serializer.loads(encoded) == payload
+
+    def test_rejects_tampered_payload(self):
+        serializer = _SignedPickleSerializer(b"test-signing-key")
+        envelope = json.loads(serializer.dumps({"ok": True}).decode("utf-8"))
+        envelope["sig"] = "0" * len(envelope["sig"])
+        encoded = json.dumps(envelope).encode("utf-8")
+
+        with pytest.raises(ValueError, match="signature"):
+            serializer.loads(encoded)
+
+    def test_rejects_unsigned_legacy_pickle_bytes(self):
+        serializer = _SignedPickleSerializer(b"test-signing-key")
+        with pytest.raises(ValueError, match="signed JSON envelope"):
+            serializer.loads(b"\x80\x04K.")
