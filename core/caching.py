@@ -4,11 +4,12 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
+import base64
 import hashlib
 import json
 import logging
-import pickle
 import time
+from io import StringIO
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -129,6 +130,7 @@ class LocalCacheBackend(CacheBackend):
 
 class RedisCacheBackend(CacheBackend):
     """Redis cache backend with connection pooling."""
+    _SERIALIZATION_VERSION = 1
 
     def __init__(
         self,
@@ -156,7 +158,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Use binary mode for serialized payloads
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -168,13 +170,80 @@ class RedisCacheBackend(CacheBackend):
             logger.error(f"Failed to connect to Redis: {e}")
             raise
 
+    def _serialize_value(self, value: Any) -> bytes:
+        """Serialize cache value to a safe JSON payload."""
+        payload: dict[str, Any] = {"version": self._SERIALIZATION_VERSION}
+
+        if isinstance(value, bytes):
+            payload["type"] = "bytes"
+            payload["value"] = base64.b64encode(value).decode("ascii")
+            return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+        try:
+            import pandas as pd  # Local import to avoid hard dependency at module import time
+        except ImportError:  # pragma: no cover - pandas is a project dependency
+            pd = None
+
+        if pd is not None and isinstance(value, pd.DataFrame):
+            payload["type"] = "pandas_dataframe"
+            payload["value"] = value.to_json(orient="split", date_format="iso")
+            return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+        # Only allow JSON-serializable values for generic payloads.
+        json.dumps(value)
+        payload["type"] = "json"
+        payload["value"] = value
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    def _deserialize_value(self, raw_value: bytes) -> Any:
+        """Deserialize cache value from a safe JSON payload."""
+        try:
+            payload = json.loads(raw_value.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Invalid cache payload encoding") from exc
+
+        if not isinstance(payload, dict):
+            raise ValueError("Cache payload must be a JSON object")
+
+        if payload.get("version") != self._SERIALIZATION_VERSION:
+            raise ValueError("Unsupported cache payload version")
+
+        payload_type = payload.get("type")
+        if payload_type == "json":
+            return payload.get("value")
+
+        if payload_type == "bytes":
+            encoded_bytes = payload.get("value")
+            if not isinstance(encoded_bytes, str):
+                raise ValueError("Invalid bytes payload")
+            try:
+                return base64.b64decode(encoded_bytes.encode("ascii"), validate=True)
+            except (ValueError, UnicodeEncodeError) as exc:
+                raise ValueError("Invalid base64 bytes payload") from exc
+
+        if payload_type == "pandas_dataframe":
+            dataframe_json = payload.get("value")
+            if not isinstance(dataframe_json, str):
+                raise ValueError("Invalid dataframe payload")
+            try:
+                import pandas as pd
+            except ImportError as exc:  # pragma: no cover - pandas is a project dependency
+                raise ValueError("Pandas is required to deserialize dataframe payloads") from exc
+            return pd.read_json(StringIO(dataframe_json), orient="split")
+
+        raise ValueError(f"Unsupported cache payload type: {payload_type}")
+
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
         try:
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            return self._deserialize_value(value)
+        except ValueError as e:
+            logger.warning(f"Invalid Redis payload for key {key}: {e}")
+            self.delete(key)
+            return None
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,11 +251,13 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
+        except (TypeError, ValueError) as e:
+            logger.error(f"Redis set serialization error for key {key}: {e}")
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 
@@ -277,7 +348,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (JSON-serializable, bytes, or pandas.DataFrame for Redis)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +443,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
