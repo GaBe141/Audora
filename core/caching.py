@@ -5,9 +5,9 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import io
 import json
 import logging
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -174,7 +174,7 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            return self._deserialize_value(key, value)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,7 +182,10 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
+            if serialized is None:
+                logger.debug(f"Skipping Redis cache set for unserializable value (key={key})")
+                return
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
@@ -212,6 +215,63 @@ class RedisCacheBackend(CacheBackend):
         except Exception as e:
             logger.error(f"Redis exists error for key {key}: {e}")
             return False
+
+    def _serialize_value(self, value: Any) -> bytes | None:
+        """Serialize cache value using safe, non-executable formats."""
+        # Default path: JSON-serializable values
+        try:
+            payload = {"serializer": "json", "data": value}
+            return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        except (TypeError, ValueError):
+            pass
+
+        # Special-case pandas DataFrame values used by data store helpers.
+        if value.__class__.__name__ == "DataFrame":
+            try:
+                payload = {
+                    "serializer": "pandas_split",
+                    "data": value.to_json(orient="split", date_format="iso"),
+                }
+                return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            except Exception as e:
+                logger.warning(f"Failed to serialize DataFrame for Redis cache: {e}")
+                return None
+
+        # Avoid unsafe fallbacks like pickle for unsupported value types.
+        logger.warning(f"Unsupported cache value type for Redis serialization: {type(value).__name__}")
+        return None
+
+    def _deserialize_value(self, key: str, value: bytes) -> Any | None:
+        """Deserialize cache value while rejecting unsafe legacy payloads."""
+        try:
+            payload = json.loads(value.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            # Legacy pickle bytes (or corrupt data) are treated as cache misses.
+            logger.warning(f"Discarding non-JSON Redis cache entry for key: {key}")
+            self._client.delete(key)
+            return None
+
+        if not isinstance(payload, dict):
+            logger.warning(f"Invalid Redis cache payload shape for key: {key}")
+            return None
+
+        serializer = payload.get("serializer")
+        data = payload.get("data")
+
+        if serializer == "json":
+            return data
+
+        if serializer == "pandas_split":
+            try:
+                import pandas as pd
+
+                return pd.read_json(io.StringIO(data), orient="split")
+            except Exception as e:
+                logger.warning(f"Failed to deserialize DataFrame cache value for key {key}: {e}")
+                return None
+
+        logger.warning(f"Unknown Redis cache serializer '{serializer}' for key: {key}")
+        return None
 
 
 class CacheManager:
@@ -277,7 +337,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (Redis backend supports JSON and pandas DataFrame)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +432,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
