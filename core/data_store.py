@@ -84,6 +84,23 @@ class EnhancedMusicDataStore:
             conn.execute("PRAGMA cache_size=10000")
             conn.execute("PRAGMA temp_store=memory")
 
+        # Restrict bulk updates to known-safe columns only.
+        self._bulk_update_allowed_fields = frozenset(
+            {
+                "platform",
+                "track_id",
+                "track_name",
+                "artist",
+                "score",
+                "rank",
+                "region",
+                "trend_date",
+                "first_detected",
+                "metadata",
+                "is_active",
+            }
+        )
+
     def _get_pooled_connection(self) -> sqlite3.Connection:
         """Get a connection from the pool or create a new one."""
         if self._connection_pool:
@@ -775,8 +792,15 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
+        invalid_fields = [field for field in updates if field not in self._bulk_update_allowed_fields]
+        if invalid_fields:
+            raise ValueError(
+                "Invalid update fields: "
+                f"{invalid_fields}. Allowed fields: {sorted(self._bulk_update_allowed_fields)}"
+            )
+
         # Build SET clause
-        set_clauses = [f"{field} = ?" for field in updates]
+        set_clauses = [f'"{field}" = ?' for field in updates]
         params = list(updates.values())
 
         # Add track IDs for WHERE clause
