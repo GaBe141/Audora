@@ -214,7 +214,8 @@ class RedisCacheBackend(CacheBackend):
         if not hmac.compare_digest(signature, expected_signature):
             raise ValueError("Cache payload signature mismatch")
 
-        return pickle.loads(payload)
+        # Payload integrity is verified via HMAC before deserialization.
+        return pickle.loads(payload)  # nosec B301
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
