@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,56 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for Redis cache payload handling."""
+
+    @staticmethod
+    def _backend() -> RedisCacheBackend:
+        # Bypass __init__ so tests don't require a live Redis server.
+        return RedisCacheBackend.__new__(RedisCacheBackend)
+
+    def test_redis_payload_json_roundtrip(self):
+        backend = self._backend()
+        payload = {"track": "x", "score": 42}
+        serialized = backend._serialize_value(payload)
+        assert backend._deserialize_value(serialized) == payload
+
+    def test_redis_payload_bytes_roundtrip(self):
+        backend = self._backend()
+        payload = b"\x00\x10binary"
+        serialized = backend._serialize_value(payload)
+        assert backend._deserialize_value(serialized) == payload
+
+    def test_redis_payload_dataframe_roundtrip(self):
+        backend = self._backend()
+        payload = pd.DataFrame({"track": ["A", "B"], "score": [1.2, 3.4]})
+        serialized = backend._serialize_value(payload)
+        restored = backend._deserialize_value(serialized)
+        assert isinstance(restored, pd.DataFrame)
+        assert restored.equals(payload)
+
+    def test_redis_payload_rejects_non_json(self):
+        backend = self._backend()
+        with pytest.raises(ValueError, match="not valid JSON"):
+            backend._deserialize_value(b"\x80\x04pickle")
+
+    def test_redis_payload_rejects_invalid_version(self):
+        backend = self._backend()
+        payload = json.dumps({"version": "v0", "type": "json", "value": 1}).encode("utf-8")
+        with pytest.raises(ValueError, match="version is invalid"):
+            backend._deserialize_value(payload)
+
+
+class TestCacheKeyHashing:
+    """Ensure cache keys avoid weak hash algorithms."""
+
+    def test_build_cache_key_uses_sha256(self):
+        cache = CacheManager(backend=LocalCacheBackend(max_size=5))
+        key = cache._build_cache_key("prefix", ("a", 1), {"b": 2})
+        parts = key.split(":")
+        # prefix + args hash + kwargs hash
+        assert parts[0] == "prefix"
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
