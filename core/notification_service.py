@@ -4,6 +4,7 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -112,6 +114,11 @@ class EnhancedNotificationService:
 
     def _load_config(self, config_file: str | None) -> dict[str, Any]:
         """Load notification configuration."""
+        webhook_token = os.getenv("WEBHOOK_TOKEN", "").strip()
+        webhook_headers = {"Content-Type": "application/json"}
+        if webhook_token:
+            webhook_headers["Authorization"] = f"Bearer {webhook_token}"
+
         default_config = {
             "enabled": True,
             "default_channels": ["console"],
@@ -126,7 +133,11 @@ class EnhancedNotificationService:
                 "username": os.getenv("SMTP_USERNAME", ""),
                 "password": os.getenv("SMTP_PASSWORD", ""),
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
-                "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
+                "recipients": [
+                    recipient.strip()
+                    for recipient in os.getenv("EMAIL_RECIPIENTS", "").split(",")
+                    if recipient.strip()
+                ],
                 "use_tls": True,
             },
             "slack": {
@@ -134,18 +145,17 @@ class EnhancedNotificationService:
                 "channel": os.getenv("SLACK_CHANNEL", "#music-trends"),
                 "username": os.getenv("SLACK_USERNAME", "Music Discovery Bot"),
                 "icon_emoji": ":musical_note:",
+                "timeout": 30,
             },
             "discord": {
                 "webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),
                 "username": os.getenv("DISCORD_USERNAME", "Music Discovery"),
                 "avatar_url": "",
+                "timeout": 30,
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
-                },
+                "headers": webhook_headers,
                 "timeout": 30,
             },
             "sms": {
@@ -153,7 +163,11 @@ class EnhancedNotificationService:
                 "api_key": os.getenv("SMS_API_KEY", ""),
                 "api_secret": os.getenv("SMS_API_SECRET", ""),
                 "from_number": os.getenv("SMS_FROM_NUMBER", ""),
-                "recipients": os.getenv("SMS_RECIPIENTS", "").split(","),
+                "recipients": [
+                    recipient.strip()
+                    for recipient in os.getenv("SMS_RECIPIENTS", "").split(",")
+                    if recipient.strip()
+                ],
             },
         }
 
@@ -465,6 +479,46 @@ System status: {{ system_status }}
 
         return datetime.now() - last_sent < cooldown_period
 
+    def _validate_webhook_url(self, url: str) -> tuple[bool, str]:
+        """Validate webhook destinations to reduce SSRF risk."""
+        try:
+            parsed = urlparse(url.strip())
+        except ValueError:
+            return False, "Invalid webhook URL format"
+
+        if parsed.scheme.lower() != "https":
+            return False, "Webhook URL must use HTTPS"
+
+        if not parsed.hostname:
+            return False, "Webhook URL must include a hostname"
+
+        if parsed.username or parsed.password:
+            return False, "Webhook URL must not include embedded credentials"
+
+        hostname = parsed.hostname.lower()
+        if hostname in {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}:
+            return False, f"Webhook hostname is not allowed: {hostname}"
+
+        if hostname.endswith(".local"):
+            return False, f"Webhook hostname is not allowed: {hostname}"
+
+        try:
+            ip = ipaddress.ip_address(hostname)
+        except ValueError:
+            return True, ""
+
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return False, f"Webhook IP address is not allowed: {hostname}"
+
+        return True, ""
+
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
         email_config = self.config.get("email", {})
@@ -537,9 +591,14 @@ System status: {{ system_status }}
         """Send notification to Slack."""
         slack_config = self.config.get("slack", {})
         webhook_url = slack_config.get("webhook_url")
+        timeout = int(slack_config.get("timeout", 30))
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
+
+        is_valid, validation_error = self._validate_webhook_url(webhook_url)
+        if not is_valid:
+            return {"success": False, "error": validation_error}
 
         try:
             # Create Slack message format
@@ -590,7 +649,7 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session,
                 session.post(webhook_url, json=slack_message) as response,
             ):
                 if response.status == 200:
@@ -611,9 +670,14 @@ System status: {{ system_status }}
         """Send notification to Discord."""
         discord_config = self.config.get("discord", {})
         webhook_url = discord_config.get("webhook_url")
+        timeout = int(discord_config.get("timeout", 30))
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+
+        is_valid, validation_error = self._validate_webhook_url(webhook_url)
+        if not is_valid:
+            return {"success": False, "error": validation_error}
 
         try:
             # Format content for Discord
@@ -656,7 +720,7 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session,
                 session.post(webhook_url, json=discord_message) as response,
             ):
                 if response.status in [200, 204]:
@@ -690,6 +754,10 @@ System status: {{ system_status }}
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
+
+        is_valid, validation_error = self._validate_webhook_url(url)
+        if not is_valid:
+            return {"success": False, "error": validation_error}
 
         try:
             # Prepare payload
