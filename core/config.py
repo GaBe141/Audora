@@ -164,6 +164,7 @@ SPOTIFY_CLIENT_ID=your_spotify_client_id_here
 SPOTIFY_CLIENT_SECRET=your_spotify_client_secret_here
 SPOTIFY_REDIRECT_URI=http://127.0.0.1:8888/callback
 SPOTIFY_SCOPES=user-top-read user-read-recently-played playlist-read-private user-library-read
+AUDORA_CACHE_SIGNING_KEY=replace_with_a_long_random_secret
 
 # Last.fm API Configuration (Optional)
 # Get these from: https://www.last.fm/api/account/create

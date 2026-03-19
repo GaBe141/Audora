@@ -3,7 +3,9 @@
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,47 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSecurity:
+    """Security-focused tests for signed Redis cache payloads."""
+
+    @staticmethod
+    def _build_backend(signing_key: bytes = b"test-signing-key") -> RedisCacheBackend:
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = signing_key
+        return backend
+
+    def test_signed_payload_round_trip(self):
+        backend = self._build_backend()
+        value = {"track": "x", "score": 91}
+        serialized = backend._serialize_value(value)
+
+        assert backend._deserialize_value(serialized) == value
+
+    def test_unsigned_payload_is_rejected(self):
+        backend = self._build_backend()
+        unsigned_payload = b'{"track":"x"}'
+
+        assert backend._deserialize_value(unsigned_payload) is None
+
+    def test_tampered_payload_is_rejected(self):
+        backend = self._build_backend()
+        payload = bytearray(backend._serialize_value({"track": "x"}))
+        payload[-1] = (payload[-1] + 1) % 256
+
+        assert backend._deserialize_value(bytes(payload)) is None
+
+
+class TestCacheKeyHashing:
+    """Ensure cache key hashing uses collision-resistant digest size."""
+
+    def test_cache_key_uses_sha256_hash_segments(self):
+        manager = CacheManager(backend=LocalCacheBackend(), key_prefix="audora_test")
+        key = manager._build_cache_key("prefix", args=(1, 2), kwargs={"k": "v"})
+        parts = key.split(":")
+
+        # prefix + hash(args) + hash(kwargs)
+        assert len(parts) == 3
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
