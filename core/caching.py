@@ -7,13 +7,18 @@ fallback to in-memory caching when Redis is unavailable.
 import hashlib
 import json
 import logging
-import pickle
 import time
+from datetime import datetime
+from io import StringIO
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
+
+_CACHE_VALUE_PREFIX = b"AUDORA_JSON_V1:"
+_CACHE_TYPE_KEY = "__audora_cache_type__"
+_JSON_TYPE_KEY = "__audora_json_type__"
 
 # Try to import Redis, fall back to local cache if unavailable
 try:
@@ -174,7 +179,14 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            if not value.startswith(_CACHE_VALUE_PREFIX):
+                # Legacy pickle payloads are deliberately not deserialized to avoid RCE risk.
+                self._client.delete(key)
+                logger.warning(
+                    "Rejected legacy/untrusted cache payload for key %s; entry deleted", key
+                )
+                return None
+            return self._deserialize_value(value[len(_CACHE_VALUE_PREFIX) :])
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,13 +194,74 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    @staticmethod
+    def _json_default(value: Any) -> Any:
+        """Encode non-JSON native types in a safe, explicit format."""
+        if isinstance(value, datetime):
+            return {_JSON_TYPE_KEY: "datetime", "value": value.isoformat()}
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+    @staticmethod
+    def _json_object_hook(value: dict[str, Any]) -> Any:
+        """Decode custom JSON payload markers to native objects."""
+        marker = value.get(_JSON_TYPE_KEY)
+        if marker == "datetime":
+            return datetime.fromisoformat(value["value"])
+        return value
+
+    def _serialize_value(self, value: Any) -> bytes:
+        """Serialize cache values without code-executing formats."""
+        try:
+            import pandas as pd
+        except ImportError:
+            pd = None  # type: ignore[assignment]
+
+        if pd is not None and isinstance(value, pd.DataFrame):
+            payload = {
+                _CACHE_TYPE_KEY: "pandas_dataframe",
+                "value": value.to_json(orient="split", date_format="iso"),
+            }
+        else:
+            payload = {_CACHE_TYPE_KEY: "json", "value": value}
+
+        serialized = json.dumps(
+            payload,
+            default=self._json_default,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return _CACHE_VALUE_PREFIX + serialized
+
+    def _deserialize_value(self, value: bytes) -> Any:
+        """Deserialize cache values from safe JSON payloads."""
+        payload = json.loads(value.decode("utf-8"), object_hook=self._json_object_hook)
+        cache_type = payload.get(_CACHE_TYPE_KEY)
+
+        if cache_type == "pandas_dataframe":
+            return self._deserialize_pandas_dataframe(payload.get("value"))
+
+        if cache_type == "json":
+            return payload.get("value")
+
+        raise ValueError(f"Unknown cache payload type: {cache_type}")
+
+    @staticmethod
+    def _deserialize_pandas_dataframe(value: Any) -> Any:
+        """Deserialize a pandas DataFrame payload."""
+        if not isinstance(value, str):
+            raise ValueError("Invalid DataFrame payload type")
+        try:
+            import pandas as pd
+        except ImportError as exc:
+            raise ValueError("Pandas is required to deserialize cached DataFrames") from exc
+        return pd.read_json(StringIO(value), orient="split")
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
@@ -277,7 +350,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (JSON-serializable, or pandas DataFrame)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +445,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

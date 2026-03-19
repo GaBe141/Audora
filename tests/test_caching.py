@@ -2,8 +2,11 @@
 
 import time
 
+import pandas as pd
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,46 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class _FakeRedisClient:
+    def __init__(self, initial_data: dict[str, bytes] | None = None):
+        self.data = dict(initial_data or {})
+        self.deleted_keys: list[str] = []
+
+    def get(self, key: str) -> bytes | None:
+        return self.data.get(key)
+
+    def set(self, key: str, value: bytes) -> None:
+        self.data[key] = value
+
+    def setex(self, key: str, _ttl: int, value: bytes) -> None:
+        self.data[key] = value
+
+    def delete(self, key: str) -> None:
+        self.deleted_keys.append(key)
+        self.data.pop(key, None)
+
+
+class TestRedisCacheBackendSecurity:
+    def test_legacy_payload_is_rejected_and_deleted(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._client = _FakeRedisClient({"unsafe": b"legacy_pickle_payload"})
+
+        assert backend.get("unsafe") is None
+        assert "unsafe" in backend._client.deleted_keys
+
+    def test_dataframe_roundtrip_uses_safe_json_payload(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._client = _FakeRedisClient()
+        df = pd.DataFrame(
+            {
+                "track": ["one", "two"],
+                "score": [91.0, 88.5],
+            }
+        )
+
+        backend.set("df", df, ttl=60)
+        restored = backend.get("df")
+
+        pd.testing.assert_frame_equal(restored, df)

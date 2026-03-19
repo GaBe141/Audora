@@ -61,6 +61,21 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+    _ALLOWED_TREND_UPDATE_FIELDS = frozenset(
+        {
+            "platform",
+            "track_id",
+            "track_name",
+            "artist",
+            "score",
+            "rank",
+            "region",
+            "trend_date",
+            "first_detected",
+            "metadata",
+            "is_active",
+        }
+    )
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
@@ -774,6 +789,13 @@ class EnhancedMusicDataStore:
         """
         if not track_ids or not updates:
             return 0
+
+        invalid_fields = set(updates) - self._ALLOWED_TREND_UPDATE_FIELDS
+        if invalid_fields:
+            raise ValueError(
+                f"Invalid update fields: {sorted(invalid_fields)}. "
+                f"Allowed fields: {sorted(self._ALLOWED_TREND_UPDATE_FIELDS)}"
+            )
 
         # Build SET clause
         set_clauses = [f"{field} = ?" for field in updates]
