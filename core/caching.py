@@ -7,7 +7,6 @@ fallback to in-memory caching when Redis is unavailable.
 import hashlib
 import json
 import logging
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -156,7 +155,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Use binary mode for explicit UTF-8 handling
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +173,12 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            if isinstance(value, bytes):
+                value = value.decode("utf-8")
+            return json.loads(value)
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            logger.warning(f"Redis cache entry for key {key} is invalid JSON: {e}")
+            return None
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,7 +186,17 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            # JSON-only serialization avoids unsafe code execution vectors
+            # associated with pickle deserialization.
+            serialized = json.dumps(value).encode("utf-8")
+        except TypeError as e:
+            logger.warning(f"Skipping Redis cache set for non-JSON value at key {key}: {e}")
+            return
+        except Exception as e:
+            logger.error(f"Redis serialization error for key {key}: {e}")
+            return
+
+        try:
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
@@ -372,12 +386,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

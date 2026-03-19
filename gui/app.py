@@ -541,7 +541,7 @@ def search_history(_n, platform, min_score, days, artist_filter):
 
     # Optional artist filter (client-side simple substring)
     if artist_filter:
-        mask = df["artist"].str.contains(artist_filter, case=False, na=False)
+        mask = df["artist"].str.contains(artist_filter, case=False, na=False, regex=False)
         df = df[mask]
 
     # Round score
