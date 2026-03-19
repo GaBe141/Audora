@@ -3,12 +3,16 @@ Configuration management for social media APIs.
 Handles API keys, rate limiting, and platform-specific settings.
 """
 
+import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from core.utils import read_json, write_json
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,6 +52,7 @@ class SocialAPIManager:
 
     def load_configs(self):
         """Load API configurations from file using centralized utility."""
+        self._warn_if_insecure_permissions()
         data = read_json(self.config_file, default={})
 
         if data:
@@ -131,6 +136,32 @@ class SocialAPIManager:
             }
 
         write_json(self.config_file, config_data)
+        self._secure_file_permissions()
+
+    def _secure_file_permissions(self) -> None:
+        """Restrict credential file permissions on Unix-like systems."""
+        if os.name == "nt" or not self.config_file.exists():
+            return
+
+        try:
+            os.chmod(self.config_file, 0o600)
+        except OSError as exc:
+            logger.warning(f"Could not set secure permissions on {self.config_file}: {exc}")
+
+    def _warn_if_insecure_permissions(self) -> None:
+        """Warn when credential file is accessible by group/other users."""
+        if os.name == "nt" or not self.config_file.exists():
+            return
+
+        try:
+            mode = self.config_file.stat().st_mode & 0o777
+            if mode & 0o077:
+                logger.warning(
+                    f"Credential file {self.config_file} is too permissive ({oct(mode)}). "
+                    "Run: chmod 600 config/social_apis.json"
+                )
+        except OSError as exc:
+            logger.warning(f"Could not inspect permissions for {self.config_file}: {exc}")
 
     def get_config(self, platform: str) -> APIConfig | None:
         """Get configuration for a platform."""
