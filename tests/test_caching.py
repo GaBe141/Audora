@@ -2,8 +2,12 @@
 
 import time
 
+import pandas as pd
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,59 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class _FakeRedisClient:
+    def __init__(self):
+        self._store: dict[str, bytes] = {}
+
+    def get(self, key: str):
+        return self._store.get(key)
+
+    def set(self, key: str, value: bytes):
+        self._store[key] = value
+
+    def setex(self, key: str, _ttl: int, value: bytes):
+        self._store[key] = value
+
+    def delete(self, key: str):
+        self._store.pop(key, None)
+
+    def exists(self, key: str):
+        return 1 if key in self._store else 0
+
+
+class TestRedisCacheBackendSerialization:
+    def _backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._client = _FakeRedisClient()
+        return backend
+
+    def test_dataframe_roundtrip(self):
+        backend = self._backend()
+        df = pd.DataFrame([{"a": 1, "b": "x"}])
+        backend.set("df", df)
+        restored = backend.get("df")
+        assert isinstance(restored, pd.DataFrame)
+        assert restored.to_dict("records") == df.to_dict("records")
+
+    def test_bytes_roundtrip(self):
+        backend = self._backend()
+        payload = b"\x00\xffsecure"
+        backend.set("blob", payload)
+        assert backend.get("blob") == payload
+
+    def test_invalid_payload_is_rejected_and_deleted(self):
+        backend = self._backend()
+        backend._client.set("unsafe", b"not-a-json-envelope")
+        assert backend.get("unsafe") is None
+        assert backend.exists("unsafe") is False
+
+
+class TestCacheKeyHashing:
+    def test_cache_keys_use_sha256_digests(self):
+        manager = CacheManager(backend=LocalCacheBackend(max_size=10), key_prefix="test")
+        key = manager._build_cache_key("prefix", ("alpha",), {"beta": 1})
+        parts = key.split(":")
+        assert len(parts) == 3
+        assert all(len(part) == 64 for part in parts[1:])

@@ -4,11 +4,13 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
-import pickle
 import time
+from io import StringIO
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -24,6 +26,13 @@ try:
 except ImportError:
     REDIS_AVAILABLE = False
     logger.warning("Redis not available, using local cache fallback")
+
+try:
+    import pandas as pd
+
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -130,6 +139,8 @@ class LocalCacheBackend(CacheBackend):
 class RedisCacheBackend(CacheBackend):
     """Redis cache backend with connection pooling."""
 
+    _SERIALIZATION_VERSION = 1
+
     def __init__(
         self,
         host: str = "localhost",
@@ -156,7 +167,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Keep binary payloads for custom serialization
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +185,11 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            return self._deserialize_value(value)
+        except ValueError as e:
+            logger.warning(f"Rejected unsafe/invalid Redis payload for key {key}: {e}")
+            self.delete(key)
+            return None
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,11 +197,13 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
+        except ValueError as e:
+            logger.warning(f"Skipping Redis cache write for key {key}: {e}")
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 
@@ -212,6 +229,68 @@ class RedisCacheBackend(CacheBackend):
         except Exception as e:
             logger.error(f"Redis exists error for key {key}: {e}")
             return False
+
+    def _serialize_value(self, value: Any) -> bytes:
+        """Serialize cache values into a safe JSON envelope.
+
+        Supported value types:
+        - JSON-serializable primitives/dicts/lists
+        - bytes / bytearray
+        - pandas DataFrame (if pandas is available)
+        """
+        envelope: dict[str, Any] = {"version": self._SERIALIZATION_VERSION}
+
+        if isinstance(value, (bytes, bytearray)):
+            envelope["type"] = "bytes"
+            envelope["value"] = base64.b64encode(bytes(value)).decode("ascii")
+            return json.dumps(envelope).encode("utf-8")
+
+        if PANDAS_AVAILABLE and isinstance(value, pd.DataFrame):
+            envelope["type"] = "pandas_dataframe"
+            envelope["value"] = value.to_json(orient="split", date_format="iso")
+            return json.dumps(envelope).encode("utf-8")
+
+        try:
+            envelope["type"] = "json"
+            envelope["value"] = value
+            return json.dumps(envelope).encode("utf-8")
+        except TypeError as e:
+            raise ValueError(f"Unsupported Redis cache type: {type(value).__name__}") from e
+
+    def _deserialize_value(self, payload: bytes) -> Any:
+        """Deserialize cache values from a safe JSON envelope."""
+        try:
+            decoded = payload.decode("utf-8")
+            envelope = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise ValueError("Payload is not valid JSON") from e
+
+        if not isinstance(envelope, dict):
+            raise ValueError("Payload envelope must be a JSON object")
+
+        if envelope.get("version") != self._SERIALIZATION_VERSION:
+            raise ValueError("Unsupported serialization version")
+
+        payload_type = envelope.get("type")
+        payload_value = envelope.get("value")
+
+        if payload_type == "json":
+            return payload_value
+        if payload_type == "bytes":
+            if not isinstance(payload_value, str):
+                raise ValueError("Invalid bytes payload")
+            try:
+                return base64.b64decode(payload_value.encode("ascii"), validate=True)
+            except (ValueError, binascii.Error) as e:
+                raise ValueError("Invalid base64 bytes payload") from e
+        if payload_type == "pandas_dataframe":
+            if not PANDAS_AVAILABLE:
+                raise ValueError("pandas is required to deserialize dataframe payload")
+            if not isinstance(payload_value, str):
+                raise ValueError("Invalid dataframe payload")
+            return pd.read_json(StringIO(payload_value), orient="split")
+
+        raise ValueError(f"Unsupported payload type: {payload_type}")
 
 
 class CacheManager:
@@ -277,7 +356,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +451,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
