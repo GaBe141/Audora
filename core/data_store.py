@@ -775,6 +775,14 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
+        allowed_update_fields = {"score", "rank", "metadata", "is_active", "region", "trend_date"}
+        invalid_fields = set(updates) - allowed_update_fields
+        if invalid_fields:
+            raise ValueError(
+                f"Invalid update fields: {sorted(invalid_fields)}. "
+                f"Allowed fields: {sorted(allowed_update_fields)}"
+            )
+
         # Build SET clause
         set_clauses = [f"{field} = ?" for field in updates]
         params = list(updates.values())
