@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pytest
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,29 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCachePayloadSigning:
+    """Security tests for signed Redis cache payloads."""
+
+    def _build_backend_with_test_key(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_signed_payload_roundtrip(self):
+        backend = self._build_backend_with_test_key()
+        raw = backend._serialize_value({"k": "v", "n": 123})
+        assert backend._deserialize_value(raw) == {"k": "v", "n": 123}
+
+    def test_rejects_unsigned_payload(self):
+        backend = self._build_backend_with_test_key()
+        with pytest.raises(ValueError, match="Legacy or unsigned"):
+            backend._deserialize_value(b"not-signed-payload")
+
+    def test_rejects_tampered_payload(self):
+        backend = self._build_backend_with_test_key()
+        raw = backend._serialize_value({"safe": True})
+        tampered = raw[:-1] + bytes([raw[-1] ^ 0x01])
+        with pytest.raises(ValueError, match="signature mismatch"):
+            backend._deserialize_value(tampered)
