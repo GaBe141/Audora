@@ -586,7 +586,18 @@ def export_csv(_n, table_data):
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
     try:
-        from core.notification_service import EnhancedNotificationService
+        from core.notification_service import EnhancedNotificationService, validate_outbound_webhook_url
+
+        for channel_name, channel_url in (
+            ("Slack", slack_url),
+            ("Discord", discord_url),
+            ("Webhook", webhook_url),
+        ):
+            if channel_url:
+                is_safe, reason = validate_outbound_webhook_url(channel_url)
+                if not is_safe:
+                    return f"Error: Invalid {channel_name} URL ({reason})"
+
         svc = EnhancedNotificationService()
         if slack_url:
             svc.config["slack"]["webhook_url"] = slack_url
@@ -597,7 +608,10 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
         if smtp_port:
-            svc.config["email"]["port"] = int(smtp_port)
+            parsed_port = int(smtp_port)
+            if not 1 <= parsed_port <= 65535:
+                return "Error: SMTP port must be between 1 and 65535"
+            svc.config["email"]["port"] = parsed_port
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
         if smtp_pass:
@@ -627,7 +641,11 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
                 NotificationChannel,
                 NotificationMessage,
                 NotificationPriority,
+                validate_outbound_webhook_url,
             )
+            is_safe, reason = validate_outbound_webhook_url(url)
+            if not is_safe:
+                return f"Unsafe URL: {reason}"
             svc = EnhancedNotificationService()
             svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
             channel = getattr(NotificationChannel, channel_enum_name)
