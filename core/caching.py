@@ -5,9 +5,9 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import io
 import json
 import logging
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -156,7 +156,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Use binary mode for encoded payloads
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +174,12 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            success, deserialized = self._deserialize_value(value)
+            if not success:
+                # Remove malformed payloads to avoid repeated parse attempts.
+                self._client.delete(key)
+                return None
+            return deserialized
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,13 +187,84 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(key, value)
+            if serialized is None:
+                return
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    def _serialize_value(self, key: str, value: Any) -> bytes | None:
+        """Serialize cache value using safe, non-executable formats."""
+        payload: dict[str, Any]
+
+        if self._is_pandas_dataframe(value):
+            payload = {
+                "type": "dataframe_split",
+                "data": value.to_json(orient="split", date_format="iso"),
+            }
+        else:
+            try:
+                json.dumps(value)
+            except TypeError:
+                logger.warning(
+                    f"Skipping Redis cache set for key {key}: value is not JSON serializable"
+                )
+                return None
+            payload = {"type": "json", "data": value}
+
+        return json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+
+    def _deserialize_value(self, value: bytes) -> tuple[bool, Any | None]:
+        """Deserialize cache payload safely.
+
+        Returns:
+            (True, value) for valid payloads and (False, None) for malformed payloads.
+        """
+        try:
+            payload = json.loads(value.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            logger.warning("Discarding malformed Redis cache payload")
+            return False, None
+
+        if not isinstance(payload, dict):
+            logger.warning("Discarding unexpected Redis cache payload type")
+            return False, None
+
+        payload_type = payload.get("type")
+        data = payload.get("data")
+
+        if payload_type == "json":
+            return True, data
+
+        if payload_type == "dataframe_split":
+            try:
+                import pandas as pd
+
+                if not isinstance(data, str):
+                    logger.warning("Discarding invalid Redis DataFrame payload")
+                    return False, None
+
+                return True, pd.read_json(io.StringIO(data), orient="split")
+            except Exception as exc:
+                logger.warning(f"Discarding invalid Redis DataFrame payload: {exc}")
+                return False, None
+
+        logger.warning(f"Discarding Redis cache payload with unknown type: {payload_type}")
+        return False, None
+
+    @staticmethod
+    def _is_pandas_dataframe(value: Any) -> bool:
+        """Return True when value is a pandas DataFrame."""
+        try:
+            import pandas as pd
+
+            return isinstance(value, pd.DataFrame)
+        except ImportError:
+            return False
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
@@ -277,7 +353,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +448,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
