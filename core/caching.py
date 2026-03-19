@@ -7,8 +7,9 @@ fallback to in-memory caching when Redis is unavailable.
 import hashlib
 import json
 import logging
-import pickle
 import time
+from datetime import date, datetime
+from io import StringIO
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -156,7 +157,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Keep binary mode for JSON bytes payloads
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -168,13 +169,102 @@ class RedisCacheBackend(CacheBackend):
             logger.error(f"Failed to connect to Redis: {e}")
             raise
 
+    def _serialize_value(self, value: Any) -> bytes:
+        """Serialize cache values using JSON-safe types only.
+
+        This avoids arbitrary-code-execution risks from pickle deserialization.
+        """
+
+        def _to_safe_obj(obj: Any) -> Any:
+            # Primitive JSON-safe values
+            if obj is None or isinstance(obj, str | int | float | bool):
+                return obj
+
+            # Common container types
+            if isinstance(obj, list):
+                return [_to_safe_obj(item) for item in obj]
+            if isinstance(obj, tuple):
+                return {"__audora_cache_type__": "tuple", "items": [_to_safe_obj(item) for item in obj]}
+            if isinstance(obj, set):
+                # Sort to keep deterministic representation for cache stability
+                safe_items = [_to_safe_obj(item) for item in obj]
+                return {
+                    "__audora_cache_type__": "set",
+                    "items": sorted(
+                        safe_items,
+                        key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+                    ),
+                }
+            if isinstance(obj, dict):
+                # JSON requires string keys
+                return {str(key): _to_safe_obj(value) for key, value in obj.items()}
+
+            # Common Python value objects
+            if isinstance(obj, datetime):
+                return {"__audora_cache_type__": "datetime", "value": obj.isoformat()}
+            if isinstance(obj, date):
+                return {"__audora_cache_type__": "date", "value": obj.isoformat()}
+            if isinstance(obj, bytes):
+                return {"__audora_cache_type__": "bytes", "value": obj.hex()}
+
+            # Optional pandas DataFrame support used by data store caching
+            try:
+                import pandas as pd  # type: ignore[import-untyped]
+
+                if isinstance(obj, pd.DataFrame):
+                    return {
+                        "__audora_cache_type__": "dataframe",
+                        "value": obj.to_json(orient="split", date_format="iso"),
+                    }
+            except Exception:
+                # If pandas is unavailable, fall through to TypeError below.
+                pass
+
+            raise TypeError(f"Unsupported cache value type: {type(obj).__name__}")
+
+        safe_obj = _to_safe_obj(value)
+        return json.dumps(safe_obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+    def _deserialize_value(self, value: bytes) -> Any:
+        """Deserialize cached JSON payload back into Python objects."""
+
+        def _from_safe_obj(obj: Any) -> Any:
+            if isinstance(obj, list):
+                return [_from_safe_obj(item) for item in obj]
+            if isinstance(obj, dict):
+                value_type = obj.get("__audora_cache_type__")
+
+                if value_type == "tuple":
+                    return tuple(_from_safe_obj(item) for item in obj.get("items", []))
+                if value_type == "set":
+                    return set(_from_safe_obj(item) for item in obj.get("items", []))
+                if value_type == "datetime":
+                    return datetime.fromisoformat(obj["value"])
+                if value_type == "date":
+                    return date.fromisoformat(obj["value"])
+                if value_type == "bytes":
+                    return bytes.fromhex(obj["value"])
+                if value_type == "dataframe":
+                    try:
+                        import pandas as pd  # type: ignore[import-untyped]
+
+                        return pd.read_json(StringIO(obj["value"]), orient="split")
+                    except Exception as e:
+                        raise ValueError(f"Failed to deserialize cached DataFrame: {e}") from e
+
+                return {key: _from_safe_obj(val) for key, val in obj.items()}
+            return obj
+
+        parsed = json.loads(value.decode("utf-8"))
+        return _from_safe_obj(parsed)
+
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
         try:
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            return self._deserialize_value(value)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,7 +272,7 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
@@ -277,7 +367,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable by cache serializer)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +462,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
