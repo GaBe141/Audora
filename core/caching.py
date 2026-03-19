@@ -7,13 +7,20 @@ fallback to in-memory caching when Redis is unavailable.
 import hashlib
 import json
 import logging
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
+from io import StringIO
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
+
+try:
+    import pandas as pd
+
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
 
 # Try to import Redis, fall back to local cache if unavailable
 try:
@@ -156,7 +163,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=True,  # String mode for JSON-based serialization
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -171,10 +178,10 @@ class RedisCacheBackend(CacheBackend):
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
         try:
-            value = self._client.get(key)
-            if value is None:
+            raw_value = self._client.get(key)
+            if raw_value is None:
                 return None
-            return pickle.loads(value)
+            return self._deserialize_value(raw_value)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,13 +189,53 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    def _serialize_value(self, value: Any) -> str:
+        """Safely serialize cache payloads without pickle."""
+        if PANDAS_AVAILABLE and isinstance(value, pd.DataFrame):
+            payload = {
+                "__cache_type__": "pandas_dataframe",
+                "data": value.to_json(orient="split", date_format="iso"),
+            }
+            return json.dumps(payload)
+
+        payload = {"__cache_type__": "json", "data": value}
+        try:
+            return json.dumps(payload)
+        except TypeError as e:
+            raise TypeError(
+                f"Unsupported cache value type for Redis backend: {type(value).__name__}"
+            ) from e
+
+    def _deserialize_value(self, raw_value: str | bytes) -> Any:
+        """Safely deserialize cache payloads."""
+        if isinstance(raw_value, bytes):
+            raw_value = raw_value.decode("utf-8")
+
+        payload = json.loads(raw_value)
+        cache_type = payload.get("__cache_type__")
+
+        if cache_type == "json":
+            return payload.get("data")
+
+        if cache_type == "pandas_dataframe":
+            if not PANDAS_AVAILABLE:
+                logger.warning("Pandas not available, cannot deserialize cached DataFrame")
+                return None
+            frame_json = payload.get("data", "")
+            if not isinstance(frame_json, str):
+                return None
+            return pd.read_json(StringIO(frame_json), orient="split")
+
+        logger.warning("Unknown Redis cache payload type: %s", cache_type)
+        return None
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
@@ -372,12 +419,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
