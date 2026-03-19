@@ -2,8 +2,11 @@
 
 import time
 
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,28 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for Redis cache serialization."""
+
+    def test_json_payload_round_trip(self):
+        value = {"track": "Song A", "scores": [95.1, 88.4], "active": True}
+        serialized = RedisCacheBackend._serialize_value(value)
+        restored = RedisCacheBackend._deserialize_value(serialized)
+        assert restored == value
+
+    def test_bytes_payload_round_trip(self):
+        value = b"\x00\x01audora"
+        serialized = RedisCacheBackend._serialize_value(value)
+        restored = RedisCacheBackend._deserialize_value(serialized)
+        assert restored == value
+
+    def test_serialize_rejects_non_json_payloads(self):
+        # `set` is not JSON serializable and should not be cached.
+        with pytest.raises(ValueError):
+            RedisCacheBackend._serialize_value({"bad": {1, 2, 3}})
+
+    def test_deserialize_rejects_non_json_bytes(self):
+        with pytest.raises(ValueError):
+            RedisCacheBackend._deserialize_value(b"not-json")
