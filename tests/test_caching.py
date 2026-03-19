@@ -3,7 +3,10 @@
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    _deserialize_cache_value,
+    _serialize_cache_value,
 )
 
 
@@ -80,6 +83,37 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+
+class TestSignedCacheSerialization:
+    """Tests for signed Redis payload serialization helpers."""
+
+    def test_roundtrip_with_valid_signature(self):
+        key = b"this-is-a-secure-signing-key-with-32+bytes"
+        value = {"track": "abc123", "score": 91.2}
+        encoded = _serialize_cache_value(value, key)
+        decoded = _deserialize_cache_value(encoded, key)
+        assert decoded == value
+
+    def test_tampered_payload_is_rejected(self):
+        key = b"this-is-a-secure-signing-key-with-32+bytes"
+        value = {"track": "abc123", "score": 91.2}
+        encoded = _serialize_cache_value(value, key)
+        tampered = encoded.replace(b"91.2", b"99.9")
+        assert _deserialize_cache_value(tampered, key) is None
+
+    def test_unsigned_legacy_payload_is_rejected(self):
+        key = b"this-is-a-secure-signing-key-with-32+bytes"
+        assert _deserialize_cache_value(b"not-a-signed-envelope", key) is None
+
+    def test_cache_key_uses_sha256_hashes(self):
+        manager = CacheManager(backend=LocalCacheBackend(max_size=10), key_prefix="test")
+        key = manager._build_cache_key("myfn", (1, 2), {"a": "b"})
+        parts = key.split(":")
+        assert len(parts) == 3
+        # SHA-256 hex digest length
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
 
 
 class TestCachedDecorator:
