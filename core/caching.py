@@ -220,7 +220,8 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning(f"Invalid cache signature for key {key}; discarding value")
                 self._client.delete(key)
                 return None
-            return pickle.loads(payload)  # nosec B301 - payload is verified with HMAC before deserialization
+            # Payload is authenticated using HMAC before deserialization.
+            return pickle.loads(payload)  # nosec B301
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
