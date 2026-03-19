@@ -3,6 +3,7 @@ Configuration management for social media APIs.
 Handles API keys, rate limiting, and platform-specific settings.
 """
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -130,7 +131,10 @@ class SocialAPIManager:
                 "error_count": config.error_count,
             }
 
-        write_json(self.config_file, config_data)
+        written_path = write_json(self.config_file, config_data)
+        # Restrict credentials file permissions on Unix-like systems.
+        if hasattr(os, "chmod") and os.name != "nt":
+            os.chmod(written_path, 0o600)
 
     def get_config(self, platform: str) -> APIConfig | None:
         """Get configuration for a platform."""

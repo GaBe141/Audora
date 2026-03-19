@@ -2,8 +2,11 @@
 
 import time
 
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,24 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for safe Redis serializer/deserializer helpers."""
+
+    def test_json_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = {"artist": "Test Artist", "score": 92, "tags": ["pop", "viral"]}
+        raw = backend._serialize_value(value)
+        assert isinstance(raw, bytes)
+        restored = backend._deserialize_value(raw)
+        assert restored == value
+
+    def test_unsupported_type_raises_type_error(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        class CustomObject:
+            pass
+
+        with pytest.raises(TypeError):
+            backend._serialize_value(CustomObject())
