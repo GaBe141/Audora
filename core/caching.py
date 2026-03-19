@@ -208,17 +208,17 @@ class RedisCacheBackend(CacheBackend):
                 return {"__audora_cache_type__": "bytes", "value": obj.hex()}
 
             # Optional pandas DataFrame support used by data store caching
+            pd = None
             try:
                 import pandas as pd  # type: ignore[import-untyped]
+            except ImportError:
+                pd = None
 
-                if isinstance(obj, pd.DataFrame):
-                    return {
-                        "__audora_cache_type__": "dataframe",
-                        "value": obj.to_json(orient="split", date_format="iso"),
-                    }
-            except Exception:
-                # If pandas is unavailable, fall through to TypeError below.
-                pass
+            if pd is not None and isinstance(obj, pd.DataFrame):
+                return {
+                    "__audora_cache_type__": "dataframe",
+                    "value": obj.to_json(orient="split", date_format="iso"),
+                }
 
             raise TypeError(f"Unsupported cache value type: {type(obj).__name__}")
 
