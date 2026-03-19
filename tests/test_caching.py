@@ -4,6 +4,7 @@ import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +119,33 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for Redis cache serialization/hashing behavior."""
+
+    def test_json_envelope_round_trip(self):
+        value = {"artist": "Test Artist", "scores": [1, 2, 3], "active": True}
+        serialized = RedisCacheBackend._serialize_value(value)
+
+        is_valid, deserialized = RedisCacheBackend._deserialize_value(serialized)
+
+        assert is_valid is True
+        assert deserialized == value
+
+    def test_rejects_legacy_or_malformed_payload(self):
+        legacy_pickle_payload = b"\x80\x04\x95\x08\x00\x00\x00\x00\x00\x00\x00\x8c\x04test\x94."
+
+        is_valid, deserialized = RedisCacheBackend._deserialize_value(legacy_pickle_payload)
+
+        assert is_valid is False
+        assert deserialized is None
+
+    def test_cache_key_hash_uses_sha256_length(self, mock_cache):
+        cache_key = mock_cache._build_cache_key("demo", args=(1, "x"), kwargs={"k": "v"})
+        key_parts = cache_key.split(":")
+
+        # prefix + arg hash + kwargs hash
+        assert key_parts[0] == "demo"
+        assert len(key_parts[1]) == 64
+        assert len(key_parts[2]) == 64
