@@ -4,10 +4,12 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 import smtplib
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -17,6 +19,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -540,6 +543,11 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
+        is_valid, validation_error = self._validate_webhook_url(
+            webhook_url, allowed_hosts={"hooks.slack.com"}
+        )
+        if not is_valid:
+            return {"success": False, "error": f"Invalid Slack webhook URL: {validation_error}"}
 
         try:
             # Create Slack message format
@@ -614,6 +622,11 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+        is_valid, validation_error = self._validate_webhook_url(
+            webhook_url, allowed_hosts={"discord.com", "discordapp.com"}
+        )
+        if not is_valid:
+            return {"success": False, "error": f"Invalid Discord webhook URL: {validation_error}"}
 
         try:
             # Format content for Discord
@@ -683,6 +696,92 @@ System status: {{ system_status }}
         }
         return color_map.get(priority, 0x00FF00)
 
+    def _validate_webhook_url(
+        self,
+        url: str,
+        *,
+        allowed_hosts: set[str] | None = None,
+    ) -> tuple[bool, str]:
+        """Validate webhook URL to reduce SSRF risk.
+
+        Rules:
+        - Require HTTPS by default (custom webhook can opt into HTTP via env flag)
+        - Block URLs with embedded credentials
+        - Optional domain allow-list for provider-specific webhooks
+        - Reject localhost/private/link-local/multicast/reserved targets
+        """
+        try:
+            parsed = urlparse(url.strip())
+        except Exception:
+            return False, "Malformed URL"
+
+        if parsed.scheme not in {"http", "https"}:
+            return False, "Only HTTP(S) URLs are allowed"
+        if not parsed.hostname:
+            return False, "Missing hostname"
+        if parsed.username or parsed.password:
+            return False, "Embedded credentials are not allowed in webhook URLs"
+
+        allow_http = (
+            os.getenv("AUDORA_ALLOW_INSECURE_WEBHOOK_HTTP", "").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        if parsed.scheme != "https" and not allow_http:
+            return False, "HTTPS is required (set AUDORA_ALLOW_INSECURE_WEBHOOK_HTTP=true to override)"
+
+        hostname = parsed.hostname.lower()
+        if allowed_hosts and not any(
+            hostname == allowed or hostname.endswith(f".{allowed}") for allowed in allowed_hosts
+        ):
+            return False, f"Host must be one of: {', '.join(sorted(allowed_hosts))}"
+
+        is_public, reason = self._is_public_network_host(hostname)
+        if not is_public:
+            return False, reason
+
+        return True, ""
+
+    def _is_public_network_host(self, hostname: str) -> tuple[bool, str]:
+        """Check that hostname resolves to public (non-local/non-private) addresses only."""
+        try:
+            # Fast path for literal IP addresses.
+            ip_obj = ipaddress.ip_address(hostname)
+            if self._is_disallowed_target_ip(ip_obj):
+                return False, f"Blocked non-public target IP: {ip_obj}"
+            return True, ""
+        except ValueError:
+            pass
+
+        try:
+            resolved = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+        except socket.gaierror:
+            return False, "Hostname resolution failed"
+
+        if not resolved:
+            return False, "Hostname resolution returned no addresses"
+
+        for result in resolved:
+            ip_value = result[4][0]
+            try:
+                ip_obj = ipaddress.ip_address(ip_value)
+            except ValueError:
+                return False, f"Invalid resolved address: {ip_value}"
+            if self._is_disallowed_target_ip(ip_obj):
+                return False, f"Blocked non-public target IP: {ip_obj}"
+
+        return True, ""
+
+    def _is_disallowed_target_ip(self, ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+        """Return True if IP belongs to a private/local/reserved range."""
+        return (
+            ip_obj.is_loopback
+            or ip_obj.is_private
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_reserved
+            or ip_obj.is_unspecified
+        )
+
     async def _send_webhook(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification to custom webhook."""
         webhook_config = self.config.get("webhook", {})
@@ -690,6 +789,9 @@ System status: {{ system_status }}
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
+        is_valid, validation_error = self._validate_webhook_url(url)
+        if not is_valid:
+            return {"success": False, "error": f"Invalid webhook URL: {validation_error}"}
 
         try:
             # Prepare payload
