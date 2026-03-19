@@ -2,8 +2,12 @@
 
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,26 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for safe Redis serialization helper methods."""
+
+    def test_serializes_json_value(self):
+        raw = RedisCacheBackend._serialize_value({"a": 1, "b": ["x", "y"]})
+        value = RedisCacheBackend._deserialize_value(raw)
+        assert value == {"a": 1, "b": ["x", "y"]}
+
+    def test_serializes_dataframe(self):
+        df = pd.DataFrame([{"artist": "A", "score": 91.2}, {"artist": "B", "score": 88.5}])
+        raw = RedisCacheBackend._serialize_value(df)
+        restored = RedisCacheBackend._deserialize_value(raw)
+        assert isinstance(restored, pd.DataFrame)
+        assert restored.to_dict("records") == df.to_dict("records")
+
+    def test_rejects_unsupported_type(self):
+        class Unsupported:
+            pass
+
+        with pytest.raises(TypeError):
+            RedisCacheBackend._serialize_value(Unsupported())
