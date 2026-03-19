@@ -4,9 +4,11 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,6 +19,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -190,9 +193,28 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        # Never persist credential secrets in plain text config.
+        if isinstance(to_save.get("email"), dict):
+            to_save["email"] = {
+                k: v for k, v in to_save["email"].items() if k not in {"password"}
+            }
+        if isinstance(to_save.get("sms"), dict):
+            to_save["sms"] = {
+                k: v for k, v in to_save["sms"].items() if k not in {"api_key", "api_secret"}
+            }
+        if isinstance(to_save.get("webhook"), dict):
+            webhook_cfg = dict(to_save["webhook"])
+            headers = webhook_cfg.get("headers")
+            if isinstance(headers, dict):
+                webhook_cfg["headers"] = {
+                    k: v for k, v in headers.items() if k.lower() != "authorization"
+                }
+            to_save["webhook"] = webhook_cfg
         try:
-            with config_path.open("w") as f:
+            with config_path.open("w", encoding="utf-8") as f:
                 json.dump(to_save, f, indent=2)
+            if os.name != "nt":
+                os.chmod(config_path, 0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -204,6 +226,26 @@ class EnhancedNotificationService:
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    def _is_safe_webhook_url(self, url: str) -> bool:
+        """Validate webhook URL to reduce SSRF risk."""
+        try:
+            parsed = urlparse(url.strip())
+            if parsed.scheme.lower() != "https" or not parsed.hostname:
+                return False
+
+            if parsed.hostname.lower() in {"localhost", "localhost.localdomain"}:
+                return False
+
+            addr_info = socket.getaddrinfo(parsed.hostname, None, type=socket.SOCK_STREAM)
+            for result in addr_info:
+                ip_text = result[4][0]
+                ip = ipaddress.ip_address(ip_text)
+                if not ip.is_global:
+                    return False
+            return True
+        except Exception:
+            return False
 
     def _load_templates(self) -> dict[str, str]:
         """Load message templates."""
@@ -540,6 +582,8 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
+        if not self._is_safe_webhook_url(webhook_url):
+            return {"success": False, "error": "Unsafe Slack webhook URL blocked"}
 
         try:
             # Create Slack message format
@@ -614,6 +658,8 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+        if not self._is_safe_webhook_url(webhook_url):
+            return {"success": False, "error": "Unsafe Discord webhook URL blocked"}
 
         try:
             # Format content for Discord
@@ -690,6 +736,8 @@ System status: {{ system_status }}
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
+        if not self._is_safe_webhook_url(url):
+            return {"success": False, "error": "Unsafe webhook URL blocked"}
 
         try:
             # Prepare payload
