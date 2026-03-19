@@ -7,7 +7,6 @@ fallback to in-memory caching when Redis is unavailable.
 import hashlib
 import json
 import logging
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -156,7 +155,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Keep bytes for explicit UTF-8 decoding
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,7 +173,14 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            if isinstance(value, bytes):
+                value = value.decode("utf-8")
+            return json.loads(value)
+        except json.JSONDecodeError:
+            # Treat malformed/legacy cache entries as misses and remove them.
+            logger.warning(f"Redis cache entry for key {key} is not valid JSON; deleting entry")
+            self.delete(key)
+            return None
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,11 +188,15 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = json.dumps(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
+        except TypeError:
+            logger.warning(
+                f"Redis set skipped for key {key}: value is not JSON-serializable"
+            )
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 
@@ -277,7 +287,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable for Redis backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +382,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
