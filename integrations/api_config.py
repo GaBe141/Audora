@@ -5,6 +5,7 @@ Handles API keys, rate limiting, and platform-specific settings.
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import Any
 
@@ -114,14 +115,13 @@ class SocialAPIManager:
         self.save_configs()
 
     def save_configs(self):
-        """Save configurations to file using centralized utility."""
+        """Save configurations to file using centralized utility.
+
+        Sensitive credentials are intentionally excluded from persisted JSON.
+        """
         config_data = {}
         for platform, config in self.configs.items():
             config_data[platform] = {
-                "api_key": config.api_key,
-                "secret_key": config.secret_key,
-                "access_token": config.access_token,
-                "refresh_token": config.refresh_token,
                 "requests_per_minute": config.requests_per_minute,
                 "requests_per_hour": config.requests_per_hour,
                 "requests_per_day": config.requests_per_day,
@@ -130,7 +130,9 @@ class SocialAPIManager:
                 "error_count": config.error_count,
             }
 
-        write_json(self.config_file, config_data)
+        written_path = write_json(self.config_file, config_data)
+        if hasattr(os, "chmod") and os.name != "nt":
+            os.chmod(written_path, 0o600)
 
     def get_config(self, platform: str) -> APIConfig | None:
         """Get configuration for a platform."""

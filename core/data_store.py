@@ -16,6 +16,20 @@ import pandas as pd
 
 from core.caching import get_cache
 
+_ALLOWED_BULK_UPDATE_FIELDS = {
+    "platform",
+    "track_id",
+    "track_name",
+    "artist",
+    "score",
+    "rank",
+    "region",
+    "trend_date",
+    "first_detected",
+    "metadata",
+    "is_active",
+}
+
 
 @dataclass
 class TrendData:
@@ -775,9 +789,26 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        # Build SET clause
-        set_clauses = [f"{field} = ?" for field in updates]
-        params = list(updates.values())
+        invalid_fields = [field for field in updates if field not in _ALLOWED_BULK_UPDATE_FIELDS]
+        if invalid_fields:
+            raise ValueError(
+                "Invalid update fields: "
+                f"{', '.join(sorted(invalid_fields))}. Allowed fields: "
+                f"{', '.join(sorted(_ALLOWED_BULK_UPDATE_FIELDS))}"
+            )
+
+        sanitized_updates: dict[str, Any] = {}
+        for field, value in updates.items():
+            if field == "metadata":
+                sanitized_updates[field] = json.dumps(value) if not isinstance(value, str) else value
+            elif field == "is_active":
+                sanitized_updates[field] = 1 if bool(value) else 0
+            else:
+                sanitized_updates[field] = value
+
+        # Build SET clause from validated column names
+        set_clauses = [f"{field} = ?" for field in sanitized_updates]
+        params = list(sanitized_updates.values())
 
         # Add track IDs for WHERE clause
         placeholders = ",".join("?" * len(track_ids))

@@ -4,10 +4,13 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -17,6 +20,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -67,6 +71,46 @@ class NotificationMessage:
     data: dict[str, Any] | None = None
     attachments: list[str] | None = None
     template_vars: dict[str, Any] | None = None
+
+
+def validate_outbound_webhook_url(url: str) -> tuple[bool, str]:
+    """Validate outbound webhook URL to reduce SSRF risk."""
+    normalized_url = (url or "").strip()
+    if not normalized_url:
+        return False, "Webhook URL is empty"
+
+    parsed = urlparse(normalized_url)
+    if parsed.scheme.lower() != "https":
+        return False, "Webhook URL must use HTTPS"
+    if parsed.username or parsed.password:
+        return False, "Webhook URL must not include credentials"
+    if not parsed.hostname:
+        return False, "Webhook URL is missing a hostname"
+
+    hostname = parsed.hostname.strip().lower()
+    if hostname in {"localhost", "localhost.localdomain"}:
+        return False, "Localhost destinations are not allowed"
+
+    # Block direct IP literals targeting non-public ranges.
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if not ip.is_global:
+            return False, "Non-public IP webhook destinations are not allowed"
+        return True, ""
+    except ValueError:
+        pass  # Hostname is not a direct IP literal; resolve below.
+
+    try:
+        addr_info = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False, "Webhook hostname could not be resolved"
+
+    for _, _, _, _, sockaddr in addr_info:
+        resolved_ip = ipaddress.ip_address(sockaddr[0])
+        if not resolved_ip.is_global:
+            return False, "Webhook resolves to a non-public IP address"
+
+    return True, ""
 
 
 class EnhancedNotificationService:
@@ -186,16 +230,60 @@ class EnhancedNotificationService:
         """
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        # Persist only non-sensitive settings; credentials should come from env/secret stores.
+        to_save = self._build_safe_persisted_config()
         try:
-            with config_path.open("w") as f:
+            with config_path.open("w", encoding="utf-8") as f:
                 json.dump(to_save, f, indent=2)
+            if hasattr(os, "chmod") and os.name != "nt":
+                os.chmod(config_path, 0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _build_safe_persisted_config(self) -> dict[str, Any]:
+        """Return a redacted config dictionary safe to persist to disk."""
+        email_cfg = self.config.get("email", {})
+        slack_cfg = self.config.get("slack", {})
+        discord_cfg = self.config.get("discord", {})
+        webhook_cfg = self.config.get("webhook", {})
+        sms_cfg = self.config.get("sms", {})
+
+        safe_config = {
+            "email": {
+                "smtp_server": email_cfg.get("smtp_server", ""),
+                "port": email_cfg.get("port", 587),
+                "username": email_cfg.get("username", ""),
+                "from_address": email_cfg.get("from_address", "music-discovery@example.com"),
+                "recipients": email_cfg.get("recipients", []),
+                "use_tls": email_cfg.get("use_tls", True),
+            },
+            "slack": {
+                "channel": slack_cfg.get("channel", "#music-trends"),
+                "username": slack_cfg.get("username", "Music Discovery Bot"),
+                "icon_emoji": slack_cfg.get("icon_emoji", ":musical_note:"),
+            },
+            "discord": {
+                "username": discord_cfg.get("username", "Music Discovery"),
+                "avatar_url": discord_cfg.get("avatar_url", ""),
+            },
+            "webhook": {
+                "headers": {
+                    k: v
+                    for k, v in webhook_cfg.get("headers", {}).items()
+                    if k.lower() != "authorization"
+                },
+                "timeout": webhook_cfg.get("timeout", 30),
+            },
+            "sms": {
+                "provider": sms_cfg.get("provider", "twilio"),
+                "from_number": sms_cfg.get("from_number", ""),
+                "recipients": sms_cfg.get("recipients", []),
+            },
+            "default_channels": self.config.get("default_channels", ["console"]),
+            "rate_limit_per_hour": self.config.get("rate_limit_per_hour", 50),
+        }
+        return safe_config
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -516,7 +604,7 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -540,6 +628,9 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
+        is_safe, reason = validate_outbound_webhook_url(webhook_url)
+        if not is_safe:
+            return {"success": False, "error": f"Unsafe Slack webhook URL: {reason}"}
 
         try:
             # Create Slack message format
@@ -614,6 +705,9 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+        is_safe, reason = validate_outbound_webhook_url(webhook_url)
+        if not is_safe:
+            return {"success": False, "error": f"Unsafe Discord webhook URL: {reason}"}
 
         try:
             # Format content for Discord
@@ -690,6 +784,9 @@ System status: {{ system_status }}
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
+        is_safe, reason = validate_outbound_webhook_url(url)
+        if not is_safe:
+            return {"success": False, "error": f"Unsafe webhook URL: {reason}"}
 
         try:
             # Prepare payload
