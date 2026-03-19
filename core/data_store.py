@@ -775,9 +775,30 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
+        # Restrict updated columns to known-safe schema fields.
+        allowed_fields = {
+            "platform",
+            "track_name",
+            "artist",
+            "score",
+            "rank",
+            "region",
+            "trend_date",
+            "first_detected",
+            "metadata",
+            "is_active",
+        }
+        invalid_fields = sorted(set(updates) - allowed_fields)
+        if invalid_fields:
+            raise ValueError(f"Invalid update fields: {invalid_fields}")
+
+        normalized_updates = dict(updates)
+        if "metadata" in normalized_updates and isinstance(normalized_updates["metadata"], (dict, list)):
+            normalized_updates["metadata"] = json.dumps(normalized_updates["metadata"])
+
         # Build SET clause
-        set_clauses = [f"{field} = ?" for field in updates]
-        params = list(updates.values())
+        set_clauses = [f"{field} = ?" for field in normalized_updates]
+        params = list(normalized_updates.values())
 
         # Add track IDs for WHERE clause
         placeholders = ",".join("?" * len(track_ids))
