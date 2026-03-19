@@ -1,9 +1,30 @@
 """Spotify authentication module with secure configuration."""
 
+import os
+from pathlib import Path
+import sys
+
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
 from .config import get_config
+
+
+def _get_secure_spotify_cache_path(project_root: Path) -> str:
+    """Return a cache path with restrictive permissions where supported."""
+    cache_dir = project_root / ".cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / "spotify_token_cache"
+
+    if hasattr(os, "chmod") and not sys.platform.startswith("win"):
+        try:
+            os.chmod(cache_dir, 0o700)
+            if cache_path.exists():
+                os.chmod(cache_path, 0o600)
+        except OSError:
+            pass
+
+    return str(cache_path)
 
 
 def get_client() -> spotipy.Spotify:
@@ -19,13 +40,14 @@ def get_client() -> spotipy.Spotify:
     """
     config_manager = get_config()
     spotify_config = config_manager.get_spotify_config()
+    cache_path = _get_secure_spotify_cache_path(config_manager.project_root)
 
     auth_manager = SpotifyOAuth(
         client_id=spotify_config["client_id"],
         client_secret=spotify_config["client_secret"],
         redirect_uri=spotify_config["redirect_uri"],
         scope=spotify_config["scopes"],
-        cache_path=".cache",  # token cache in project root
+        cache_path=cache_path,
         open_browser=True,
         show_dialog=False,
     )

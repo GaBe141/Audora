@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import smtplib
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -193,6 +194,11 @@ class EnhancedNotificationService:
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
+            if hasattr(os, "chmod") and not sys.platform.startswith("win"):
+                try:
+                    os.chmod(config_path, 0o600)
+                except OSError:
+                    pass
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
