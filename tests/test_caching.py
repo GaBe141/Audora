@@ -1,9 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import re
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,60 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class _FakeRedisClient:
+    """Minimal fake Redis client used for secure serialization tests."""
+
+    def __init__(self):
+        self.store: dict[str, bytes] = {}
+
+    def get(self, key: str):
+        return self.store.get(key)
+
+    def set(self, key: str, value: bytes):
+        self.store[key] = value
+
+    def setex(self, key: str, _ttl: int, value: bytes):
+        self.store[key] = value
+
+    def delete(self, key: str):
+        self.store.pop(key, None)
+
+    def exists(self, key: str):
+        return int(key in self.store)
+
+
+class TestRedisCacheBackendSecurity:
+    """Security-focused tests for Redis payload handling."""
+
+    def test_redis_json_roundtrip_without_pickle(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._client = _FakeRedisClient()
+
+        payload = {"track": "Example", "score": 88}
+        backend.set("k", payload, ttl=60)
+        assert backend.get("k") == payload
+
+    def test_rejects_legacy_or_invalid_binary_payload_and_evicts(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._client = _FakeRedisClient()
+        backend._client.set("unsafe", b"\x80\x04legacy_pickle_payload")
+
+        assert backend.get("unsafe") is None
+        assert backend._client.get("unsafe") is None
+
+
+class TestCacheKeyHashSecurity:
+    """Verify cache keys use strong deterministic hashing."""
+
+    def test_cache_key_uses_sha256_digest_format(self):
+        manager = CacheManager(backend=LocalCacheBackend())
+
+        key = manager._build_cache_key("calc", (1, "x"), {"y": 2})
+        parts = key.split(":")
+
+        assert parts[0] == "calc"
+        assert len(parts) == 3
+        assert re.fullmatch(r"[0-9a-f]{64}", parts[1])
+        assert re.fullmatch(r"[0-9a-f]{64}", parts[2])
