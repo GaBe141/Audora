@@ -4,9 +4,11 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,9 +19,73 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+
+
+def _is_truthy_env(value: str | None) -> bool:
+    """Parse common boolean environment variable values."""
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_private_or_local_host(hostname: str) -> bool:
+    """Return True for loopback/private/link-local/unroutable hosts."""
+    normalized = hostname.strip().strip("[]").lower()
+    if not normalized or normalized in {"localhost", "localhost.localdomain"}:
+        return True
+
+    try:
+        ip_obj = ipaddress.ip_address(normalized)
+        return (
+            ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_reserved
+            or ip_obj.is_unspecified
+        )
+    except ValueError:
+        pass
+
+    try:
+        addresses = socket.getaddrinfo(normalized, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        # Fail closed so unresolved hostnames cannot bypass outbound checks.
+        return True
+
+    for addr_info in addresses:
+        ip_str = addr_info[4][0]
+        ip_obj = ipaddress.ip_address(ip_str)
+        if (
+            ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_reserved
+            or ip_obj.is_unspecified
+        ):
+            return True
+    return False
+
+
+def validate_outbound_url(
+    url: str, *, allow_insecure_http: bool = False, allow_private_targets: bool = False
+) -> tuple[bool, str]:
+    """Validate outbound webhook URL to reduce SSRF risk."""
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in {"https", "http"}:
+        return False, "Only http/https URLs are allowed"
+    if parsed.scheme == "http" and not allow_insecure_http:
+        return False, "Insecure HTTP URLs are blocked (use HTTPS)"
+    if not parsed.hostname:
+        return False, "URL must include a valid hostname"
+    if not allow_private_targets and _is_private_or_local_host(parsed.hostname):
+        return False, "Private or local network targets are blocked"
+    return True, ""
 
 
 class NotificationPriority(Enum):
@@ -112,6 +178,11 @@ class EnhancedNotificationService:
 
     def _load_config(self, config_file: str | None) -> dict[str, Any]:
         """Load notification configuration."""
+        webhook_token = os.getenv("WEBHOOK_TOKEN", "").strip()
+        webhook_headers: dict[str, str] = {"Content-Type": "application/json"}
+        if webhook_token:
+            webhook_headers["Authorization"] = f"Bearer {webhook_token}"
+
         default_config = {
             "enabled": True,
             "default_channels": ["console"],
@@ -142,10 +213,7 @@ class EnhancedNotificationService:
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
-                },
+                "headers": webhook_headers,
                 "timeout": 30,
             },
             "sms": {
@@ -193,9 +261,22 @@ class EnhancedNotificationService:
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
+            if os.name != "nt":
+                os.chmod(config_path, 0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _validate_channel_url(self, url: str, channel_name: str) -> tuple[bool, str]:
+        """Validate outbound URL with secure defaults."""
+        allow_insecure = _is_truthy_env(os.getenv("AUDORA_ALLOW_INSECURE_WEBHOOKS"))
+        allow_private = _is_truthy_env(os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOK_TARGETS"))
+        is_valid, reason = validate_outbound_url(
+            url, allow_insecure_http=allow_insecure, allow_private_targets=allow_private
+        )
+        if not is_valid:
+            self.logger.error(f"Blocked {channel_name} outbound URL for security: {reason}")
+        return is_valid, reason
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -540,6 +621,9 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
+        is_valid, reason = self._validate_channel_url(webhook_url, "Slack")
+        if not is_valid:
+            return {"success": False, "error": reason}
 
         try:
             # Create Slack message format
@@ -614,6 +698,9 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+        is_valid, reason = self._validate_channel_url(webhook_url, "Discord")
+        if not is_valid:
+            return {"success": False, "error": reason}
 
         try:
             # Format content for Discord
@@ -690,6 +777,9 @@ System status: {{ system_status }}
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
+        is_valid, reason = self._validate_channel_url(url, "Webhook")
+        if not is_valid:
+            return {"success": False, "error": reason}
 
         try:
             # Prepare payload

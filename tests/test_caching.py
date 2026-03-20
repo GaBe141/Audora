@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,34 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisPayloadIntegrity:
+    """Security tests for signed Redis cache payloads."""
+
+    def _build_backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_signed_payload_round_trip(self):
+        backend = self._build_backend()
+        value = {"track": "song", "score": 92}
+        encoded = backend._serialize_value(value)
+        decoded = backend._deserialize_value(encoded)
+        assert decoded == value
+
+    def test_tampered_payload_fails_verification(self):
+        backend = self._build_backend()
+        encoded = bytearray(backend._serialize_value({"safe": True}))
+        encoded[-1] = ord("A") if encoded[-1] != ord("A") else ord("B")
+
+        with pytest.raises(ValueError, match="signature"):
+            backend._deserialize_value(bytes(encoded))
+
+    def test_legacy_unsigned_payload_is_rejected(self):
+        backend = self._build_backend()
+        unsigned = pickle.dumps({"legacy": True})
+
+        with pytest.raises(ValueError, match="format"):
+            backend._deserialize_value(unsigned)
