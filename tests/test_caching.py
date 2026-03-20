@@ -2,6 +2,9 @@
 
 import time
 
+import pytest
+
+from core import caching as caching_module
 from core.caching import (
     LocalCacheBackend,
 )
@@ -118,3 +121,31 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheSerialization:
+    """Tests for safe cache serialization helpers."""
+
+    def test_json_value_roundtrip(self):
+        value = {"artist": "Track A", "scores": [1, 2, 3], "valid": True}
+        serialized = caching_module._serialize_cache_value(value)
+        restored = caching_module._deserialize_cache_value(serialized)
+        assert restored == value
+
+    def test_invalid_payload_returns_error(self):
+        with pytest.raises(ValueError):
+            caching_module._deserialize_cache_value(b"not-json")
+
+    def test_cache_key_uses_strong_hash_length(self, mock_cache):
+        key = mock_cache._build_cache_key("myfn", ("a", 1), {"k": "v"})
+        key_parts = key.split(":")
+        # prefix + hash(args) + hash(kwargs)
+        assert key_parts[0] == "myfn"
+        assert all(len(part) == 64 for part in key_parts[1:])
+
+    def test_dataframe_roundtrip(self):
+        pd = pytest.importorskip("pandas")
+        df = pd.DataFrame({"track": ["A", "B"], "score": [1.2, 9.4]})
+        serialized = caching_module._serialize_cache_value(df)
+        restored = caching_module._deserialize_cache_value(serialized)
+        pd.testing.assert_frame_equal(restored, df)

@@ -775,9 +775,33 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        # Build SET clause
+        # Whitelist columns to prevent SQL injection through dynamic field names.
+        allowed_fields = {
+            "platform",
+            "track_id",
+            "track_name",
+            "artist",
+            "score",
+            "rank",
+            "region",
+            "trend_date",
+            "metadata",
+            "first_detected",
+            "is_active",
+        }
+
+        invalid_fields = [field for field in updates if field not in allowed_fields]
+        if invalid_fields:
+            raise ValueError(f"Invalid update field(s): {', '.join(invalid_fields)}")
+
+        # Build SET clause from validated fields only.
         set_clauses = [f"{field} = ?" for field in updates]
-        params = list(updates.values())
+        params = []
+        for field, value in updates.items():
+            if field == "metadata" and isinstance(value, dict):
+                params.append(json.dumps(value))
+            else:
+                params.append(value)
 
         # Add track IDs for WHERE clause
         placeholders = ",".join("?" * len(track_ids))
