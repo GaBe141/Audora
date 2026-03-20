@@ -3,6 +3,8 @@ Automated Fix Script for Audora Codebase Issues
 Fixes type hints, imports, and code quality issues identified by linters.
 """
 
+import os
+import shlex
 import subprocess
 
 
@@ -17,7 +19,8 @@ def run_command(cmd: str, description: str) -> bool:
     """Run a command and return success status."""
     print(f"  → {description}")
     try:
-        subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+        command_parts = shlex.split(cmd, posix=os.name != "nt")
+        subprocess.run(command_parts, check=True, capture_output=True, text=True)
         print("  ✅ Success")
         return True
     except subprocess.CalledProcessError as e:
