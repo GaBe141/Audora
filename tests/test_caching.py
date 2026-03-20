@@ -2,8 +2,12 @@
 
 import time
 
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,52 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSecurity:
+    """Security-focused tests for Redis cache serialization."""
+
+    @staticmethod
+    def _make_backend(signing_key: bytes = b"test-signing-key-material-32bytes!!") -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = signing_key
+        return backend
+
+    def test_signed_payload_round_trip(self):
+        backend = self._make_backend()
+        original_value = {"track": "Example", "score": 98, "meta": {"source": "unit-test"}}
+
+        serialized = backend._serialize_value(original_value)
+        restored = backend._deserialize_value(serialized)
+
+        assert restored == original_value
+
+    def test_tampered_payload_is_rejected(self):
+        backend = self._make_backend()
+        serialized = backend._serialize_value({"safe": True})
+
+        tampered = bytearray(serialized)
+        tampered[-1] = 0 if tampered[-1] != 0 else 1
+
+        with pytest.raises(ValueError, match="signature"):
+            backend._deserialize_value(bytes(tampered))
+
+    def test_legacy_unsigned_payload_is_rejected(self):
+        backend = self._make_backend()
+
+        with pytest.raises(ValueError, match="legacy unsigned"):
+            backend._deserialize_value(b"legacy-payload")
+
+
+class TestCacheKeyHashing:
+    """Ensure cache key hashing uses strong digest lengths."""
+
+    def test_build_cache_key_uses_sha256_digests(self):
+        manager = CacheManager(backend=LocalCacheBackend(max_size=10), key_prefix="audora_test")
+
+        cache_key = manager._build_cache_key("expensive_fn", args=(1, "x"), kwargs={"region": "US"})
+        parts = cache_key.split(":")
+
+        assert len(parts) == 3
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
