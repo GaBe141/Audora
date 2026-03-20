@@ -4,10 +4,11 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
+import base64
 import hashlib
+import io
 import json
 import logging
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -27,6 +28,75 @@ except ImportError:
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+_CACHE_TYPE_KEY = "__audora_cache_type__"
+
+
+def _json_default(value: Any) -> Any:
+    """Serialize non-JSON-native objects for Redis cache storage."""
+    if isinstance(value, tuple):
+        return {_CACHE_TYPE_KEY: "tuple", "value": list(value)}
+    if isinstance(value, set):
+        return {_CACHE_TYPE_KEY: "set", "value": list(value)}
+    if isinstance(value, bytes):
+        encoded = base64.b64encode(value).decode("ascii")
+        return {_CACHE_TYPE_KEY: "bytes", "value": encoded}
+
+    try:
+        import pandas as pd  # local import to keep pandas optional
+
+        if isinstance(value, pd.DataFrame):
+            return {_CACHE_TYPE_KEY: "pandas.DataFrame", "value": value.to_json(orient="split")}
+        if isinstance(value, pd.Series):
+            return {_CACHE_TYPE_KEY: "pandas.Series", "value": value.to_json()}
+    except ImportError:
+        pass
+
+    raise TypeError(f"Object of type {type(value).__name__} is not cache-serializable")
+
+
+def _json_object_hook(obj: dict[str, Any]) -> Any:
+    """Deserialize objects encoded by _json_default."""
+    type_marker = obj.get(_CACHE_TYPE_KEY)
+    if not type_marker:
+        return obj
+
+    if type_marker == "tuple":
+        return tuple(obj["value"])
+    if type_marker == "set":
+        return set(obj["value"])
+    if type_marker == "bytes":
+        return base64.b64decode(obj["value"].encode("ascii"))
+    if type_marker == "pandas.DataFrame":
+        try:
+            import pandas as pd  # local import to keep pandas optional
+
+            return pd.read_json(io.StringIO(obj["value"]), orient="split")
+        except ImportError as e:
+            raise ValueError("Cannot deserialize pandas.DataFrame without pandas installed") from e
+    if type_marker == "pandas.Series":
+        try:
+            import pandas as pd  # local import to keep pandas optional
+
+            return pd.read_json(io.StringIO(obj["value"]), typ="series")
+        except ImportError as e:
+            raise ValueError("Cannot deserialize pandas.Series without pandas installed") from e
+
+    return obj
+
+
+def _serialize_cache_value(value: Any) -> bytes:
+    """Safely serialize cache values as JSON bytes."""
+    try:
+        serialized = json.dumps(value, default=_json_default, separators=(",", ":"), sort_keys=True)
+    except TypeError as e:
+        raise ValueError(str(e)) from e
+    return serialized.encode("utf-8")
+
+
+def _deserialize_cache_value(value: bytes) -> Any:
+    """Safely deserialize cache values from JSON bytes."""
+    return json.loads(value.decode("utf-8"), object_hook=_json_object_hook)
 
 
 class CacheBackend:
@@ -156,7 +226,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Keep binary mode for UTF-8 JSON bytes
         )
         self._client = redis.Redis(connection_pool=self._pool)
 
@@ -174,19 +244,24 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            if isinstance(value, str):
+                value = value.encode("utf-8")
+            return _deserialize_cache_value(value)
         except Exception as e:
-            logger.error(f"Redis get error for key {key}: {e}")
+            logger.warning(f"Redis get error for key {key}, dropping unreadable value: {e}")
+            self.delete(key)
             return None
 
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = _serialize_cache_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
+        except ValueError as e:
+            logger.warning(f"Skipping Redis cache set for unserializable key {key}: {e}")
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 
@@ -277,7 +352,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable or supported by cache encoder)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -372,12 +447,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode("utf-8")).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode("utf-8")).hexdigest())
 
         return ":".join(key_parts)
 
