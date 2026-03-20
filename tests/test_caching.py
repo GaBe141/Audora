@@ -2,8 +2,13 @@
 
 import time
 
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    _deserialize_cache_value,
+    _serialize_cache_value,
 )
 
 
@@ -118,3 +123,39 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheSerialization:
+    """Tests for safe Redis cache serialization helpers."""
+
+    def test_round_trip_builtin_types(self):
+        value = {"a": [1, 2, 3], "b": {"nested": True}, "c": ("x", "y"), "d": {1, 2}}
+        encoded = _serialize_cache_value(value)
+        decoded = _deserialize_cache_value(encoded)
+        assert decoded["a"] == [1, 2, 3]
+        assert decoded["b"] == {"nested": True}
+        assert decoded["c"] == ("x", "y")
+        assert decoded["d"] == {1, 2}
+
+    def test_round_trip_dataframe(self):
+        pd = pytest.importorskip("pandas")
+        frame = pd.DataFrame({"track": ["A", "B"], "score": [10, 20]})
+        encoded = _serialize_cache_value(frame)
+        decoded = _deserialize_cache_value(encoded)
+        assert isinstance(decoded, pd.DataFrame)
+        assert decoded.equals(frame)
+
+    def test_rejects_unserializable_objects(self):
+        with pytest.raises(ValueError):
+            _serialize_cache_value(object())
+
+
+class TestCacheKeyHashing:
+    """Tests for deterministic key hashing strategy."""
+
+    def test_cache_key_uses_sha256_hex(self):
+        manager = CacheManager(backend=LocalCacheBackend())
+        key = manager._build_cache_key("prefix", args=(1, 2), kwargs={"a": "b"})
+        parts = key.split(":")
+        assert len(parts) == 3
+        assert all(len(part) == 64 for part in parts[1:])
