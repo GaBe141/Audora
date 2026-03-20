@@ -32,12 +32,18 @@ R = TypeVar("R")
 _CACHE_TYPE_KEY = "__audora_cache_type__"
 
 
-def _json_default(value: Any) -> Any:
-    """Serialize non-JSON-native objects for Redis cache storage."""
+def _prepare_for_json(value: Any) -> Any:
+    """Recursively convert values into JSON-safe data structures."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, list):
+        return [_prepare_for_json(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _prepare_for_json(item) for key, item in value.items()}
     if isinstance(value, tuple):
-        return {_CACHE_TYPE_KEY: "tuple", "value": list(value)}
+        return {_CACHE_TYPE_KEY: "tuple", "value": [_prepare_for_json(item) for item in value]}
     if isinstance(value, set):
-        return {_CACHE_TYPE_KEY: "set", "value": list(value)}
+        return {_CACHE_TYPE_KEY: "set", "value": [_prepare_for_json(item) for item in value]}
     if isinstance(value, bytes):
         encoded = base64.b64encode(value).decode("ascii")
         return {_CACHE_TYPE_KEY: "bytes", "value": encoded}
@@ -55,40 +61,47 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Object of type {type(value).__name__} is not cache-serializable")
 
 
-def _json_object_hook(obj: dict[str, Any]) -> Any:
-    """Deserialize objects encoded by _json_default."""
-    type_marker = obj.get(_CACHE_TYPE_KEY)
-    if not type_marker:
-        return obj
+def _restore_from_json(value: Any) -> Any:
+    """Recursively restore values encoded by _prepare_for_json."""
+    if isinstance(value, list):
+        return [_restore_from_json(item) for item in value]
 
-    if type_marker == "tuple":
-        return tuple(obj["value"])
-    if type_marker == "set":
-        return set(obj["value"])
-    if type_marker == "bytes":
-        return base64.b64decode(obj["value"].encode("ascii"))
-    if type_marker == "pandas.DataFrame":
-        try:
-            import pandas as pd  # local import to keep pandas optional
+    if isinstance(value, dict):
+        type_marker = value.get(_CACHE_TYPE_KEY)
+        if not type_marker:
+            return {key: _restore_from_json(item) for key, item in value.items()}
 
-            return pd.read_json(io.StringIO(obj["value"]), orient="split")
-        except ImportError as e:
-            raise ValueError("Cannot deserialize pandas.DataFrame without pandas installed") from e
-    if type_marker == "pandas.Series":
-        try:
-            import pandas as pd  # local import to keep pandas optional
+        if type_marker == "tuple":
+            return tuple(_restore_from_json(item) for item in value["value"])
+        if type_marker == "set":
+            return set(_restore_from_json(item) for item in value["value"])
+        if type_marker == "bytes":
+            return base64.b64decode(value["value"].encode("ascii"))
+        if type_marker == "pandas.DataFrame":
+            try:
+                import pandas as pd  # local import to keep pandas optional
 
-            return pd.read_json(io.StringIO(obj["value"]), typ="series")
-        except ImportError as e:
-            raise ValueError("Cannot deserialize pandas.Series without pandas installed") from e
+                return pd.read_json(io.StringIO(value["value"]), orient="split")
+            except ImportError as e:
+                raise ValueError("Cannot deserialize pandas.DataFrame without pandas installed") from e
+        if type_marker == "pandas.Series":
+            try:
+                import pandas as pd  # local import to keep pandas optional
 
-    return obj
+                return pd.read_json(io.StringIO(value["value"]), typ="series")
+            except ImportError as e:
+                raise ValueError("Cannot deserialize pandas.Series without pandas installed") from e
+
+        return {key: _restore_from_json(item) for key, item in value.items()}
+
+    return value
 
 
 def _serialize_cache_value(value: Any) -> bytes:
     """Safely serialize cache values as JSON bytes."""
     try:
-        serialized = json.dumps(value, default=_json_default, separators=(",", ":"), sort_keys=True)
+        prepared = _prepare_for_json(value)
+        serialized = json.dumps(prepared, separators=(",", ":"), sort_keys=True)
     except TypeError as e:
         raise ValueError(str(e)) from e
     return serialized.encode("utf-8")
@@ -96,7 +109,8 @@ def _serialize_cache_value(value: Any) -> bytes:
 
 def _deserialize_cache_value(value: bytes) -> Any:
     """Safely deserialize cache values from JSON bytes."""
-    return json.loads(value.decode("utf-8"), object_hook=_json_object_hook)
+    loaded = json.loads(value.decode("utf-8"))
+    return _restore_from_json(loaded)
 
 
 class CacheBackend:
