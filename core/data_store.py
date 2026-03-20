@@ -61,6 +61,18 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+    _ALLOWED_BULK_UPDATE_FIELDS = {
+        "platform",
+        "track_name",
+        "artist",
+        "score",
+        "rank",
+        "region",
+        "trend_date",
+        "first_detected",
+        "metadata",
+        "is_active",
+    }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
@@ -775,9 +787,20 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
+        invalid_fields = [field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS]
+        if invalid_fields:
+            raise ValueError(
+                "Invalid update fields: "
+                f"{invalid_fields}. Allowed fields: {sorted(self._ALLOWED_BULK_UPDATE_FIELDS)}"
+            )
+
+        sanitized_updates = dict(updates)
+        if "metadata" in sanitized_updates and not isinstance(sanitized_updates["metadata"], str):
+            sanitized_updates["metadata"] = json.dumps(sanitized_updates["metadata"])
+
         # Build SET clause
-        set_clauses = [f"{field} = ?" for field in updates]
-        params = list(updates.values())
+        set_clauses = [f"{field} = ?" for field in sanitized_updates]
+        params = list(sanitized_updates.values())
 
         # Add track IDs for WHERE clause
         placeholders = ",".join("?" * len(track_ids))
