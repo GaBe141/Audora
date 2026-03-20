@@ -771,9 +771,34 @@ class EnhancedMusicDataStore:
 
         Returns:
             Number of records updated
+
+        Raises:
+            ValueError: If updates contains unsupported column names.
         """
         if not track_ids or not updates:
             return 0
+
+        allowed_update_fields = {
+            "platform",
+            "track_id",
+            "track_name",
+            "artist",
+            "score",
+            "rank",
+            "region",
+            "trend_date",
+            "first_detected",
+            "metadata",
+            "is_active",
+        }
+        invalid_fields = [field for field in updates if field not in allowed_update_fields]
+        if invalid_fields:
+            raise ValueError(
+                "Invalid update field(s): "
+                + ", ".join(sorted(invalid_fields))
+                + ". Allowed fields are: "
+                + ", ".join(sorted(allowed_update_fields))
+            )
 
         # Build SET clause
         set_clauses = [f"{field} = ?" for field in updates]
