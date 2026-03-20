@@ -1,5 +1,6 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 import pytest
@@ -156,7 +157,11 @@ class TestRedisCacheSerialization:
         payload = {"key": "value"}
         serialized = backend._serialize(payload)  # noqa: SLF001
 
-        tampered = serialized.replace(b"value", b"VALUE")
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"] = envelope["payload"][:-1] + (
+            "A" if envelope["payload"][-1] != "A" else "B"
+        )
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
         restored = backend._deserialize(tampered)  # noqa: SLF001
 
         assert restored is None
