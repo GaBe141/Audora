@@ -235,9 +235,11 @@ class RedisCacheBackend(CacheBackend):
 
             if isinstance(value, pd.DataFrame):
                 return {"t": "dataframe", "v": value.to_json(orient="split", date_format="iso")}
-        except Exception:
+        except ImportError:
             # If pandas isn't importable, treat as unsupported and skip caching.
-            pass
+            logger.debug("Pandas is unavailable; DataFrame values will not be cached in Redis.")
+        except Exception as e:
+            raise TypeError(f"Failed to serialize DataFrame for cache: {e}") from e
 
         raise TypeError(f"Unsupported cache value type for Redis serialization: {type(value).__name__}")
 
