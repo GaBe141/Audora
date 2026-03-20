@@ -4,10 +4,14 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
+import base64
 import hashlib
+import hmac
 import json
 import logging
+import os
 import pickle
+import secrets
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -129,6 +133,8 @@ class LocalCacheBackend(CacheBackend):
 
 class RedisCacheBackend(CacheBackend):
     """Redis cache backend with connection pooling."""
+    _SERIALIZATION_VERSION = 1
+    _MAX_PAYLOAD_BYTES = 5 * 1024 * 1024
 
     def __init__(
         self,
@@ -156,9 +162,10 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Use binary mode for pickle
+            decode_responses=False,  # Keep binary payloads for signed cache envelopes
         )
         self._client = redis.Redis(connection_pool=self._pool)
+        self._signing_key = self._load_signing_key(password)
 
         # Test connection
         try:
@@ -174,7 +181,7 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            return self._deserialize_value(value, key)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,7 +189,7 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
@@ -212,6 +219,66 @@ class RedisCacheBackend(CacheBackend):
         except Exception as e:
             logger.error(f"Redis exists error for key {key}: {e}")
             return False
+
+    def _load_signing_key(self, redis_password: str | None) -> bytes:
+        """Load signing key used to authenticate cached payloads."""
+        configured_key = os.getenv("AUDORA_CACHE_SIGNING_KEY")
+        if configured_key:
+            return configured_key.encode("utf-8")
+
+        if redis_password:
+            logger.warning(
+                "AUDORA_CACHE_SIGNING_KEY not set; deriving Redis cache signing key from Redis password"
+            )
+            return hashlib.sha256(redis_password.encode("utf-8")).digest()
+
+        logger.warning(
+            "AUDORA_CACHE_SIGNING_KEY not set and Redis password missing; "
+            "using ephemeral signing key (cached entries will not survive process restart)"
+        )
+        return secrets.token_bytes(32)
+
+    def _serialize_value(self, value: Any) -> bytes:
+        """Serialize cache value into a signed envelope."""
+        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "version": self._SERIALIZATION_VERSION,
+            "signature": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+    def _deserialize_value(self, value: bytes, key: str) -> Any | None:
+        """Deserialize signed cache payload and reject tampered/legacy values."""
+        try:
+            envelope = json.loads(value.decode("utf-8"))
+            if not isinstance(envelope, dict):
+                raise ValueError("Invalid cache envelope type")
+
+            if envelope.get("version") != self._SERIALIZATION_VERSION:
+                raise ValueError("Unsupported cache envelope version")
+
+            signature = envelope.get("signature")
+            payload_b64 = envelope.get("payload")
+            if not isinstance(signature, str) or not isinstance(payload_b64, str):
+                raise ValueError("Invalid cache envelope fields")
+
+            payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            if len(payload) > self._MAX_PAYLOAD_BYTES:
+                raise ValueError("Cache payload exceeds maximum size")
+
+            expected_signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(signature, expected_signature):
+                logger.warning("Rejected tampered Redis cache payload for key %s", key)
+                self.delete(key)
+                return None
+
+            return pickle.loads(payload)
+        except Exception as e:
+            logger.warning("Rejected invalid Redis cache payload for key %s: %s", key, e)
+            self.delete(key)
+            return None
 
 
 class CacheManager:
@@ -372,12 +439,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode("utf-8")).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode("utf-8")).hexdigest())
 
         return ":".join(key_parts)
 
