@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,46 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for secure Redis serialization helpers."""
+
+    def _backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"  # noqa: SLF001
+        return backend
+
+    def test_secure_round_trip_for_json_safe_data(self):
+        backend = self._backend()
+        payload = {"artist": "Daft Punk", "scores": [95.2, 91.1], "meta": {"region": "US"}}
+
+        serialized = backend._serialize(payload)  # noqa: SLF001
+        restored = backend._deserialize(serialized)  # noqa: SLF001
+
+        assert restored == payload
+
+    def test_secure_round_trip_for_dataframe(self):
+        pd = pytest.importorskip("pandas")
+        backend = self._backend()
+        frame = pd.DataFrame([{"track": "One More Time", "score": 99.1}])
+
+        serialized = backend._serialize(frame)  # noqa: SLF001
+        restored = backend._deserialize(serialized)  # noqa: SLF001
+
+        assert restored is not None
+        assert restored.to_dict("records") == frame.to_dict("records")
+
+    def test_rejects_tampered_payload(self):
+        backend = self._backend()
+        payload = {"key": "value"}
+        serialized = backend._serialize(payload)  # noqa: SLF001
+
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"] = envelope["payload"][:-1] + (
+            "A" if envelope["payload"][-1] != "A" else "B"
+        )
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        restored = backend._deserialize(tampered)  # noqa: SLF001
+
+        assert restored is None
