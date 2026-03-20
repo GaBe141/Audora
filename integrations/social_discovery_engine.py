@@ -7,6 +7,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -754,11 +755,24 @@ class SocialMusicDiscoveryEngine:
 
         return recommendations
 
-    def save_discovery_report(self, report: dict[str, Any], filepath: str = None) -> str:
+    def save_discovery_report(self, report: dict[str, Any], filepath: str | None = None) -> str:
         """Save discovery report to file using centralized utility."""
+        output_root = Path("data").resolve()
+
         if filepath is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = f"data/social_discovery_report_{timestamp}.json"
+            filepath = str(output_root / f"social_discovery_report_{timestamp}.json")
+        else:
+            requested_path = Path(filepath)
+            if not requested_path.is_absolute():
+                requested_path = (Path.cwd() / requested_path).resolve()
+            else:
+                requested_path = requested_path.resolve()
+            if output_root not in requested_path.parents:
+                raise ValueError(
+                    f"Unsafe report path: {filepath}. Report must be saved under {output_root}"
+                )
+            filepath = str(requested_path)
 
         saved_path = write_json(filepath, report)
         return str(saved_path)

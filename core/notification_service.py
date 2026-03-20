@@ -4,10 +4,13 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -17,6 +20,7 @@ from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
@@ -465,17 +469,74 @@ System status: {{ system_status }}
 
         return datetime.now() - last_sent < cooldown_period
 
+    def _is_safe_outbound_url(self, url: str) -> bool:
+        """Validate outbound webhook URLs to reduce SSRF risk."""
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme.lower() != "https":
+                return False
+
+            host = (parsed.hostname or "").strip().lower().strip(".")
+            if not host:
+                return False
+
+            blocked_hostnames = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+            if host in blocked_hostnames or host.endswith(".local"):
+                return False
+
+            try:
+                ip = ipaddress.ip_address(host)
+                if any(
+                    [
+                        ip.is_private,
+                        ip.is_loopback,
+                        ip.is_link_local,
+                        ip.is_multicast,
+                        ip.is_reserved,
+                        ip.is_unspecified,
+                    ]
+                ):
+                    return False
+            except ValueError:
+                # Host is a domain name; attempt DNS resolution and reject private IPs.
+                try:
+                    for result in socket.getaddrinfo(host, None):
+                        resolved_ip = ipaddress.ip_address(result[4][0])
+                        if any(
+                            [
+                                resolved_ip.is_private,
+                                resolved_ip.is_loopback,
+                                resolved_ip.is_link_local,
+                                resolved_ip.is_multicast,
+                                resolved_ip.is_reserved,
+                                resolved_ip.is_unspecified,
+                            ]
+                        ):
+                            return False
+                except socket.gaierror:
+                    # Do not hard-fail when DNS is temporarily unavailable.
+                    pass
+
+            return True
+        except Exception:
+            return False
+
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
         email_config = self.config.get("email", {})
 
-        if not email_config.get("smtp_server") or not email_config.get("recipients"):
+        raw_recipients = email_config.get("recipients", [])
+        if isinstance(raw_recipients, str):
+            raw_recipients = raw_recipients.split(",")
+        recipients = [recipient.strip() for recipient in raw_recipients if recipient.strip()]
+
+        if not email_config.get("smtp_server") or not recipients:
             return {"success": False, "error": "Email not configured"}
 
         try:
             msg = MIMEMultipart("alternative")
             msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
+            msg["To"] = ", ".join(recipients)
             msg["Subject"] = message.title
 
             # Set priority
@@ -516,18 +577,20 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.ehlo()
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
 
-            server.send_message(msg)
+            server.send_message(msg, to_addrs=recipients)
             server.quit()
 
             self.logger.info(
-                f"Email notification sent to {len(email_config['recipients'])} recipients"
+                f"Email notification sent to {len(recipients)} recipients"
             )
-            return {"success": True, "recipients": len(email_config["recipients"])}
+            return {"success": True, "recipients": len(recipients)}
 
         except Exception as e:
             self.logger.error(f"Failed to send email notification: {e}")
@@ -540,6 +603,11 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Slack webhook URL not configured"}
+        if not self._is_safe_outbound_url(webhook_url):
+            return {
+                "success": False,
+                "error": "Slack webhook URL blocked by security policy",
+            }
 
         try:
             # Create Slack message format
@@ -614,6 +682,11 @@ System status: {{ system_status }}
 
         if not webhook_url:
             return {"success": False, "error": "Discord webhook URL not configured"}
+        if not self._is_safe_outbound_url(webhook_url):
+            return {
+                "success": False,
+                "error": "Discord webhook URL blocked by security policy",
+            }
 
         try:
             # Format content for Discord
@@ -690,6 +763,11 @@ System status: {{ system_status }}
 
         if not url:
             return {"success": False, "error": "Webhook URL not configured"}
+        if not self._is_safe_outbound_url(url):
+            return {
+                "success": False,
+                "error": "Webhook URL blocked by security policy",
+            }
 
         try:
             # Prepare payload
