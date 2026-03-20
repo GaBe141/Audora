@@ -223,8 +223,7 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            # nosec B301 - payload integrity is checked with HMAC before deserialization
-            return pickle.loads(payload)
+            return pickle.loads(payload)  # nosec B301 - HMAC verified payload only
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None

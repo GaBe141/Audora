@@ -17,7 +17,9 @@ def run_command(cmd: list[str], description: str) -> bool:
     """Run a command and return success status."""
     print(f"  → {description}")
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        subprocess.run(
+            cmd, check=True, capture_output=True, text=True
+        )  # nosec B603 - static, internal command list only
         print("  ✅ Success")
         return True
     except subprocess.CalledProcessError as e:
