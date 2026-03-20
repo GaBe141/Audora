@@ -4,10 +4,14 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
+import base64
 import hashlib
+import hmac
 import json
 import logging
+import os
 import pickle
+import secrets
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -137,6 +141,7 @@ class RedisCacheBackend(CacheBackend):
         db: int = 0,
         password: str | None = None,
         max_connections: int = 10,
+        signing_key: str | bytes | None = None,
     ) -> None:
         """Initialize Redis cache.
 
@@ -146,9 +151,12 @@ class RedisCacheBackend(CacheBackend):
             db: Redis database number
             password: Redis password (if required)
             max_connections: Maximum connections in pool
+            signing_key: HMAC signing key for cache payload integrity
         """
         if not REDIS_AVAILABLE:
             raise ImportError("Redis package not installed")
+
+        self._signing_key = self._resolve_signing_key(signing_key)
 
         self._pool = ConnectionPool(
             host=host,
@@ -174,7 +182,7 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            return self._deserialize_value(value)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,13 +190,55 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    def _resolve_signing_key(self, signing_key: str | bytes | None) -> bytes:
+        """Resolve cache signing key from argument or environment."""
+        if isinstance(signing_key, str) and signing_key:
+            return signing_key.encode("utf-8")
+        if isinstance(signing_key, bytes) and signing_key:
+            return signing_key
+
+        env_key = os.getenv("AUDORA_CACHE_SIGNING_KEY", "").strip()
+        if env_key:
+            return env_key.encode("utf-8")
+
+        # Fail-closed integrity still works with process-local key.
+        logger.warning(
+            "AUDORA_CACHE_SIGNING_KEY not set; using ephemeral in-memory signing key. "
+            "Redis cache entries will not survive process restarts."
+        )
+        return secrets.token_bytes(32)
+
+    def _serialize_value(self, value: Any) -> bytes:
+        """Serialize and sign cache payload."""
+        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest().encode("ascii")
+        return b"v1:" + signature + b":" + base64.b64encode(payload)
+
+    def _deserialize_value(self, raw_value: bytes) -> Any:
+        """Verify signature and deserialize cache payload."""
+        if not isinstance(raw_value, (bytes, bytearray)):
+            raise ValueError("Cache payload is not bytes")
+
+        parts = raw_value.split(b":", 2)
+        if len(parts) != 3 or parts[0] != b"v1":
+            raise ValueError("Invalid cache payload format")
+
+        provided_sig = parts[1]
+        payload = base64.b64decode(parts[2], validate=True)
+        expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest().encode("ascii")
+
+        if not hmac.compare_digest(provided_sig, expected_sig):
+            raise ValueError("Cache payload signature verification failed")
+
+        return pickle.loads(payload)
 
     def delete(self, key: str) -> None:
         """Delete value from cache."""
@@ -372,12 +422,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
