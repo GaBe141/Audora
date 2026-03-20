@@ -1,5 +1,5 @@
 # Core dependencies
-spotipy==2.24.0
+spotipy==2.26.0
 python-dotenv==1.1.1
 pandas==2.3.3
 matplotlib==3.10.6
@@ -16,8 +16,8 @@ scipy==1.16.2
 plotly==6.3.1
 
 # GUI (prototyping dashboard)
-dash>=2.0.0
-dash-bootstrap-components>=1.0.0
+dash==3.4.0
+dash-bootstrap-components==2.0.4
 
 # Testing
 pytest>=7.0
