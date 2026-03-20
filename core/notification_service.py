@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import ssl
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -516,7 +517,10 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                tls_context = ssl.create_default_context()
+                server.ehlo()
+                server.starttls(context=tls_context)
+                server.ehlo()
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])

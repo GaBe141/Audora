@@ -5,9 +5,12 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import hmac
 import json
 import logging
+import os
 import pickle
+import secrets
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -130,6 +133,9 @@ class LocalCacheBackend(CacheBackend):
 class RedisCacheBackend(CacheBackend):
     """Redis cache backend with connection pooling."""
 
+    _SIGNED_PAYLOAD_PREFIX = b"audora-cache:v1:"
+    _EXPECTED_SIGNATURE_HEX_LEN = 64
+
     def __init__(
         self,
         host: str = "localhost",
@@ -159,6 +165,7 @@ class RedisCacheBackend(CacheBackend):
             decode_responses=False,  # Use binary mode for pickle
         )
         self._client = redis.Redis(connection_pool=self._pool)
+        self._signing_key = self._load_signing_key()
 
         # Test connection
         try:
@@ -174,7 +181,14 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return pickle.loads(value)
+            return self._deserialize_value(value)
+        except ValueError as e:
+            logger.warning(f"Discarding untrusted Redis cache value for key {key}: {e}")
+            try:
+                self._client.delete(key)
+            except Exception:
+                pass
+            return None
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -182,7 +196,7 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = pickle.dumps(value)
+            serialized = self._serialize_value(value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
@@ -212,6 +226,54 @@ class RedisCacheBackend(CacheBackend):
         except Exception as e:
             logger.error(f"Redis exists error for key {key}: {e}")
             return False
+
+    def _load_signing_key(self) -> bytes:
+        """Load cache signing key from environment, or generate ephemeral key."""
+        env_key = os.getenv("AUDORA_CACHE_SIGNING_KEY")
+        if env_key:
+            if len(env_key) < 32:
+                logger.warning(
+                    "AUDORA_CACHE_SIGNING_KEY is shorter than 32 chars; "
+                    "use a longer random key for stronger integrity protection."
+                )
+            return env_key.encode("utf-8")
+
+        # Ephemeral fallback avoids unsigned deserialization while still allowing runtime cache use.
+        logger.warning(
+            "AUDORA_CACHE_SIGNING_KEY is not set. Using an ephemeral signing key; "
+            "Redis cache entries will become invalid after restart."
+        )
+        return secrets.token_bytes(32)
+
+    def _serialize_value(self, value: Any) -> bytes:
+        """Serialize and sign a cache value."""
+        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest().encode("ascii")
+        return self._SIGNED_PAYLOAD_PREFIX + signature + b":" + payload
+
+    def _deserialize_value(self, raw_value: bytes) -> Any:
+        """Verify HMAC signature before deserializing cache value."""
+        if not isinstance(raw_value, (bytes, bytearray)):
+            raise ValueError("Expected binary Redis payload")
+
+        if not raw_value.startswith(self._SIGNED_PAYLOAD_PREFIX):
+            raise ValueError("Unsupported or legacy unsigned cache format")
+
+        signed_blob = bytes(raw_value[len(self._SIGNED_PAYLOAD_PREFIX) :])
+        signature, separator, payload = signed_blob.partition(b":")
+        if separator != b":" or not payload:
+            raise ValueError("Malformed signed cache payload")
+
+        if len(signature) != self._EXPECTED_SIGNATURE_HEX_LEN:
+            raise ValueError("Invalid cache signature length")
+
+        expected_signature = hmac.new(
+            self._signing_key, payload, hashlib.sha256
+        ).hexdigest().encode("ascii")
+        if not hmac.compare_digest(signature, expected_signature):
+            raise ValueError("Cache signature validation failed")
+
+        return pickle.loads(payload)
 
 
 class CacheManager:
@@ -372,12 +434,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
