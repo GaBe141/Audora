@@ -159,7 +159,7 @@ class EnhancedNotificationService:
 
         if config_file and Path(config_file).exists():
             try:
-                with Path(config_file).open() as f:
+                with Path(config_file).open(encoding="utf-8") as f:
                     user_config = json.load(f)
                     # Deep merge configurations
                     self._deep_merge(default_config, user_config)
@@ -170,7 +170,7 @@ class EnhancedNotificationService:
         default_path = Path("config/notification_config.json")
         if default_path.exists() and not config_file:
             try:
-                with default_path.open() as f:
+                with default_path.open(encoding="utf-8") as f:
                     user_config = json.load(f)
                     self._deep_merge(default_config, user_config)
             except Exception as e:
@@ -191,8 +191,10 @@ class EnhancedNotificationService:
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         try:
-            with config_path.open("w") as f:
+            with config_path.open("w", encoding="utf-8") as f:
                 json.dump(to_save, f, indent=2)
+            if os.name != "nt":
+                os.chmod(config_path, 0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
