@@ -2,8 +2,11 @@
 
 import time
 
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,31 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCachePayloadSigning:
+    """Tests for signed Redis payload serialization/deserialization."""
+
+    def _make_backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key-32-bytes-minimum"
+        return backend
+
+    def test_signed_payload_round_trip(self):
+        backend = self._make_backend()
+        payload = backend._serialize_value({"track": "song", "score": 91})
+        value = backend._deserialize_value(payload)
+        assert value == {"track": "song", "score": 91}
+
+    def test_rejects_tampered_payload(self):
+        backend = self._make_backend()
+        payload = backend._serialize_value({"track": "song", "score": 91})
+        tampered = payload[:-1] + bytes([payload[-1] ^ 0x01])
+
+        with pytest.raises(ValueError):
+            backend._deserialize_value(tampered)
+
+    def test_rejects_legacy_unsigned_payload(self):
+        backend = self._make_backend()
+        with pytest.raises(ValueError):
+            backend._deserialize_value(b"legacy-payload-without-signature")
