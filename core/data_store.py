@@ -775,7 +775,24 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        # Build SET clause
+        # Restrict mutable fields to avoid SQL injection via column names.
+        allowed_fields = {
+            "track_name",
+            "artist",
+            "score",
+            "rank",
+            "region",
+            "metadata",
+            "is_active",
+            "first_detected",
+            "trend_date",
+            "platform",
+        }
+        invalid_fields = [field for field in updates if field not in allowed_fields]
+        if invalid_fields:
+            raise ValueError(f"Invalid update fields: {invalid_fields}")
+
+        # Build SET clause from validated fields
         set_clauses = [f"{field} = ?" for field in updates]
         params = list(updates.values())
 
