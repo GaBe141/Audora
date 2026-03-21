@@ -2,14 +2,8 @@
 """Security validation and configuration setup for Spotify Insights."""
 
 import sys
-from pathlib import Path
 
-# Add src to path for imports
-src_path = Path(__file__).resolve().parent / "src"
-sys.path.insert(0, str(src_path))
-
-# Import after path modification
-from src.config import SecureConfig  # noqa: E402
+from core.config import SecureConfig
 
 
 def main():

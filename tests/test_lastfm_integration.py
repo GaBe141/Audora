@@ -1,18 +1,11 @@
 """Integration tests for Last.fm API client (mocked HTTP)."""
 
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Last.fm module imports from .config which may not exist; provide a minimal mock
-if "integrations.config" not in sys.modules:
-    _config_mock = MagicMock()
-    _config_mock.get_config = lambda: MagicMock(get_lastfm_config=lambda: {"api_key": "test_key"})
-    sys.modules["integrations.config"] = _config_mock
-
 from core.exceptions import APIConnectionError, APIResponseError
-from integrations.lastfm_integration import LastFmAPI
+from integrations.lastfm_integration import BASE_URL, REQUEST_TIMEOUT_SECONDS, LastFmAPI
 
 
 class TestLastFmAPISuccess:
@@ -66,6 +59,18 @@ class TestLastFmAPISuccess:
         assert not df.empty
         assert df.iloc[0]["name"] == "Track One"
         assert df.iloc[0]["artist"] == "Artist One"
+
+    def test_make_request_uses_https_and_timeout(self):
+        api = LastFmAPI(api_key="test_key")
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"artists": {"artist": []}}
+
+        with patch.object(api.session, "get", return_value=mock_response) as mock_get:
+            api.get_top_artists_global(limit=5)
+
+        assert BASE_URL.startswith("https://")
+        assert mock_get.call_args.kwargs["timeout"] == REQUEST_TIMEOUT_SECONDS
 
 
 class TestLastFmAPIErrorHandling:
