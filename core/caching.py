@@ -265,7 +265,7 @@ class RedisCacheBackend(CacheBackend):
                 ],
             }
 
-        if value.__class__.__module__.startswith("pandas."):
+        if value.__class__.__module__.startswith("pandas") and hasattr(value, "to_json"):
             return {
                 "__type__": "pandas.DataFrame",
                 "data": value.to_json(orient="split", date_format="iso"),
