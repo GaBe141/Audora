@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
 import time
+from datetime import datetime
 
+import pandas as pd
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,52 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for secure Redis cache serialization envelope."""
+
+    @staticmethod
+    def _make_backend() -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_round_trip_dataframe(self):
+        backend = self._make_backend()
+        value = pd.DataFrame(
+            {"track": ["A", "B"], "score": [91.2, 84.5], "captured_at": ["2026-01-01", "2026-01-02"]}
+        )
+
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored, value)
+
+    def test_round_trip_tagged_types(self):
+        backend = self._make_backend()
+        value = {
+            "generated_at": datetime(2026, 1, 1, 12, 0, 0),
+            "tags": {"viral", "trending"},
+            "coordinates": (12, 34),
+            "blob": b"abc123",
+        }
+
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        assert restored is not None
+        assert restored["generated_at"] == value["generated_at"]
+        assert restored["tags"] == value["tags"]
+        assert restored["coordinates"] == value["coordinates"]
+        assert restored["blob"] == value["blob"]
+
+    def test_rejects_tampered_payload(self):
+        backend = self._make_backend()
+        serialized = backend._serialize({"safe": True})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"] = base64.b64encode(b'{"tampered":true}').decode("ascii")
+        tampered = json.dumps(envelope).encode("utf-8")
+
+        assert backend._deserialize(tampered) is None

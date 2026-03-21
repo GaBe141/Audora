@@ -10,13 +10,22 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
+from datetime import date, datetime
+from io import StringIO
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
+
+try:
+    import pandas as pd
+
+    PANDAS_AVAILABLE = True
+except ImportError:
+    pd = None  # type: ignore[assignment]
+    PANDAS_AVAILABLE = False
 
 # Try to import Redis, fall back to local cache if unavailable
 try:
@@ -133,6 +142,10 @@ class LocalCacheBackend(CacheBackend):
 class RedisCacheBackend(CacheBackend):
     """Redis cache backend with connection pooling."""
 
+    _MARKER_FIELD = "__audora_cache_encoded__"
+    _TYPE_FIELD = "__audora_type__"
+    _VALUE_FIELD = "value"
+
     def __init__(
         self,
         host: str = "localhost",
@@ -178,7 +191,7 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
+        # Fallback to process-local random key to prevent unsigned cache payload loading.
         # This keeps the cache safe by default, with only a reduced cross-process hit rate.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
@@ -188,7 +201,9 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload = json.dumps(
+            value, default=self._json_default, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
@@ -223,10 +238,84 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return json.loads(payload.decode("utf-8"), object_hook=self._json_object_hook)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
+
+    def _json_default(self, obj: Any) -> dict[str, Any]:
+        """Encode non-JSON-native types to explicit tagged objects."""
+        if isinstance(obj, datetime):
+            return {
+                self._MARKER_FIELD: True,
+                self._TYPE_FIELD: "datetime",
+                self._VALUE_FIELD: obj.isoformat(),
+            }
+        if isinstance(obj, date):
+            return {
+                self._MARKER_FIELD: True,
+                self._TYPE_FIELD: "date",
+                self._VALUE_FIELD: obj.isoformat(),
+            }
+        if isinstance(obj, bytes):
+            return {
+                self._MARKER_FIELD: True,
+                self._TYPE_FIELD: "bytes",
+                self._VALUE_FIELD: base64.b64encode(obj).decode("ascii"),
+            }
+        if isinstance(obj, set):
+            return {self._MARKER_FIELD: True, self._TYPE_FIELD: "set", self._VALUE_FIELD: list(obj)}
+        if isinstance(obj, tuple):
+            return {
+                self._MARKER_FIELD: True,
+                self._TYPE_FIELD: "tuple",
+                self._VALUE_FIELD: list(obj),
+            }
+        if PANDAS_AVAILABLE and isinstance(obj, pd.DataFrame):
+            return {
+                self._MARKER_FIELD: True,
+                self._TYPE_FIELD: "dataframe",
+                self._VALUE_FIELD: obj.to_json(orient="split", date_format="iso"),
+            }
+        if PANDAS_AVAILABLE and isinstance(obj, pd.Series):
+            return {
+                self._MARKER_FIELD: True,
+                self._TYPE_FIELD: "series",
+                self._VALUE_FIELD: obj.to_json(date_format="iso"),
+            }
+
+        raise TypeError(f"Object of type {type(obj).__name__} is not cache-serializable")
+
+    def _json_object_hook(self, obj: dict[str, Any]) -> Any:
+        """Decode explicit tagged objects back to Python values."""
+        if obj.get(self._MARKER_FIELD) is not True:
+            return obj
+
+        marker = obj.get(self._TYPE_FIELD)
+        if marker is None or self._VALUE_FIELD not in obj:
+            return obj
+
+        value = obj.get(self._VALUE_FIELD)
+        if marker == "datetime" and isinstance(value, str):
+            return datetime.fromisoformat(value)
+        if marker == "date" and isinstance(value, str):
+            return date.fromisoformat(value)
+        if marker == "bytes" and isinstance(value, str):
+            return base64.b64decode(value.encode("ascii"), validate=True)
+        if marker == "set" and isinstance(value, list):
+            return set(value)
+        if marker == "tuple" and isinstance(value, list):
+            return tuple(value)
+        if marker == "dataframe" and isinstance(value, str):
+            if not PANDAS_AVAILABLE:
+                raise ValueError("Pandas is required to deserialize cached DataFrame values")
+            return pd.read_json(StringIO(value), orient="split")
+        if marker == "series" and isinstance(value, str):
+            if not PANDAS_AVAILABLE:
+                raise ValueError("Pandas is required to deserialize cached Series values")
+            return pd.read_json(StringIO(value), typ="series")
+
+        raise ValueError(f"Unsupported cache serialization marker: {marker}")
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
@@ -337,7 +426,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable by secure serializer)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +521,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
