@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,22 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportToCsvSecurity:
+    """Security-focused tests for export path handling."""
+
+    def test_export_to_csv_rejects_absolute_paths(self, data_store, tmp_path):
+        with pytest.raises(ValueError, match="Absolute export paths"):
+            data_store.export_to_csv("trends", str((tmp_path / "outside.csv").resolve()))
+
+    def test_export_to_csv_rejects_path_traversal(self, data_store):
+        with pytest.raises(ValueError, match="must stay within"):
+            data_store.export_to_csv("trends", "../outside.csv")
+
+    def test_export_to_csv_writes_inside_workspace(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        output = data_store.export_to_csv("trends", "exports/security_test.csv")
+        output_path = Path(output).resolve()
+        assert output_path.exists()
+        assert output_path.is_relative_to(Path.cwd().resolve())
