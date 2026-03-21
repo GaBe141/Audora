@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +125,69 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheKeyHashing:
+    """Tests for deterministic and secure cache key hashing."""
+
+    def test_build_cache_key_uses_sha256_digests(self):
+        manager = CacheManager(backend=LocalCacheBackend(max_size=5), key_prefix="audora_test")
+        key = manager._build_cache_key("prefix", args=(1, "x"), kwargs={"a": 2})
+        parts = key.split(":")
+
+        assert parts[0] == "prefix"
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+        assert all(ch in "0123456789abcdef" for ch in parts[1])
+        assert all(ch in "0123456789abcdef" for ch in parts[2])
+
+
+class TestRedisSerializationSafety:
+    """Tests for safe Redis serializer/deserializer behavior."""
+
+    @staticmethod
+    def _backend() -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_dataframe_roundtrip_serialization(self):
+        backend = self._backend()
+        value = pd.DataFrame(
+            [{"track_name": "Song A", "score": 91.2}, {"track_name": "Song B", "score": 88.0}]
+        )
+
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        assert isinstance(restored, pd.DataFrame)
+        assert restored.equals(value)
+
+    def test_deserialize_rejects_tampered_signature(self):
+        backend = self._backend()
+        serialized = backend._serialize({"k": "v"})
+        envelope = json.loads(serialized.decode("utf-8"))
+        payload = base64.b64decode(envelope["payload"].encode("ascii"), validate=True)
+        tampered_payload = payload.replace(b'"v"', b'"x"')
+        envelope["payload"] = base64.b64encode(tampered_payload).decode("ascii")
+
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(tampered) is None
+
+    def test_roundtrip_preserves_dict_with_type_like_keys(self):
+        backend = self._backend()
+        payload = {"__type__": "bytes", "data": "not-a-marker", "nested": {"__type__": "x"}}
+
+        serialized = backend._serialize(payload)
+        restored = backend._deserialize(serialized)
+
+        assert restored == payload
+
+    def test_serialize_rejects_unsupported_objects(self):
+        backend = self._backend()
+
+        class Unsupported:
+            pass
+
+        with pytest.raises(TypeError):
+            backend._serialize(Unsupported())
