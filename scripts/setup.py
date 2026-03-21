@@ -32,7 +32,7 @@ ENHANCED_PACKAGES = [
     "dash>=2.0.0",
     "dash-bootstrap-components>=1.0.0",
     # Template engine
-    "jinja2>=3.0.0",
+    "jinja2>=3.1.6",
     # Environment management
     "python-dotenv>=0.19.0",
     # Development tools
