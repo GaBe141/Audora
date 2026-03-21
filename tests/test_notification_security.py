@@ -23,6 +23,16 @@ class TestWebhookUrlValidation:
         with pytest.raises(ValueError, match="private or restricted"):
             svc._validate_webhook_url("https://10.0.0.1/webhook")
 
+    def test_rejects_webhook_urls_with_embedded_credentials(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="embedded credentials"):
+            svc._validate_webhook_url("https://user:pass@10.0.0.1/webhook")
+
+    def test_rejects_webhook_urls_with_fragments(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="fragments"):
+            svc._validate_webhook_url("https://10.0.0.1/webhook#internal")
+
     def test_allows_private_ip_when_explicitly_enabled(self):
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
