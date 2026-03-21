@@ -1,32 +1,32 @@
 """Security tests for safe report output paths."""
 
+import importlib
 import sys
 import types
 
 import pytest
 
-# Stub integration modules so core.main_app can be imported in isolation.
-if "integrations.api_config" not in sys.modules:
+def _load_app_class(monkeypatch):
+    """Import core.main_app with isolated dependency stubs."""
     api_config_module = types.ModuleType("integrations.api_config")
     api_config_module.SocialAPIManager = object  # type: ignore[attr-defined]
-    sys.modules["integrations.api_config"] = api_config_module
+    monkeypatch.setitem(sys.modules, "integrations.api_config", api_config_module)
 
-if "integrations.extended_platforms" not in sys.modules:
     extended_module = types.ModuleType("integrations.extended_platforms")
     extended_module.ExtendedSocialDiscoveryEngine = object  # type: ignore[attr-defined]
-    sys.modules["integrations.extended_platforms"] = extended_module
+    monkeypatch.setitem(sys.modules, "integrations.extended_platforms", extended_module)
 
-if "integrations.social_discovery_engine" not in sys.modules:
     social_module = types.ModuleType("integrations.social_discovery_engine")
     social_module.SocialMusicDiscoveryEngine = object  # type: ignore[attr-defined]
-    sys.modules["integrations.social_discovery_engine"] = social_module
+    monkeypatch.setitem(sys.modules, "integrations.social_discovery_engine", social_module)
 
-if "integrations.trending_schema" not in sys.modules:
     schema_module = types.ModuleType("integrations.trending_schema")
     schema_module.TrendingSchema = object  # type: ignore[attr-defined]
-    sys.modules["integrations.trending_schema"] = schema_module
+    monkeypatch.setitem(sys.modules, "integrations.trending_schema", schema_module)
 
-from core.main_app import ComprehensiveMusicDiscoveryApp
+    monkeypatch.delitem(sys.modules, "core.main_app", raising=False)
+    main_app_module = importlib.import_module("core.main_app")
+    return main_app_module.ComprehensiveMusicDiscoveryApp
 
 
 class TestSaveDiscoveryReportSecurity:
@@ -34,6 +34,7 @@ class TestSaveDiscoveryReportSecurity:
 
     def test_rejects_absolute_custom_filename(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        ComprehensiveMusicDiscoveryApp = _load_app_class(monkeypatch)
         app = ComprehensiveMusicDiscoveryApp.__new__(ComprehensiveMusicDiscoveryApp)
 
         with pytest.raises(ValueError, match="relative path under data"):
@@ -41,6 +42,7 @@ class TestSaveDiscoveryReportSecurity:
 
     def test_rejects_path_traversal_custom_filename(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        ComprehensiveMusicDiscoveryApp = _load_app_class(monkeypatch)
         app = ComprehensiveMusicDiscoveryApp.__new__(ComprehensiveMusicDiscoveryApp)
 
         with pytest.raises(ValueError, match="must not escape"):
@@ -48,6 +50,7 @@ class TestSaveDiscoveryReportSecurity:
 
     def test_allows_nested_relative_path_under_data(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        ComprehensiveMusicDiscoveryApp = _load_app_class(monkeypatch)
         app = ComprehensiveMusicDiscoveryApp.__new__(ComprehensiveMusicDiscoveryApp)
 
         output = app.save_discovery_report(
