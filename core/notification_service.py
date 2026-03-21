@@ -4,10 +4,12 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
 import os
+import ssl
 import socket
 import smtplib
 from dataclasses import dataclass
@@ -115,6 +117,11 @@ class EnhancedNotificationService:
 
     def _load_config(self, config_file: str | None) -> dict[str, Any]:
         """Load notification configuration."""
+        webhook_headers = {"Content-Type": "application/json"}
+        webhook_token = os.getenv("WEBHOOK_TOKEN", "").strip()
+        if webhook_token:
+            webhook_headers["Authorization"] = f"Bearer {webhook_token}"
+
         default_config = {
             "enabled": True,
             "default_channels": ["console"],
@@ -129,7 +136,11 @@ class EnhancedNotificationService:
                 "username": os.getenv("SMTP_USERNAME", ""),
                 "password": os.getenv("SMTP_PASSWORD", ""),
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
-                "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
+                "recipients": [
+                    recipient.strip()
+                    for recipient in os.getenv("EMAIL_RECIPIENTS", "").split(",")
+                    if recipient.strip()
+                ],
                 "use_tls": True,
             },
             "slack": {
@@ -145,10 +156,7 @@ class EnhancedNotificationService:
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
-                },
+                "headers": webhook_headers,
                 "timeout": 30,
             },
             "sms": {
@@ -156,7 +164,11 @@ class EnhancedNotificationService:
                 "api_key": os.getenv("SMS_API_KEY", ""),
                 "api_secret": os.getenv("SMS_API_SECRET", ""),
                 "from_number": os.getenv("SMS_FROM_NUMBER", ""),
-                "recipients": os.getenv("SMS_RECIPIENTS", "").split(","),
+                "recipients": [
+                    recipient.strip()
+                    for recipient in os.getenv("SMS_RECIPIENTS", "").split(",")
+                    if recipient.strip()
+                ],
             },
         }
 
@@ -509,9 +521,10 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
-        return f"{content_hash}:{message.priority.value}"
+        # Use a stable cryptographic hash to avoid collisions and process-randomized hash().
+        key_material = f"{message.title}:{message.content[:100]}:{message.priority.value}"
+        digest = hashlib.sha256(key_material.encode("utf-8")).hexdigest()
+        return f"{digest}:{message.priority.value}"
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""
@@ -570,17 +583,21 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
-            # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            # Send email with explicit TLS verification.
+            with smtplib.SMTP(
+                email_config["smtp_server"],
+                email_config.get("port", 587),
+                timeout=30,
+            ) as server:
+                server.ehlo()
+                if email_config.get("use_tls", True):
+                    server.starttls(context=ssl.create_default_context())
+                    server.ehlo()
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
-
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"

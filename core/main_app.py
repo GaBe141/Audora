@@ -35,6 +35,8 @@ class ComprehensiveMusicDiscoveryApp:
         self.last_discovery_run: datetime | None = None
         self.discovery_cache: dict[str, Any] = {}
         self.analytics_data: list[Any] = []
+        self.reports_dir = Path("data").resolve()
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
 
         self._initialize_engines()
 
@@ -338,15 +340,22 @@ class ComprehensiveMusicDiscoveryApp:
     ) -> str:
         """Save comprehensive discovery report."""
         if custom_filename:
-            filename = custom_filename
+            safe_name = Path(custom_filename).name
+            if safe_name != custom_filename.strip():
+                raise ValueError("Custom report filename must not include path separators")
+            if safe_name in {"", ".", ".."}:
+                raise ValueError("Custom report filename is invalid")
+            if not safe_name.lower().endswith(".json"):
+                safe_name = f"{safe_name}.json"
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            safe_name = f"comprehensive_discovery_report_{timestamp}.json"
 
-        filepath = Path(filename)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
+        filepath = (self.reports_dir / safe_name).resolve()
+        if not filepath.is_relative_to(self.reports_dir):
+            raise ValueError("Report path must stay within the data directory")
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        with filepath.open("w", encoding="utf-8") as f:
             json.dump(discovery_results, f, indent=2, default=str, ensure_ascii=False)
 
         return str(filepath)

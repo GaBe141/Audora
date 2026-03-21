@@ -3,6 +3,7 @@ Enhanced data persistence layer for music discovery data.
 Handles trending data, viral predictions, and cross-platform analysis.
 """
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -72,6 +73,12 @@ class EnhancedMusicDataStore:
         "first_detected",
         "metadata",
         "is_active",
+    }
+    _TABLE_COUNT_QUERIES = {
+        "trends": "SELECT COUNT(*) FROM trends",
+        "trend_history": "SELECT COUNT(*) FROM trend_history",
+        "viral_predictions": "SELECT COUNT(*) FROM viral_predictions",
+        "cross_platform_correlations": "SELECT COUNT(*) FROM cross_platform_correlations",
     }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
@@ -665,8 +672,10 @@ class EnhancedMusicDataStore:
         if not track_artist_pairs:
             return pd.DataFrame()
 
-        # Create cache key from the pairs
-        cache_key = f"tracks_bulk:{hash(tuple(sorted(track_artist_pairs)))}"
+        # Create stable collision-resistant cache key from normalized pairs.
+        normalized_pairs = sorted(track_artist_pairs)
+        pairs_payload = json.dumps(normalized_pairs, sort_keys=True, separators=(",", ":"))
+        cache_key = f"tracks_bulk:{hashlib.sha256(pairs_payload.encode('utf-8')).hexdigest()}"
         cached_result = self._cache.get(cache_key)
         if cached_result is not None:
             self.logger.debug(f"Cache hit for bulk tracks query ({len(track_artist_pairs)} pairs)")
@@ -944,6 +953,15 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        output_path = Path(filepath)
+        if output_path.is_absolute():
+            raise ValueError("Absolute export paths are not allowed")
+
+        workspace_root = Path.cwd().resolve()
+        resolved_output_path = (workspace_root / output_path).resolve()
+        if not resolved_output_path.is_relative_to(workspace_root):
+            raise ValueError("Export path must stay within the current workspace")
+
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -959,12 +977,12 @@ class EnhancedMusicDataStore:
                 df = pd.read_sql_query(query, conn)
 
             # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            resolved_output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(resolved_output_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {resolved_output_path}")
 
-        return filepath
+        return str(resolved_output_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
@@ -973,13 +991,9 @@ class EnhancedMusicDataStore:
 
             # Table row counts with validated table names
             table_stats = {}
-            # Whitelist of valid tables to prevent SQL injection
-            tables = ["trends", "trend_history", "viral_predictions", "cross_platform_correlations"]
-
-            for table in tables:
-                # Table names are from whitelist, safe to use
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
-                table_stats[table] = cursor.fetchone()[0]
+            for table_name, count_query in self._TABLE_COUNT_QUERIES.items():
+                cursor.execute(count_query)
+                table_stats[table_name] = cursor.fetchone()[0]
 
             # Data quality checks
             quality_issues = []
