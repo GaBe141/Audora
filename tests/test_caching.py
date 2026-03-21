@@ -151,7 +151,7 @@ class TestRedisCacheSerialization:
         value = {
             "generated_at": datetime(2026, 1, 1, 12, 0, 0),
             "tags": {"viral", "trending"},
-            "coordinates": (12, 34),
+            "coordinates": [12, 34],
             "blob": b"abc123",
         }
 
