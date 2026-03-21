@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -81,6 +83,14 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_build_cache_key_uses_sha256_digest(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"genre": "pop"})
+        _, args_hash, kwargs_hash = key.split(":")
+        assert len(args_hash) == 64
+        assert len(kwargs_hash) == 64
+        int(args_hash, 16)
+        int(kwargs_hash, 16)
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +128,43 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for safe Redis cache payload serialization and verification."""
+
+    def _build_backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_roundtrip_signed_json_payload(self):
+        backend = self._build_backend()
+        value = {"track": "Test Song", "score": 92, "tags": ["viral", "rising"]}
+
+        serialized = backend._serialize(value)
+
+        assert isinstance(serialized, bytes)
+        assert backend._deserialize(serialized) == value
+
+    def test_rejects_tampered_payload(self):
+        backend = self._build_backend()
+        serialized = backend._serialize({"score": 42})
+
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"] = json.dumps({"score": 99}, sort_keys=True, separators=(",", ":"))
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(tampered) is None
+
+    def test_rejects_legacy_envelope_version(self):
+        backend = self._build_backend()
+        legacy_entry = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "not-a-real-signature",
+            "payload": "legacy",
+        }
+        serialized = json.dumps(legacy_entry).encode("utf-8")
+
+        assert backend._deserialize(serialized) is None
