@@ -6,14 +6,12 @@ fallback to in-memory caching when Redis is unavailable.
 
 import base64
 import hashlib
-import hmac
 import json
 import logging
-import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
+from io import StringIO
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -27,6 +25,13 @@ try:
 except ImportError:
     REDIS_AVAILABLE = False
     logger.warning("Redis not available, using local cache fallback")
+
+try:
+    import pandas as pd
+
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -159,10 +164,9 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Keep binary mode for signed payloads
+            decode_responses=False,  # Keep binary mode for cache payloads
         )
         self._client = redis.Redis(connection_pool=self._pool)
-        self._signing_key = self._get_signing_key()
 
         # Test connection
         try:
@@ -172,59 +176,68 @@ class RedisCacheBackend(CacheBackend):
             logger.error(f"Failed to connect to Redis: {e}")
             raise
 
-    def _get_signing_key(self) -> bytes:
-        """Get cache signing key used to verify serialized payload integrity."""
-        configured_key = os.getenv("AUDORA_CACHE_SIGNING_KEY", "").strip()
-        if configured_key:
-            return configured_key.encode("utf-8")
-
-        # Fallback to process-local random key to prevent unsigned pickle loading.
-        # This keeps the cache safe by default, with only a reduced cross-process hit rate.
-        logger.warning(
-            "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
-            "Set AUDORA_CACHE_SIGNING_KEY for shared Redis cache across processes."
-        )
-        return os.urandom(32)
-
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
-        envelope = {
-            "v": 1,
-            "alg": "HMAC-SHA256",
-            "sig": signature,
-            "payload": base64.b64encode(payload).decode("ascii"),
-        }
+        """Serialize cache value using JSON-safe envelopes."""
+        if PANDAS_AVAILABLE and isinstance(value, pd.DataFrame):
+            envelope = {
+                "v": 1,
+                "type": "pandas_dataframe",
+                "value": value.to_json(orient="split", date_format="iso"),
+            }
+            return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        if isinstance(value, bytes):
+            envelope = {
+                "v": 1,
+                "type": "bytes",
+                "value": base64.b64encode(value).decode("ascii"),
+            }
+            return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"Unsupported cache value type for Redis backend: {type(value)!r}") from exc
+
+        envelope = {"v": 1, "type": "json", "value": value}
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
     def _deserialize(self, value: bytes) -> Any | None:
-        """Deserialize cache value only after signature verification."""
+        """Deserialize cache value from JSON-safe envelopes."""
         try:
             envelope = json.loads(value.decode("utf-8"))
-            if (
-                not isinstance(envelope, dict)
-                or envelope.get("v") != 1
-                or envelope.get("alg") != "HMAC-SHA256"
-                or "sig" not in envelope
-                or "payload" not in envelope
-            ):
+            if not isinstance(envelope, dict) or envelope.get("v") != 1:
                 logger.warning("Rejected cache entry with invalid serialization envelope")
                 return None
 
-            payload_b64 = envelope["payload"]
-            if not isinstance(payload_b64, str):
-                logger.warning("Rejected cache entry with non-string payload")
-                return None
+            payload_type = envelope.get("type")
+            if payload_type == "json":
+                return envelope.get("value")
 
-            payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
-            expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
-                logger.warning("Rejected cache entry with invalid signature")
-                return None
+            if payload_type == "bytes":
+                payload_b64 = envelope.get("value")
+                if not isinstance(payload_b64, str):
+                    logger.warning("Rejected cache bytes payload with invalid format")
+                    return None
+                return base64.b64decode(payload_b64.encode("ascii"), validate=True)
 
-            return pickle.loads(payload)
+            if payload_type == "pandas_dataframe":
+                if not PANDAS_AVAILABLE:
+                    logger.warning("Rejected cache dataframe payload because pandas is unavailable")
+                    return None
+                payload_json = envelope.get("value")
+                if not isinstance(payload_json, str):
+                    logger.warning("Rejected cache dataframe payload with invalid format")
+                    return None
+                return pd.read_json(StringIO(payload_json), orient="split")
+
+            logger.warning("Rejected cache entry with unsupported payload type: %s", payload_type)
+            return None
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as e:
+            logger.error(f"Failed to deserialize cache entry: {e}")
+            return None
         except Exception as e:
+            # Final safety net: never trust external cache payloads.
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
 
@@ -337,7 +350,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (JSON/bytes/pandas.DataFrame supported for Redis)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +445,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

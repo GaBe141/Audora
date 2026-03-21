@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
 import time
 
+import pytest
+
+import core.caching as caching
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,48 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256_hashes(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, "abc"), {"flag": True})
+        parts = key.split(":")
+        assert len(parts) == 3
+
+        args_expected = hashlib.sha256(json.dumps((1, "abc"), sort_keys=True, default=str).encode())
+        kwargs_expected = hashlib.sha256(
+            json.dumps({"flag": True}, sort_keys=True, default=str).encode()
+        )
+        assert parts[1] == args_expected.hexdigest()
+        assert parts[2] == kwargs_expected.hexdigest()
+
+
+class TestRedisSerializationSecurity:
+    """Security regression tests for Redis payload handling."""
+
+    @staticmethod
+    def _backend() -> RedisCacheBackend:
+        return RedisCacheBackend.__new__(RedisCacheBackend)
+
+    def test_json_payload_round_trip(self):
+        backend = self._backend()
+        payload = {"track": "x", "score": 98}
+        serialized = backend._serialize(payload)
+        assert backend._deserialize(serialized) == payload
+
+    def test_bytes_payload_round_trip(self):
+        backend = self._backend()
+        payload = b"\x00\x01audora"
+        serialized = backend._serialize(payload)
+        assert backend._deserialize(serialized) == payload
+
+    @pytest.mark.skipif(not caching.PANDAS_AVAILABLE, reason="pandas not installed")
+    def test_dataframe_payload_round_trip(self):
+        backend = self._backend()
+        df = caching.pd.DataFrame({"track": ["a", "b"], "score": [1, 2]})
+        serialized = backend._serialize(df)
+        out = backend._deserialize(serialized)
+        assert out.equals(df)
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = self._backend()
+        legacy_payload = b"\x80\x04\x95\n\x00\x00\x00\x00\x00\x00\x00}\x94."
+        assert backend._deserialize(legacy_payload) is None
