@@ -8,8 +8,10 @@ import ipaddress
 import json
 import logging
 import os
+import ssl
 import socket
 import smtplib
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -145,10 +147,7 @@ class EnhancedNotificationService:
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
-                },
+                "headers": {"Content-Type": "application/json"},
                 "timeout": 30,
             },
             "sms": {
@@ -193,6 +192,8 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        if not self._persist_notification_secrets():
+            to_save = self._sanitize_config_for_persistence(to_save)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -202,9 +203,62 @@ class EnhancedNotificationService:
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
 
+    def _persist_notification_secrets(self) -> bool:
+        """Whether notification secrets are allowed to be persisted to disk."""
+        return os.getenv("AUDORA_PERSIST_NOTIFICATION_SECRETS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _sanitize_config_for_persistence(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Remove credential-like values before writing config to disk."""
+        sanitized = deepcopy(config)
+
+        # Remove direct credentials.
+        for section, keys in (
+            ("email", ("password",)),
+            ("sms", ("api_key", "api_secret")),
+            ("slack", ("webhook_url",)),
+            ("discord", ("webhook_url",)),
+            ("webhook", ("url",)),
+        ):
+            section_data = sanitized.get(section)
+            if isinstance(section_data, dict):
+                for key in keys:
+                    section_data.pop(key, None)
+
+        # Remove authorization-like headers if custom headers are provided.
+        webhook_data = sanitized.get("webhook")
+        if isinstance(webhook_data, dict):
+            headers = webhook_data.get("headers")
+            if isinstance(headers, dict):
+                sensitive_header_names = {
+                    "authorization",
+                    "proxy-authorization",
+                    "x-api-key",
+                    "x-auth-token",
+                    "x-access-token",
+                }
+                for key in list(headers.keys()):
+                    if key.lower() in sensitive_header_names:
+                        headers.pop(key, None)
+
+        return sanitized
+
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
         return os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _allow_private_smtp(self) -> bool:
+        """Whether private network SMTP targets are allowed."""
+        return os.getenv("AUDORA_ALLOW_PRIVATE_SMTP", "").strip().lower() in {
             "1",
             "true",
             "yes",
@@ -254,6 +308,30 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _validate_smtp_host(self, host: str, port: int, *, allow_private: bool = False) -> str:
+        """Validate SMTP destination host to reduce internal-network abuse."""
+        smtp_host = host.strip()
+        if not smtp_host:
+            raise ValueError("SMTP host must not be empty")
+        if smtp_host.lower() == "localhost":
+            raise ValueError("Localhost SMTP targets are not allowed")
+
+        resolved_ips = set()
+        try:
+            for info in socket.getaddrinfo(smtp_host, port, proto=socket.IPPROTO_TCP):
+                resolved_ips.add(info[4][0])
+        except socket.gaierror as e:
+            raise ValueError(f"Could not resolve SMTP hostname: {smtp_host}") from e
+
+        if not allow_private:
+            for ip in resolved_ips:
+                if self._is_restricted_ip(ip):
+                    raise ValueError(
+                        "SMTP host resolves to a private or restricted network address"
+                    )
+
+        return smtp_host
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -571,16 +649,23 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            smtp_port = int(email_config.get("port", 587))
+            smtp_host = self._validate_smtp_host(
+                str(email_config["smtp_server"]),
+                smtp_port,
+                allow_private=self._allow_private_smtp(),
+            )
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
+                if email_config.get("use_tls", True):
+                    server.ehlo()
+                    server.starttls(context=ssl.create_default_context())
+                    server.ehlo()
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"
@@ -771,7 +856,12 @@ System status: {{ system_status }}
                 )
                 payload["formatted_content"] = template.render(**message.template_vars)
 
-            headers = webhook_config.get("headers", {"Content-Type": "application/json"})
+            headers = dict(webhook_config.get("headers", {"Content-Type": "application/json"}))
+            # Keep tokens out of persisted config; source from env at send time.
+            if "Authorization" not in headers:
+                token = os.getenv("WEBHOOK_TOKEN", "").strip()
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
             timeout = webhook_config.get("timeout", 30)
 
             async with (
