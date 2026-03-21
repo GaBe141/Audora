@@ -81,6 +81,16 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_build_cache_key_uses_strong_hash_and_is_stable(self, mock_cache):
+        key_a = mock_cache._build_cache_key("fn", (1, "x"), {"b": 2, "a": 1})
+        key_b = mock_cache._build_cache_key("fn", (1, "x"), {"a": 1, "b": 2})
+
+        # Deterministic across kwargs order and uses SHA-256 digests (64 hex chars).
+        assert key_a == key_b
+        key_parts = key_a.split(":")
+        assert len(key_parts) == 3
+        assert all(len(part) == 64 for part in key_parts[1:])
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
