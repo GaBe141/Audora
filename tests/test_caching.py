@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import re
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,31 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256_hashes(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, "two"), {"alpha": 3})
+        parts = key.split(":")
+
+        assert len(parts) == 3
+        assert parts[0] == "fn"
+        assert re.fullmatch(r"[0-9a-f]{64}", parts[1]) is not None
+        assert re.fullmatch(r"[0-9a-f]{64}", parts[2]) is not None
+
+
+class TestRedisCacheSecurity:
+    """Security-focused serializer tests for Redis cache backend."""
+
+    def test_sanitize_json_rejects_unsafe_types(self):
+        backend = object.__new__(RedisCacheBackend)
+        with pytest.raises(TypeError):
+            backend._sanitize_json_value({"bad": {1, 2, 3}})
+
+    def test_signed_json_round_trip(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+
+        original = {"track": "Example", "scores": [1, 2, 3], "meta": {"safe": True}}
+        serialized = backend._serialize(original)
+        restored = backend._deserialize(serialized)
+
+        assert restored == original
