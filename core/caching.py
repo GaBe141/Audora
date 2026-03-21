@@ -163,6 +163,7 @@ class RedisCacheBackend(CacheBackend):
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
+        self._max_payload_bytes = self._get_max_payload_bytes()
 
         # Test connection
         try:
@@ -185,6 +186,25 @@ class RedisCacheBackend(CacheBackend):
             "Set AUDORA_CACHE_SIGNING_KEY for shared Redis cache across processes."
         )
         return os.urandom(32)
+
+    def _get_max_payload_bytes(self) -> int:
+        """Maximum signed payload size accepted from Redis."""
+        raw = os.getenv("AUDORA_CACHE_MAX_PAYLOAD_BYTES", "5242880").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning(
+                "Invalid AUDORA_CACHE_MAX_PAYLOAD_BYTES=%r; defaulting to 5242880", raw
+            )
+            return 5 * 1024 * 1024
+
+        if value <= 0:
+            logger.warning(
+                "AUDORA_CACHE_MAX_PAYLOAD_BYTES must be positive; defaulting to 5242880"
+            )
+            return 5 * 1024 * 1024
+
+        return value
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
@@ -218,6 +238,12 @@ class RedisCacheBackend(CacheBackend):
                 return None
 
             payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            if len(payload) > self._max_payload_bytes:
+                logger.warning(
+                    "Rejected cache entry exceeding max payload size (%s bytes)",
+                    self._max_payload_bytes,
+                )
+                return None
             expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
@@ -432,12 +458,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
