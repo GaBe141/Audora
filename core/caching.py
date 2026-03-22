@@ -7,6 +7,7 @@ fallback to in-memory caching when Redis is unavailable.
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -299,7 +300,7 @@ class RedisCacheBackend(CacheBackend):
                 raw_value = value.get("value", "")
                 if not isinstance(raw_value, str):
                     raise ValueError("Invalid dataframe cache payload")
-                return pd.read_json(raw_value, orient=value.get("orient", "split"))
+                return pd.read_json(io.StringIO(raw_value), orient=value.get("orient", "split"))
 
             return {k: self._from_json_safe(v) for k, v in value.items()}
 
