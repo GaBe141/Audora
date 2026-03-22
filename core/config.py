@@ -5,6 +5,7 @@ import sys
 import warnings
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -19,7 +20,7 @@ class SecureConfig:
             env_file: Path to .env file. If None, searches for .env in project root.
         """
         self.project_root = Path(__file__).resolve().parent.parent
-        self.env_file = env_file or (self.project_root / ".env")
+        self.env_file = Path(env_file) if env_file else (self.project_root / ".env")
         self._config: dict[str, Any] = {}
         self._load_environment()
 
@@ -57,14 +58,31 @@ class SecureConfig:
             ),
         }
 
-        # Validate redirect URI format
-        if not config["redirect_uri"].startswith(("http://localhost", "http://127.0.0.1")):
-            raise ValueError(
-                f"Invalid redirect URI: {config['redirect_uri']}\n"
-                "For development, use http://localhost or http://127.0.0.1"
-            )
+        self._validate_spotify_redirect_uri(config["redirect_uri"])
 
         return config
+
+    def _validate_spotify_redirect_uri(self, redirect_uri: str) -> None:
+        """Validate Spotify redirect URI to prevent host spoofing bypasses."""
+        parsed = urlparse(redirect_uri)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError(
+                f"Invalid redirect URI scheme: {redirect_uri}\n"
+                "Redirect URI must use http:// or https:// for localhost development."
+            )
+
+        if parsed.username or parsed.password:
+            raise ValueError(
+                f"Invalid redirect URI credentials: {redirect_uri}\n"
+                "Redirect URI must not include embedded credentials."
+            )
+
+        allowed_hosts = {"localhost", "127.0.0.1", "::1"}
+        if parsed.hostname not in allowed_hosts:
+            raise ValueError(
+                f"Invalid redirect URI: {redirect_uri}\n"
+                "For development, use localhost, 127.0.0.1, or ::1."
+            )
 
     def get_lastfm_config(self) -> dict[str, str] | None:
         """Get Last.fm API configuration with validation."""

@@ -118,3 +118,20 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheKeySecurity:
+    """Security properties for cache key generation."""
+
+    def test_cache_key_uses_collision_resistant_digests(self, mock_cache):
+        key = mock_cache._build_cache_key("demo", args=("a", 1), kwargs={"x": 2})
+        parts = key.split(":")
+        assert parts[0] == "demo"
+        # SHA-256 hex digests for args + kwargs
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+
+    def test_cache_key_changes_when_inputs_change(self, mock_cache):
+        key1 = mock_cache._build_cache_key("demo", args=("a", 1), kwargs={"x": 2})
+        key2 = mock_cache._build_cache_key("demo", args=("b", 1), kwargs={"x": 2})
+        assert key1 != key2
