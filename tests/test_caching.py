@@ -2,8 +2,12 @@
 
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,41 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for safe Redis cache serialization and integrity checks."""
+
+    @staticmethod
+    def _backend_with_test_key() -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_json_serializable_values_roundtrip(self):
+        backend = self._backend_with_test_key()
+        value = {"track": "demo", "score": 99, "tags": ["new", "viral"]}
+
+        encoded = backend._serialize(value)
+        decoded = backend._deserialize(encoded)
+
+        assert decoded == value
+
+    def test_dataframe_values_roundtrip(self):
+        backend = self._backend_with_test_key()
+        value = pd.DataFrame([{"track": "demo", "score": 99}, {"track": "other", "score": 80}])
+
+        encoded = backend._serialize(value)
+        decoded = backend._deserialize(encoded)
+
+        assert isinstance(decoded, pd.DataFrame)
+        pd.testing.assert_frame_equal(decoded, value)
+
+    def test_rejects_unsupported_values(self):
+        backend = self._backend_with_test_key()
+
+        class Unsupported:
+            pass
+
+        with pytest.raises(TypeError):
+            backend._serialize(Unsupported())

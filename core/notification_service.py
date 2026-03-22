@@ -4,6 +4,7 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
@@ -88,6 +89,8 @@ class EnhancedNotificationService:
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
         self.config = self._load_config(config_file)
+        self._allowed_attachment_dirs = self._get_allowed_attachment_dirs()
+        self._max_attachment_size_bytes = self._get_max_attachment_size_bytes()
         self.sent_notifications: dict[str, Any] = {}
         self.notification_history: list[dict[str, Any]] = []
         self.failed_deliveries: list[dict[str, Any]] = []
@@ -131,6 +134,8 @@ class EnhancedNotificationService:
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
                 "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
                 "use_tls": True,
+                "allowed_attachment_dirs": os.getenv("AUDORA_ALLOWED_ATTACHMENT_DIRS", "").split(","),
+                "max_attachment_size_mb": int(os.getenv("AUDORA_MAX_ATTACHMENT_SIZE_MB", "10")),
             },
             "slack": {
                 "webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
@@ -210,6 +215,75 @@ class EnhancedNotificationService:
             "yes",
             "on",
         }
+
+    def _get_allowed_attachment_dirs(self) -> list[Path]:
+        """Return normalized allowlisted directories for email attachments."""
+        email_config = self.config.get("email", {})
+        configured_dirs = email_config.get("allowed_attachment_dirs", [])
+
+        if isinstance(configured_dirs, str):
+            raw_dirs = [configured_dirs]
+        elif isinstance(configured_dirs, list):
+            raw_dirs = [str(item) for item in configured_dirs]
+        else:
+            raw_dirs = []
+
+        allowed_dirs: list[Path] = []
+        for raw_dir in raw_dirs:
+            candidate = raw_dir.strip()
+            if not candidate:
+                continue
+
+            try:
+                resolved = Path(candidate).expanduser().resolve()
+            except OSError:
+                self.logger.warning("Ignoring invalid allowed attachment directory: %s", candidate)
+                continue
+
+            if not resolved.is_dir():
+                self.logger.warning(
+                    "Ignoring non-directory attachment allowlist path: %s", resolved
+                )
+                continue
+
+            allowed_dirs.append(resolved)
+
+        return allowed_dirs
+
+    def _get_max_attachment_size_bytes(self) -> int:
+        """Return maximum allowed email attachment size in bytes."""
+        email_config = self.config.get("email", {})
+        configured_limit = email_config.get("max_attachment_size_mb", 10)
+        try:
+            size_mb = int(configured_limit)
+        except (TypeError, ValueError):
+            self.logger.warning(
+                "Invalid max_attachment_size_mb value %r; defaulting to 10 MB",
+                configured_limit,
+            )
+            size_mb = 10
+
+        if size_mb <= 0:
+            self.logger.warning(
+                "max_attachment_size_mb must be positive; defaulting to 10 MB"
+            )
+            size_mb = 10
+
+        return size_mb * 1024 * 1024
+
+    def _is_allowed_attachment_path(self, resolved_path: Path) -> bool:
+        """Check if attachment path is within the configured allowlist."""
+        if not self._allowed_attachment_dirs:
+            return False
+
+        for allowed_dir in self._allowed_attachment_dirs:
+            try:
+                resolved_path.relative_to(allowed_dir)
+                return True
+            except ValueError:
+                continue
+
+        return False
 
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
@@ -509,9 +583,11 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
-        return f"{content_hash}:{message.priority.value}"
+        fingerprint = (
+            f"{message.title}:{message.content[:200]}:{message.priority.value}"
+        ).encode("utf-8")
+        digest = hashlib.sha256(fingerprint).hexdigest()[:24]
+        return f"{digest}:{message.priority.value}"
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""
@@ -558,17 +634,49 @@ System status: {{ system_status }}
 
             # Add attachments
             if message.attachments:
+                if not self._allowed_attachment_dirs:
+                    self.logger.warning(
+                        "Attachments were provided but AUDORA_ALLOWED_ATTACHMENT_DIRS is not set; "
+                        "skipping all attachments"
+                    )
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    try:
+                        resolved_attachment = Path(attachment_path).expanduser().resolve(strict=True)
+                    except OSError:
+                        self.logger.warning("Skipping non-existent attachment path: %s", attachment_path)
+                        continue
+
+                    if not resolved_attachment.is_file():
+                        self.logger.warning(
+                            "Skipping attachment because path is not a file: %s",
+                            resolved_attachment,
+                        )
+                        continue
+
+                    if not self._is_allowed_attachment_path(resolved_attachment):
+                        self.logger.warning(
+                            "Skipping attachment outside allowlisted directories: %s",
+                            resolved_attachment,
+                        )
+                        continue
+
+                    if resolved_attachment.stat().st_size > self._max_attachment_size_bytes:
+                        self.logger.warning(
+                            "Skipping attachment larger than configured limit (%s MB): %s",
+                            self._max_attachment_size_bytes // (1024 * 1024),
+                            resolved_attachment,
+                        )
+                        continue
+
+                    with resolved_attachment.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename={resolved_attachment.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
