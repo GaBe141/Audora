@@ -5,6 +5,9 @@ Includes live trend dashboard, history search, notification settings, and accura
 """
 
 import json
+import hmac
+import ipaddress
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +15,7 @@ from pathlib import Path
 import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
+from flask import abort, request
 from dash import Input, Output, State, ctx, dash_table, dcc, html
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +27,33 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Audora",
 )
+
+
+def _is_loopback_client(remote_addr: str | None) -> bool:
+    """Return True if request comes from loopback."""
+    if not remote_addr:
+        return False
+    try:
+        return ipaddress.ip_address(remote_addr).is_loopback
+    except ValueError:
+        return remote_addr in {"localhost", "::1"}
+
+
+@app.server.before_request
+def _enforce_access_controls():
+    """Harden GUI access: local-only by default, token for remote mode."""
+    allow_remote = os.getenv("AUDORA_GUI_ALLOW_REMOTE", "").lower() in {"1", "true", "yes"}
+    auth_token = os.getenv("AUDORA_GUI_AUTH_TOKEN", "").strip()
+
+    if not allow_remote and not _is_loopback_client(request.remote_addr):
+        abort(403, description="Remote access disabled for Audora GUI")
+
+    if allow_remote:
+        if not auth_token:
+            abort(503, description="Set AUDORA_GUI_AUTH_TOKEN to enable remote GUI access")
+        provided = request.headers.get("X-Audora-Auth-Token", "")
+        if not hmac.compare_digest(provided, auth_token):
+            abort(401, description="Missing or invalid GUI auth token")
 
 # ---------------------------------------------------------------------------
 # Layout helpers

@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +125,50 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for Redis cache serialization/deserialization."""
+
+    @staticmethod
+    def _make_backend() -> RedisCacheBackend:
+        # Build a minimal instance without opening a Redis connection.
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_round_trip_json_value(self):
+        backend = self._make_backend()
+        raw = backend._serialize({"ok": True, "values": [1, 2, 3]})
+        assert backend._deserialize(raw) == {"ok": True, "values": [1, 2, 3]}
+
+    def test_rejects_tampered_signature(self):
+        backend = self._make_backend()
+        raw = backend._serialize({"safe": "value"})
+        envelope = json.loads(raw.decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(tampered) is None
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._make_backend()
+        payload = b"legacy-pickle-bytes"
+        sig = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        legacy = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": sig,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        raw = json.dumps(legacy, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(raw) is None
+
+    def test_round_trip_dataframe_value(self):
+        pd = pytest.importorskip("pandas")
+        backend = self._make_backend()
+        original = pd.DataFrame({"track": ["a", "b"], "score": [1, 2]})
+        raw = backend._serialize(original)
+        decoded = backend._deserialize(raw)
+        assert decoded is not None
+        assert list(decoded.columns) == ["track", "score"]
+        assert decoded.to_dict("records") == original.to_dict("records")
