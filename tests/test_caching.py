@@ -3,7 +3,7 @@
 from datetime import datetime
 import time
 
-import pandas as pd
+import pytest
 
 from core.caching import (
     CacheManager,
@@ -161,6 +161,7 @@ class TestRedisCacheSerialization:
         assert restored["nested"]["items"][2]["v"] == "ok"
 
     def test_round_trip_dataframe(self):
+        pd = pytest.importorskip("pandas")
         backend = self._backend()
         frame = pd.DataFrame({"track": ["a", "b"], "score": [10, 20]})
 
