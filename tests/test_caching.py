@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+from datetime import datetime
 import time
 
+import pandas as pd
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,70 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused serialization tests for Redis cache payloads."""
+
+    @staticmethod
+    def _backend() -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_round_trip_safe_serialization(self):
+        backend = self._backend()
+        payload = {
+            "name": "Audora",
+            "count": 3,
+            "active": True,
+            "created_at": datetime(2026, 1, 2, 3, 4, 5),
+            "bytes_data": b"abc123",
+            "coords": (1, 2),
+            "tags": {"x", "y"},
+            "nested": {"items": [1, 2, {"v": "ok"}]},
+        }
+
+        raw = backend._serialize(payload)
+        restored = backend._deserialize(raw)
+
+        assert restored is not None
+        assert restored["name"] == "Audora"
+        assert restored["count"] == 3
+        assert restored["active"] is True
+        assert restored["created_at"] == datetime(2026, 1, 2, 3, 4, 5)
+        assert restored["bytes_data"] == b"abc123"
+        assert restored["coords"] == (1, 2)
+        assert restored["tags"] == {"x", "y"}
+        assert restored["nested"]["items"][2]["v"] == "ok"
+
+    def test_round_trip_dataframe(self):
+        backend = self._backend()
+        frame = pd.DataFrame({"track": ["a", "b"], "score": [10, 20]})
+
+        raw = backend._serialize(frame)
+        restored = backend._deserialize(raw)
+
+        assert isinstance(restored, pd.DataFrame)
+        assert restored.equals(frame)
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._backend()
+        legacy_payload = b'{"v":1,"alg":"HMAC-SHA256","sig":"x","payload":"e30="}'
+
+        assert backend._deserialize(legacy_payload) is None
+
+
+class TestCacheKeyHashing:
+    """Ensure cache keys use modern strong hashing."""
+
+    def test_build_cache_key_uses_sha256_hexdigest(self):
+        manager = CacheManager(backend=LocalCacheBackend(max_size=10), key_prefix="test")
+        key = manager._build_cache_key("prefix", args=(1, "a"), kwargs={"b": 2})
+        parts = key.split(":")
+
+        assert parts[0] == "prefix"
+        # Positional args hash + keyword args hash
+        assert len(parts) == 3
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
