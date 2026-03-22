@@ -589,15 +589,26 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
-            svc.config["slack"]["webhook_url"] = slack_url
+            svc.config["slack"]["webhook_url"] = svc._validate_webhook_url(  # noqa: SLF001
+                slack_url, allow_private=False
+            )
         if discord_url:
-            svc.config["discord"]["webhook_url"] = discord_url
+            svc.config["discord"]["webhook_url"] = svc._validate_webhook_url(  # noqa: SLF001
+                discord_url, allow_private=False
+            )
         if webhook_url:
-            svc.config["webhook"]["url"] = webhook_url
+            svc.config["webhook"]["url"] = svc._validate_webhook_url(  # noqa: SLF001
+                webhook_url, allow_private=svc._allow_private_webhooks()  # noqa: SLF001
+            )
         if smtp_host:
-            svc.config["email"]["smtp_server"] = smtp_host
+            svc.config["email"]["smtp_server"] = svc._validate_smtp_server(  # noqa: SLF001
+                smtp_host, allow_private=svc._allow_private_smtp()  # noqa: SLF001
+            )
         if smtp_port:
-            svc.config["email"]["port"] = int(smtp_port)
+            parsed_port = int(smtp_port)
+            if parsed_port <= 0 or parsed_port > 65535:
+                raise ValueError("SMTP port must be in range 1-65535")
+            svc.config["email"]["port"] = parsed_port
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
         if smtp_pass:

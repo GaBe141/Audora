@@ -86,6 +86,30 @@ def write_json(
         raise
 
 
+def resolve_path_within_base(path: Path | str, base_dir: Path | str) -> Path:
+    """
+    Resolve a path and enforce it stays inside a trusted base directory.
+
+    Args:
+        path: User-provided or computed output path.
+        base_dir: Allowed base directory for all writes.
+
+    Returns:
+        Resolved absolute path under base_dir.
+
+    Raises:
+        ValueError: If the resolved path escapes base_dir.
+    """
+    base = Path(base_dir).resolve()
+    candidate = Path(path)
+    resolved = (base / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+
+    if not resolved.is_relative_to(base):
+        raise ValueError(f"Path traversal blocked: {resolved} is outside {base}")
+
+    return resolved
+
+
 def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> Path:  # pd.DataFrame
     """
     Save DataFrame to CSV with consistent settings.

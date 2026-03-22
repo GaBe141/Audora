@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import ssl
 import socket
 import smtplib
 from dataclasses import dataclass
@@ -211,6 +212,15 @@ class EnhancedNotificationService:
             "on",
         }
 
+    def _allow_private_smtp(self) -> bool:
+        """Whether private network SMTP targets are allowed."""
+        return os.getenv("AUDORA_ALLOW_PRIVATE_SMTP", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
         try:
@@ -254,6 +264,31 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _validate_smtp_server(self, host: str, *, allow_private: bool = False) -> str:
+        """Validate SMTP host to reduce SSRF/internal network abuse."""
+        hostname = host.strip()
+        if not hostname:
+            raise ValueError("SMTP host is required")
+
+        if hostname.lower() == "localhost":
+            raise ValueError("Localhost SMTP targets are not allowed")
+
+        resolved_ips = set()
+        try:
+            for info in socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP):
+                resolved_ips.add(info[4][0])
+        except socket.gaierror as e:
+            raise ValueError(f"Could not resolve SMTP hostname: {hostname}") from e
+
+        if not allow_private:
+            for ip in resolved_ips:
+                if self._is_restricted_ip(ip):
+                    raise ValueError(
+                        "SMTP hostname resolves to a private or restricted network address"
+                    )
+
+        return hostname
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -571,16 +606,23 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            smtp_host = self._validate_smtp_server(
+                str(email_config["smtp_server"]),
+                allow_private=self._allow_private_smtp(),
+            )
+            smtp_port = int(email_config.get("port", 587))
+            if smtp_port <= 0 or smtp_port > 65535:
+                raise ValueError("SMTP port must be in range 1-65535")
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
+                if email_config.get("use_tls", True):
+                    tls_context = ssl.create_default_context()
+                    server.starttls(context=tls_context)
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"
