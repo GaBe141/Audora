@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +126,60 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSerialization:
+    """Security-focused tests for Redis cache serialization handling."""
+
+    def _build_backend(self, *, allow_pickle: bool = False) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        backend._allow_pickle_cache = allow_pickle
+        return backend
+
+    def test_serializes_and_deserializes_json_payload(self):
+        backend = self._build_backend(allow_pickle=False)
+        value = {"track": "song", "scores": [1, 2, 3], "enabled": True}
+
+        serialized = backend._serialize(value)
+
+        assert b'"fmt":"json"' in serialized
+        assert backend._deserialize(serialized) == value
+
+    def test_non_json_value_requires_pickle_opt_in(self):
+        backend = self._build_backend(allow_pickle=False)
+
+        with pytest.raises(ValueError, match="AUDORA_ALLOW_PICKLE_CACHE"):
+            backend._serialize(object())
+
+    def test_rejects_pickle_payload_when_pickle_disabled(self):
+        backend = self._build_backend(allow_pickle=False)
+        value = {"a": 1}
+        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        signature = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 2,
+            "fmt": "pickle",
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        serialized = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(serialized) is None
+
+    def test_allows_pickle_payload_when_explicitly_enabled(self):
+        backend = self._build_backend(allow_pickle=True)
+        value = {"a": 1}
+        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        signature = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 2,
+            "fmt": "pickle",
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        serialized = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(serialized) == value
