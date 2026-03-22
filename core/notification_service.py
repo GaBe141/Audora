@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import ssl
 import socket
 import smtplib
 from dataclasses import dataclass
@@ -87,6 +88,8 @@ class EnhancedNotificationService:
 
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
+        self.project_root = Path(__file__).resolve().parent.parent
+        self.max_attachment_bytes = self._get_max_attachment_bytes()
         self.config = self._load_config(config_file)
         self.sent_notifications: dict[str, Any] = {}
         self.notification_history: list[dict[str, Any]] = []
@@ -226,6 +229,50 @@ class EnhancedNotificationService:
         except ValueError:
             return True
 
+    def _get_max_attachment_bytes(self) -> int:
+        """Return max attachment size (bytes) with a secure default."""
+        default_limit = 5 * 1024 * 1024  # 5 MiB
+        raw_limit = os.getenv("AUDORA_MAX_ATTACHMENT_BYTES", str(default_limit)).strip()
+        try:
+            limit = int(raw_limit)
+        except ValueError:
+            self.logger.warning(
+                "Invalid AUDORA_MAX_ATTACHMENT_BYTES value %r; using default %d bytes",
+                raw_limit,
+                default_limit,
+            )
+            return default_limit
+        return limit if limit > 0 else default_limit
+
+    def _is_path_within_project_root(self, path: Path) -> bool:
+        """Return True when the resolved path is within project root."""
+        try:
+            path.relative_to(self.project_root)
+            return True
+        except ValueError:
+            return False
+
+    def _resolve_attachment_path(self, attachment_path: str) -> Path:
+        """Resolve and validate attachment path to prevent path traversal/exfiltration."""
+        sanitized = attachment_path.strip()
+        if not sanitized or "\x00" in sanitized:
+            raise ValueError("Attachment path is empty or invalid")
+
+        candidate = Path(sanitized).expanduser()
+        if candidate.is_absolute():
+            resolved = candidate.resolve(strict=True)
+        else:
+            resolved = (self.project_root / candidate).resolve(strict=True)
+
+        if not resolved.is_file():
+            raise ValueError("Attachment path must be a file")
+        if not self._is_path_within_project_root(resolved):
+            raise ValueError("Attachment path must remain within project root")
+        if resolved.stat().st_size > self.max_attachment_bytes:
+            raise ValueError("Attachment exceeds maximum allowed size")
+
+        return resolved
+
     def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
         """Validate outbound webhook URL to reduce SSRF risk."""
         parsed = urlparse(url.strip())
@@ -233,6 +280,8 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
@@ -253,7 +302,7 @@ class EnhancedNotificationService:
                         "Webhook URL resolves to a private or restricted network address"
                     )
 
-        return url
+        return parsed.geturl()
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -559,22 +608,27 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    try:
+                        safe_path = self._resolve_attachment_path(attachment_path)
+                    except (FileNotFoundError, OSError, ValueError) as e:
+                        self.logger.warning("Skipping unsafe attachment %r: %s", attachment_path, e)
+                        continue
+
+                    with safe_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {safe_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -650,7 +704,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +771,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +831,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
