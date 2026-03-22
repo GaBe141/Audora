@@ -7,10 +7,10 @@ fallback to in-memory caching when Redis is unavailable.
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -188,10 +188,11 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        serialized = self._encode_json_cache_value(value)
+        payload = json.dumps(serialized, separators=(",", ":")).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
@@ -204,7 +205,7 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -223,10 +224,82 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            decoded = json.loads(payload.decode("utf-8"))
+            return self._decode_json_cache_value(decoded)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
+
+    def _encode_json_cache_value(self, value: Any) -> Any:
+        """Encode cache value into safe JSON-compatible structures."""
+        if value is None or isinstance(value, str | int | float | bool):
+            return value
+
+        if isinstance(value, list):
+            return [self._encode_json_cache_value(v) for v in value]
+
+        if isinstance(value, dict):
+            if not all(isinstance(k, str) for k in value):
+                raise TypeError("Cache dictionaries must use string keys for Redis serialization")
+            return {k: self._encode_json_cache_value(v) for k, v in value.items()}
+
+        if isinstance(value, tuple):
+            return {
+                "__audora_type__": "tuple",
+                "items": [self._encode_json_cache_value(v) for v in value],
+            }
+
+        if isinstance(value, set):
+            return {
+                "__audora_type__": "set",
+                "items": [self._encode_json_cache_value(v) for v in sorted(value, key=str)],
+            }
+
+        if isinstance(value, bytes):
+            return {
+                "__audora_type__": "bytes",
+                "value": base64.b64encode(value).decode("ascii"),
+            }
+
+        # Support DataFrame caching without resorting to pickle deserialization.
+        try:
+            import pandas as pd
+        except ImportError:
+            pd = None
+
+        if pd is not None and isinstance(value, pd.DataFrame):
+            return {
+                "__audora_type__": "pandas.DataFrame",
+                "value": value.to_json(orient="split", date_format="iso"),
+            }
+
+        raise TypeError(f"Unsupported cache value type for Redis serialization: {type(value)}")
+
+    def _decode_json_cache_value(self, value: Any) -> Any:
+        """Decode JSON cache payload into Python objects."""
+        if isinstance(value, list):
+            return [self._decode_json_cache_value(v) for v in value]
+
+        if not isinstance(value, dict):
+            return value
+
+        marker = value.get("__audora_type__")
+        if marker == "tuple":
+            items = value.get("items", [])
+            return tuple(self._decode_json_cache_value(v) for v in items)
+        if marker == "set":
+            items = value.get("items", [])
+            return set(self._decode_json_cache_value(v) for v in items)
+        if marker == "bytes":
+            encoded = value.get("value", "")
+            return base64.b64decode(str(encoded).encode("ascii"))
+        if marker == "pandas.DataFrame":
+            import pandas as pd
+
+            raw_json = value.get("value", "{}")
+            return pd.read_json(io.StringIO(str(raw_json)), orient="split")
+
+        return {k: self._decode_json_cache_value(v) for k, v in value.items()}
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
@@ -432,12 +505,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
