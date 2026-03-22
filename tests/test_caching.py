@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +126,45 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerializationSecurity:
+    """Security-focused tests for RedisCacheBackend serialization behavior."""
+
+    @staticmethod
+    def _backend(allow_pickle: bool = False) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key-32-bytes-minimum!"
+        backend._allow_pickle = allow_pickle
+        return backend
+
+    def test_json_round_trip_when_pickle_disabled(self):
+        backend = self._backend(allow_pickle=False)
+        payload = {"artist": "Example", "scores": [1, 2, 3], "enabled": True}
+        serialized = backend._serialize(payload)
+        assert backend._deserialize(serialized) == payload
+
+    def test_non_json_value_rejected_when_pickle_disabled(self):
+        backend = self._backend(allow_pickle=False)
+        with pytest.raises(TypeError, match="not JSON serializable"):
+            backend._serialize({"unsupported": {1, 2, 3}})
+
+    def test_pickle_payload_rejected_when_pickle_disabled(self):
+        backend = self._backend(allow_pickle=False)
+        payload = pickle.dumps({"secret": "value"}, protocol=pickle.HIGHEST_PROTOCOL)
+        signature = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 2,
+            "alg": "HMAC-SHA256",
+            "format": "pickle",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        serialized = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(serialized) is None
+
+    def test_pickle_payload_allowed_when_opted_in(self):
+        backend = self._backend(allow_pickle=True)
+        data = {"cached": ["value"]}
+        serialized = backend._serialize(data)
+        assert backend._deserialize(serialized) == data
