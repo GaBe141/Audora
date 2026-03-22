@@ -595,8 +595,15 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         if webhook_url:
             svc.config["webhook"]["url"] = webhook_url
         if smtp_host:
-            svc.config["email"]["smtp_server"] = smtp_host
-        if smtp_port:
+            validated_host, validated_port = svc._validate_outbound_host(
+                smtp_host,
+                int(smtp_port or 587),
+                allow_private=svc._allow_private_smtp_targets(),
+                target_name="SMTP server",
+            )
+            svc.config["email"]["smtp_server"] = validated_host
+            svc.config["email"]["port"] = validated_port
+        elif smtp_port:
             svc.config["email"]["port"] = int(smtp_port)
         if smtp_user:
             svc.config["email"]["username"] = smtp_user

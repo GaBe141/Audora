@@ -163,6 +163,7 @@ class RedisCacheBackend(CacheBackend):
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
+        self._allow_pickle_cache = self._is_pickle_cache_enabled()
 
         # Test connection
         try:
@@ -186,47 +187,134 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
-    def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
-        envelope = {
-            "v": 1,
-            "alg": "HMAC-SHA256",
-            "sig": signature,
-            "payload": base64.b64encode(payload).decode("ascii"),
+    def _is_pickle_cache_enabled(self) -> bool:
+        """Whether legacy pickle cache serialization is explicitly allowed."""
+        return os.getenv("AUDORA_ALLOW_PICKLE_CACHE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
         }
-        return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+    def _serialize(self, value: Any) -> bytes:
+        """Serialize cache value with integrity protection.
+
+        JSON is used by default to avoid executable serialization formats.
+        """
+        try:
+            payload_text = json.dumps(value, sort_keys=True, separators=(",", ":"))
+            payload_bytes = payload_text.encode("utf-8")
+            signature = hmac.new(self._signing_key, payload_bytes, hashlib.sha256).hexdigest()
+            envelope = {
+                "v": 2,
+                "fmt": "json",
+                "alg": "HMAC-SHA256",
+                "sig": signature,
+                "payload": payload_text,
+            }
+            return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError):
+            if not self._allow_pickle_cache:
+                raise ValueError(
+                    "Cache value is not JSON-serializable. "
+                    "Set AUDORA_ALLOW_PICKLE_CACHE=1 to allow legacy pickle serialization."
+                )
+
+            payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+            signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+            envelope = {
+                "v": 2,
+                "fmt": "pickle",
+                "alg": "HMAC-SHA256",
+                "sig": signature,
+                "payload": base64.b64encode(payload).decode("ascii"),
+            }
+            return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
     def _deserialize(self, value: bytes) -> Any | None:
         """Deserialize cache value only after signature verification."""
         try:
             envelope = json.loads(value.decode("utf-8"))
-            if (
-                not isinstance(envelope, dict)
-                or envelope.get("v") != 1
-                or envelope.get("alg") != "HMAC-SHA256"
-                or "sig" not in envelope
-                or "payload" not in envelope
-            ):
+            if not isinstance(envelope, dict):
                 logger.warning("Rejected cache entry with invalid serialization envelope")
                 return None
 
-            payload_b64 = envelope["payload"]
-            if not isinstance(payload_b64, str):
-                logger.warning("Rejected cache entry with non-string payload")
-                return None
+            version = envelope.get("v")
+            if version == 2:
+                return self._deserialize_v2(envelope)
+            if version == 1:
+                return self._deserialize_legacy_pickle(envelope)
 
-            payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
-            expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
-                logger.warning("Rejected cache entry with invalid signature")
-                return None
-
-            return pickle.loads(payload)
+            logger.warning("Rejected cache entry with unsupported envelope version")
+            return None
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
+
+    def _deserialize_v2(self, envelope: dict[str, Any]) -> Any | None:
+        """Deserialize modern cache envelope format."""
+        if (
+            envelope.get("alg") != "HMAC-SHA256"
+            or "sig" not in envelope
+            or "payload" not in envelope
+            or "fmt" not in envelope
+        ):
+            logger.warning("Rejected cache entry with incomplete v2 envelope")
+            return None
+
+        payload_raw = envelope["payload"]
+        if not isinstance(payload_raw, str):
+            logger.warning("Rejected cache entry with non-string payload")
+            return None
+
+        payload_bytes: bytes
+        fmt = envelope["fmt"]
+        if fmt == "json":
+            payload_bytes = payload_raw.encode("utf-8")
+        elif fmt == "pickle":
+            if not self._allow_pickle_cache:
+                logger.warning("Rejected pickle cache entry because pickle cache is disabled")
+                return None
+            payload_bytes = base64.b64decode(payload_raw.encode("ascii"), validate=True)
+        else:
+            logger.warning(f"Rejected cache entry with unknown format: {fmt}")
+            return None
+
+        expected_sig = hmac.new(self._signing_key, payload_bytes, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
+            logger.warning("Rejected cache entry with invalid signature")
+            return None
+
+        if fmt == "json":
+            return json.loads(payload_raw)
+        return pickle.loads(payload_bytes)
+
+    def _deserialize_legacy_pickle(self, envelope: dict[str, Any]) -> Any | None:
+        """Deserialize v1 signed pickle envelope for backward compatibility."""
+        if (
+            envelope.get("alg") != "HMAC-SHA256"
+            or "sig" not in envelope
+            or "payload" not in envelope
+        ):
+            logger.warning("Rejected cache entry with invalid legacy envelope")
+            return None
+
+        if not self._allow_pickle_cache:
+            logger.warning("Rejected legacy pickle cache entry because pickle cache is disabled")
+            return None
+
+        payload_b64 = envelope["payload"]
+        if not isinstance(payload_b64, str):
+            logger.warning("Rejected cache entry with non-string payload")
+            return None
+
+        payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+        expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
+            logger.warning("Rejected cache entry with invalid signature")
+            return None
+
+        return pickle.loads(payload)
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
@@ -337,7 +425,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable by default)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +520,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

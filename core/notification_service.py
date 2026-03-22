@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -211,6 +212,15 @@ class EnhancedNotificationService:
             "on",
         }
 
+    def _allow_private_smtp_targets(self) -> bool:
+        """Whether private network SMTP targets are allowed."""
+        return os.getenv("AUDORA_ALLOW_PRIVATE_SMTP_TARGETS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
         try:
@@ -254,6 +264,44 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _validate_outbound_host(
+        self,
+        hostname: str,
+        port: int,
+        *,
+        allow_private: bool = False,
+        target_name: str = "Outbound target",
+    ) -> tuple[str, int]:
+        """Validate outbound hostname/port to reduce SSRF risk."""
+        cleaned_host = str(hostname).strip()
+        if not cleaned_host:
+            raise ValueError(f"{target_name} hostname is required")
+        if cleaned_host.lower() == "localhost":
+            raise ValueError(f"{target_name} must not target localhost")
+
+        try:
+            port_num = int(port)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"{target_name} port must be an integer") from e
+        if not (1 <= port_num <= 65535):
+            raise ValueError(f"{target_name} port must be between 1 and 65535")
+
+        resolved_ips = set()
+        try:
+            for info in socket.getaddrinfo(cleaned_host, port_num, proto=socket.IPPROTO_TCP):
+                resolved_ips.add(info[4][0])
+        except socket.gaierror as e:
+            raise ValueError(f"Could not resolve {target_name} hostname: {cleaned_host}") from e
+
+        if not allow_private:
+            for ip in resolved_ips:
+                if self._is_restricted_ip(ip):
+                    raise ValueError(
+                        f"{target_name} resolves to a private or restricted network address"
+                    )
+
+        return cleaned_host, port_num
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -570,11 +618,18 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
+            smtp_host, smtp_port = self._validate_outbound_host(
+                email_config["smtp_server"],
+                int(email_config.get("port", 587)),
+                allow_private=self._allow_private_smtp_targets(),
+                target_name="SMTP server",
+            )
+
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            server = smtplib.SMTP(smtp_host, smtp_port)
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
