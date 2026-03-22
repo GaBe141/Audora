@@ -4,6 +4,9 @@ Fixes type hints, imports, and code quality issues identified by linters.
 """
 
 import subprocess
+import sys
+
+PYTHON_EXECUTABLE = sys.executable or "python3"
 
 
 def print_step(step_num: int, description: str):
@@ -13,11 +16,11 @@ def print_step(step_num: int, description: str):
     print(f"{'='*60}")
 
 
-def run_command(cmd: str, description: str) -> bool:
+def run_command(cmd: list[str], description: str) -> bool:
     """Run a command and return success status."""
     print(f"  → {description}")
     try:
-        subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
         print("  ✅ Success")
         return True
     except subprocess.CalledProcessError as e:
@@ -39,12 +42,13 @@ def main() -> None:
     ]
 
     for package in packages:
-        run_command(f"pip install {package}", f"Installing {package}")
+        run_command([PYTHON_EXECUTABLE, "-m", "pip", "install", package], f"Installing {package}")
 
     # Step 2: Run Black formatter
     print_step(2, "Format Code with Black")
     run_command(
-        "python -m black core/ scripts/ --line-length 100 --quiet", "Formatting Python files"
+        [PYTHON_EXECUTABLE, "-m", "black", "core/", "scripts/", "--line-length", "100", "--quiet"],
+        "Formatting Python files",
     )
 
     # Step 3: Run Ruff auto-fixes
@@ -57,11 +61,14 @@ def main() -> None:
     ]
 
     for file in files_to_fix:
-        run_command(f"python -m ruff check {file} --fix --unsafe-fixes", f"Fixing {file}")
+        run_command(
+            [PYTHON_EXECUTABLE, "-m", "ruff", "check", file, "--fix", "--unsafe-fixes"],
+            f"Fixing {file}",
+        )
 
     # Step 4: Run tests
     print_step(4, "Run Tests to Verify Changes")
-    run_command("python test_project.py", "Running test suite")
+    run_command([PYTHON_EXECUTABLE, "test_project.py"], "Running test suite")
 
     # Step 5: Summary
     print_step(5, "Summary")
