@@ -10,7 +10,7 @@ import hmac
 import json
 import logging
 import os
-import pickle
+import pickle  # nosec B403 - payload integrity is verified with HMAC before loading
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -178,6 +178,12 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
+        environment = os.getenv("AUDORA_ENV", os.getenv("ENVIRONMENT", "")).strip().lower()
+        if environment in {"prod", "production"}:
+            raise ValueError(
+                "AUDORA_CACHE_SIGNING_KEY must be set when Redis cache is enabled in production"
+            )
+
         # Fallback to process-local random key to prevent unsigned pickle loading.
         # This keeps the cache safe by default, with only a reduced cross-process hit rate.
         logger.warning(
@@ -188,7 +194,7 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)  # nosec B301
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
