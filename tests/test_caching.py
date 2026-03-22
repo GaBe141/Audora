@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pytest
+
+pd = pytest.importorskip("pandas")
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,53 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSerialization:
+    """Security-focused tests for Redis payload serialization."""
+
+    @staticmethod
+    def _backend_with_test_key() -> RedisCacheBackend:
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key-32-bytes-long!!"
+        return backend
+
+    def test_round_trip_supported_types(self):
+        backend = self._backend_with_test_key()
+        value = {
+            "name": "track",
+            "score": 92.5,
+            "tags": ("viral", "rising"),
+            "labels": {"indie", "pop"},
+            "raw": b"\x01\x02\x03",
+        }
+
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        assert isinstance(restored, dict)
+        assert restored["name"] == "track"
+        assert restored["score"] == 92.5
+        assert restored["tags"] == ("viral", "rising")
+        assert restored["labels"] == {"indie", "pop"}
+        assert restored["raw"] == b"\x01\x02\x03"
+
+    def test_rejects_tampered_signature(self):
+        backend = self._backend_with_test_key()
+        serialized = backend._serialize({"ok": True})
+
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["sig"] = "0" * len(str(envelope["sig"]))
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(tampered) is None
+
+    def test_round_trip_dataframe(self):
+        backend = self._backend_with_test_key()
+        frame = pd.DataFrame({"track": ["A", "B"], "score": [88, 93]})
+
+        serialized = backend._serialize(frame)
+        restored = backend._deserialize(serialized)
+
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored, frame)
