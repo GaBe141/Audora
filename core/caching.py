@@ -187,10 +187,10 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
+        safe_value = self._to_safe_json_value(value)
         payload = json.dumps(
-            value,
+            safe_value,
             separators=(",", ":"),
-            default=self._json_default,
         ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
@@ -233,18 +233,30 @@ class RedisCacheBackend(CacheBackend):
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
 
-    def _json_default(self, obj: Any) -> Any:
-        """Encode non-primitive values into safe JSON-compatible structures."""
-        if isinstance(obj, tuple):
-            return {"__audora_type__": "tuple", "items": list(obj)}
-        if isinstance(obj, set):
-            return {"__audora_type__": "set", "items": list(obj)}
-        if isinstance(obj, bytes):
+    def _to_safe_json_value(self, value: Any) -> Any:
+        """Recursively convert values to safe JSON structures."""
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, dict):
+            return {str(k): self._to_safe_json_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._to_safe_json_value(v) for v in value]
+        if isinstance(value, tuple):
+            return {
+                "__audora_type__": "tuple",
+                "items": [self._to_safe_json_value(v) for v in value],
+            }
+        if isinstance(value, set):
+            return {
+                "__audora_type__": "set",
+                "items": [self._to_safe_json_value(v) for v in value],
+            }
+        if isinstance(value, bytes):
             return {
                 "__audora_type__": "bytes",
-                "data": base64.b64encode(obj).decode("ascii"),
+                "data": base64.b64encode(value).decode("ascii"),
             }
-        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
     def _json_object_hook(self, obj: dict[str, Any]) -> Any:
         """Decode tagged JSON values emitted by _json_default."""
