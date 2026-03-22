@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import socket
+import ssl
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -193,14 +194,46 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = self._sanitize_config_for_disk(to_save)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
                 os.chmod(config_path, 0o600)
-            self.logger.info(f"Notification config saved to {config_path}")
+            self.logger.info(
+                "Notification config saved to %s (sensitive credentials excluded; set via env vars)",
+                config_path,
+            )
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _sanitize_config_for_disk(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Drop sensitive fields before persisting config to disk."""
+        sanitized: dict[str, Any] = json.loads(json.dumps(config))
+        sensitive_fields = {
+            "email": {"password"},
+            "slack": {"webhook_url"},
+            "discord": {"webhook_url"},
+            "webhook": {"url"},
+            "sms": {"api_key", "api_secret"},
+        }
+
+        for section, fields in sensitive_fields.items():
+            section_data = sanitized.get(section)
+            if isinstance(section_data, dict):
+                for field in fields:
+                    section_data.pop(field, None)
+
+        webhook_headers = sanitized.get("webhook", {}).get("headers")
+        if isinstance(webhook_headers, dict):
+            filtered_headers = {
+                key: value
+                for key, value in webhook_headers.items()
+                if key.lower() != "authorization"
+            }
+            sanitized["webhook"]["headers"] = filtered_headers
+
+        return sanitized
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
@@ -254,6 +287,28 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _get_attachment_root(self) -> Path:
+        """Return allowed base directory for email attachments."""
+        return Path(os.getenv("AUDORA_ATTACHMENT_DIR", "data/attachments")).expanduser().resolve()
+
+    def _validate_attachment_path(self, attachment_path: str) -> Path:
+        """Validate attachment path to prevent arbitrary file reads."""
+        candidate = Path(attachment_path).expanduser()
+        resolved = candidate.resolve(strict=True)
+        attachment_root = self._get_attachment_root()
+
+        try:
+            resolved.relative_to(attachment_root)
+        except ValueError as e:
+            raise ValueError(
+                f"Attachment path '{resolved}' is outside allowed root '{attachment_root}'"
+            ) from e
+
+        if not resolved.is_file():
+            raise ValueError(f"Attachment path '{resolved}' is not a file")
+
+        return resolved
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -559,22 +614,27 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    try:
+                        safe_path = self._validate_attachment_path(attachment_path)
+                    except Exception as e:
+                        self.logger.warning(f"Skipping unsafe attachment path '{attachment_path}': {e}")
+                        continue
+
+                    with safe_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {safe_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])

@@ -7,6 +7,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -756,9 +757,24 @@ class SocialMusicDiscoveryEngine:
 
     def save_discovery_report(self, report: dict[str, Any], filepath: str = None) -> str:
         """Save discovery report to file using centralized utility."""
+        data_dir = Path("data").resolve()
+        data_dir.mkdir(parents=True, exist_ok=True)
+
         if filepath is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = f"data/social_discovery_report_{timestamp}.json"
+            filepath = str(data_dir / f"social_discovery_report_{timestamp}.json")
+        else:
+            candidate = Path(filepath).expanduser()
+            resolved = (
+                candidate.resolve()
+                if candidate.is_absolute()
+                else (Path.cwd() / candidate).resolve()
+            )
+            try:
+                resolved.relative_to(data_dir)
+            except ValueError as e:
+                raise ValueError("filepath must be inside the data directory") from e
+            filepath = str(resolved)
 
         saved_path = write_json(filepath, report)
         return str(saved_path)
