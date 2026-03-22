@@ -15,7 +15,7 @@ from pathlib import Path
 import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
-from flask import abort, request
+from flask import Response, abort, request
 from dash import Input, Output, State, ctx, dash_table, dcc, html
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -51,9 +51,27 @@ def _enforce_access_controls():
     if allow_remote:
         if not auth_token:
             abort(503, description="Set AUDORA_GUI_AUTH_TOKEN to enable remote GUI access")
-        provided = request.headers.get("X-Audora-Auth-Token", "")
-        if not hmac.compare_digest(provided, auth_token):
-            abort(401, description="Missing or invalid GUI auth token")
+        expected_user = os.getenv("AUDORA_GUI_AUTH_USER", "audora")
+
+        auth = request.authorization
+        if not auth:
+            return Response(
+                "Authentication required",
+                401,
+                {"WWW-Authenticate": 'Basic realm="Audora GUI"'},
+            )
+
+        provided_user = auth.username or ""
+        provided_password = auth.password or ""
+        if not (
+            hmac.compare_digest(provided_user, expected_user)
+            and hmac.compare_digest(provided_password, auth_token)
+        ):
+            return Response(
+                "Invalid credentials",
+                401,
+                {"WWW-Authenticate": 'Basic realm="Audora GUI"'},
+            )
 
 # ---------------------------------------------------------------------------
 # Layout helpers
