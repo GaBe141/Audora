@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,44 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for Redis cache serialization."""
+
+    def _backend(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_round_trip_uses_safe_json_serializer(self):
+        backend = self._backend()
+        value = {
+            "track": "Song A",
+            "tags": ("viral", "discovery"),
+            "flags": {"hot", "new"},
+            "raw": b"abc",
+        }
+        encoded = backend._serialize(value)
+        decoded = backend._deserialize(encoded)
+        assert decoded["track"] == "Song A"
+        assert decoded["tags"] == ("viral", "discovery")
+        assert decoded["flags"] == {"hot", "new"}
+        assert decoded["raw"] == b"abc"
+
+    def test_rejects_non_json_serializable_objects(self):
+        backend = self._backend()
+        with pytest.raises(TypeError):
+            backend._serialize(object())
+
+    def test_rejects_non_json_envelope_format(self):
+        backend = self._backend()
+        legacy_like = {
+            "v": 1,
+            "fmt": "pickle",
+            "alg": "HMAC-SHA256",
+            "sig": "invalid",
+            "payload": base64.b64encode(b"legacy").decode("ascii"),
+        }
+        payload = json.dumps(legacy_like).encode("utf-8")
+        assert backend._deserialize(payload) is None

@@ -211,6 +211,15 @@ class EnhancedNotificationService:
             "on",
         }
 
+    def _allow_private_smtp_hosts(self) -> bool:
+        """Whether private network SMTP targets are allowed."""
+        return os.getenv("AUDORA_ALLOW_PRIVATE_SMTP", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
         try:
@@ -254,6 +263,28 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _validate_smtp_server(self, hostname: str, *, allow_private: bool = False) -> str:
+        """Validate outbound SMTP hostname to reduce SSRF/lateral movement risk."""
+        server = hostname.strip()
+        if not server:
+            raise ValueError("SMTP server must not be empty")
+        if server.lower() == "localhost":
+            raise ValueError("Localhost SMTP targets are not allowed")
+
+        try:
+            resolved = {info[4][0] for info in socket.getaddrinfo(server, 25, proto=socket.IPPROTO_TCP)}
+        except socket.gaierror as e:
+            raise ValueError(f"Could not resolve SMTP hostname: {server}") from e
+
+        if not allow_private:
+            for ip in resolved:
+                if self._is_restricted_ip(ip):
+                    raise ValueError(
+                        "SMTP server resolves to a private or restricted network address"
+                    )
+
+        return server
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -571,7 +602,11 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            smtp_server = self._validate_smtp_server(
+                email_config["smtp_server"],
+                allow_private=self._allow_private_smtp_hosts(),
+            )
+            server = smtplib.SMTP(smtp_server, email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
                 server.starttls()

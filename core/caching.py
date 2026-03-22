@@ -10,7 +10,6 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -188,10 +187,15 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload = json.dumps(
+            value,
+            separators=(",", ":"),
+            default=self._json_default,
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
+            "fmt": "json",
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
@@ -205,6 +209,7 @@ class RedisCacheBackend(CacheBackend):
             if (
                 not isinstance(envelope, dict)
                 or envelope.get("v") != 1
+                or envelope.get("fmt") != "json"
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -223,10 +228,37 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return json.loads(payload.decode("utf-8"), object_hook=self._json_object_hook)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
+
+    def _json_default(self, obj: Any) -> Any:
+        """Encode non-primitive values into safe JSON-compatible structures."""
+        if isinstance(obj, tuple):
+            return {"__audora_type__": "tuple", "items": list(obj)}
+        if isinstance(obj, set):
+            return {"__audora_type__": "set", "items": list(obj)}
+        if isinstance(obj, bytes):
+            return {
+                "__audora_type__": "bytes",
+                "data": base64.b64encode(obj).decode("ascii"),
+            }
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+    def _json_object_hook(self, obj: dict[str, Any]) -> Any:
+        """Decode tagged JSON values emitted by _json_default."""
+        value_type = obj.get("__audora_type__")
+        if value_type == "tuple":
+            return tuple(obj.get("items", []))
+        if value_type == "set":
+            return set(obj.get("items", []))
+        if value_type == "bytes":
+            data = obj.get("data", "")
+            if not isinstance(data, str):
+                raise ValueError("Invalid bytes payload in cache entry")
+            return base64.b64decode(data.encode("ascii"), validate=True)
+        return obj
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
@@ -337,7 +369,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
