@@ -163,6 +163,12 @@ class RedisCacheBackend(CacheBackend):
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
+        self._allow_pickle = self._allow_pickle_cache_payloads()
+        if self._allow_pickle:
+            logger.warning(
+                "AUDORA_CACHE_ALLOW_PICKLE is enabled. Pickle in Redis cache can be unsafe; "
+                "keep this disabled unless you fully trust all cache writers."
+            )
 
         # Test connection
         try:
@@ -186,13 +192,34 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _allow_pickle_cache_payloads(self) -> bool:
+        """Whether Redis cache should allow pickle payloads (unsafe by default)."""
+        return os.getenv("AUDORA_CACHE_ALLOW_PICKLE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        encoding = "json"
+        try:
+            payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        except (TypeError, ValueError) as e:
+            if not self._allow_pickle:
+                raise ValueError(
+                    "Cache value is not JSON-serializable. "
+                    "Set AUDORA_CACHE_ALLOW_PICKLE=true only if you explicitly trust cache inputs."
+                ) from e
+            payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+            encoding = "pickle"
+
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "enc": encoding,
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
@@ -204,7 +231,7 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") not in {1, 2}
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -223,7 +250,18 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            encoding = envelope.get("enc", "pickle" if envelope.get("v") == 1 else "json")
+            if encoding == "json":
+                return json.loads(payload.decode("utf-8"))
+
+            if encoding == "pickle":
+                if not self._allow_pickle:
+                    logger.warning("Rejected pickle cache payload while pickle support is disabled")
+                    return None
+                return pickle.loads(payload)
+
+            logger.warning(f"Rejected cache entry with unknown encoding: {encoding}")
+            return None
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -337,7 +375,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (JSON-serializable by default for Redis backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +470,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
