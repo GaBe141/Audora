@@ -14,6 +14,29 @@ from integrations.extended_platforms import ExtendedSocialDiscoveryEngine
 from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
 from integrations.trending_schema import TrendingSchema
 
+REPORTS_DIR = (Path(__file__).resolve().parent.parent / "data").resolve()
+
+
+def _resolve_safe_report_path(custom_filename: str | None, base_dir: Path = REPORTS_DIR) -> Path:
+    """Resolve report output path and prevent path traversal."""
+    base_path = base_dir.resolve()
+    base_path.mkdir(parents=True, exist_ok=True)
+
+    if not custom_filename:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return base_path / f"comprehensive_discovery_report_{timestamp}.json"
+
+    requested = Path(custom_filename)
+    if requested.is_absolute():
+        raise ValueError("Absolute report paths are not allowed")
+
+    resolved = (base_path / requested).resolve()
+    try:
+        resolved.relative_to(base_path)
+    except ValueError as exc:
+        raise ValueError("Report path must stay within the data directory") from exc
+    return resolved
+
 
 class ComprehensiveMusicDiscoveryApp:
     """Main application orchestrating all music discovery systems."""
@@ -337,13 +360,7 @@ class ComprehensiveMusicDiscoveryApp:
         self, discovery_results: dict[str, Any], custom_filename: str | None = None
     ) -> str:
         """Save comprehensive discovery report."""
-        if custom_filename:
-            filename = custom_filename
-        else:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
-
-        filepath = Path(filename)
+        filepath = _resolve_safe_report_path(custom_filename)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
         with open(filepath, "w", encoding="utf-8") as f:
