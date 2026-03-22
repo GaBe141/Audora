@@ -4,7 +4,10 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
+import hmac
+import ipaddress
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -318,6 +321,14 @@ app.layout = dbc.Container(
                         outline=True,
                         className="w-100 mb-2",
                     ),
+                    html.Hr(),
+                    html.Label("Admin token", className="small text-muted"),
+                    dbc.Input(
+                        id="admin-token",
+                        type="password",
+                        placeholder="Required for remote admin actions",
+                        className="mb-2",
+                    ),
                 ],
                 width=2,
                 className="pt-4",
@@ -371,6 +382,40 @@ def _get_data_store():
     return EnhancedMusicDataStore(str(db_path))
 
 
+def _is_local_request() -> bool:
+    """Return True when the current request originated from loopback."""
+    try:
+        from flask import request
+    except Exception:
+        return False
+
+    remote_addr = (request.remote_addr or "").strip()
+    if not remote_addr:
+        return False
+    try:
+        return ipaddress.ip_address(remote_addr).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_sensitive_action_authorized(admin_token: str | None) -> tuple[bool, str]:
+    """Authorize sensitive GUI actions.
+
+    If AUDORA_GUI_ADMIN_TOKEN is set, a matching token is required.
+    Otherwise only loopback requests are allowed by default.
+    """
+    configured_token = os.getenv("AUDORA_GUI_ADMIN_TOKEN", "").strip()
+    if configured_token:
+        if admin_token and hmac.compare_digest(admin_token, configured_token):
+            return True, ""
+        return False, "Unauthorized: invalid admin token."
+
+    if _is_local_request():
+        return True, ""
+
+    return False, "Unauthorized: set AUDORA_GUI_ADMIN_TOKEN for remote admin access."
+
+
 # ---------------------------------------------------------------------------
 # Callbacks — sidebar actions
 # ---------------------------------------------------------------------------
@@ -383,6 +428,7 @@ def _get_data_store():
     Input("btn-setup", "n_clicks"),
     Input("btn-validate", "n_clicks"),
     State("demo-select", "value"),
+    State("admin-token", "value"),
     prevent_initial_call=True,
 )
 def run_action(
@@ -391,7 +437,12 @@ def run_action(
     _setup_clicks,
     _validate_clicks,
     demo_value,
+    admin_token,
 ):
+    authorized, reason = _is_sensitive_action_authorized(admin_token)
+    if not authorized:
+        return "Denied", reason
+
     triggered = ctx.triggered_id
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
@@ -582,20 +633,34 @@ def export_csv(_n, table_data):
     State("input-smtp-port", "value"),
     State("input-smtp-user", "value"),
     State("input-smtp-pass", "value"),
+    State("admin-token", "value"),
     prevent_initial_call=True,
 )
-def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+def save_settings(
+    _n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass, admin_token
+):
+    authorized, reason = _is_sensitive_action_authorized(admin_token)
+    if not authorized:
+        return reason
+
     try:
         from core.notification_service import EnhancedNotificationService
+
         svc = EnhancedNotificationService()
         if slack_url:
-            svc.config["slack"]["webhook_url"] = slack_url
+            svc.config["slack"]["webhook_url"] = svc._validate_webhook_url(slack_url, allow_private=False)
         if discord_url:
-            svc.config["discord"]["webhook_url"] = discord_url
+            svc.config["discord"]["webhook_url"] = svc._validate_webhook_url(
+                discord_url, allow_private=False
+            )
         if webhook_url:
-            svc.config["webhook"]["url"] = webhook_url
+            svc.config["webhook"]["url"] = svc._validate_webhook_url(
+                webhook_url, allow_private=svc._allow_private_webhooks()
+            )
         if smtp_host:
-            svc.config["email"]["smtp_server"] = smtp_host
+            svc.config["email"]["smtp_server"] = svc._validate_smtp_server(
+                smtp_host, allow_private=svc._allow_private_smtp_hosts()
+            )
         if smtp_port:
             svc.config["email"]["port"] = int(smtp_port)
         if smtp_user:
@@ -615,9 +680,13 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         Output(f"test-status-{channel_key}", "children"),
         Input(f"btn-test-{channel_key}", "n_clicks"),
         State(url_input_id, "value"),
+        State("admin-token", "value"),
         prevent_initial_call=True,
     )
-    def _cb(_n, url):
+    def _cb(_n, url, admin_token):
+        authorized, reason = _is_sensitive_action_authorized(admin_token)
+        if not authorized:
+            return reason
         if not url:
             return "No URL"
         try:
