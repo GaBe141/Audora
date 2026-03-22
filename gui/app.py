@@ -4,7 +4,9 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
+import ipaddress
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +15,7 @@ import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -371,6 +374,32 @@ def _get_data_store():
     return EnhancedMusicDataStore(str(db_path))
 
 
+def _allow_remote_gui_actions() -> bool:
+    """Whether to allow state-changing GUI actions from non-loopback clients."""
+    return os.getenv("AUDORA_GUI_ALLOW_REMOTE_ACTIONS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _request_is_loopback() -> bool:
+    """Return True when callback request appears to come from loopback."""
+    remote_addr = request.remote_addr
+    if not remote_addr:
+        return False
+    try:
+        return ipaddress.ip_address(remote_addr).is_loopback
+    except ValueError:
+        return remote_addr.lower() == "localhost"
+
+
+def _can_run_sensitive_action() -> bool:
+    """Allow sensitive actions only from loopback unless explicitly overridden."""
+    return _allow_remote_gui_actions() or _request_is_loopback()
+
+
 # ---------------------------------------------------------------------------
 # Callbacks — sidebar actions
 # ---------------------------------------------------------------------------
@@ -392,6 +421,13 @@ def run_action(
     _validate_clicks,
     demo_value,
 ):
+    if not _can_run_sensitive_action():
+        return (
+            "Error",
+            "Sensitive GUI actions are disabled for remote clients. "
+            "Set AUDORA_GUI_ALLOW_REMOTE_ACTIONS=true to override.",
+        )
+
     triggered = ctx.triggered_id
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
@@ -585,6 +621,12 @@ def export_csv(_n, table_data):
     prevent_initial_call=True,
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+    if not _can_run_sensitive_action():
+        return (
+            "Blocked: remote settings updates are disabled. "
+            "Set AUDORA_GUI_ALLOW_REMOTE_ACTIONS=true to override."
+        )
+
     try:
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
@@ -620,6 +662,11 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
     def _cb(_n, url):
         if not url:
             return "No URL"
+        if not _can_run_sensitive_action():
+            return (
+                "Fail: remote webhook tests are disabled. "
+                "Set AUDORA_GUI_ALLOW_REMOTE_ACTIONS=true to override."
+            )
         try:
             import asyncio
             from core.notification_service import (
