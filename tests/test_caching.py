@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +126,37 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSerializationSecurity:
+    """Security-focused tests for Redis cache serialization logic."""
+
+    @staticmethod
+    def _backend() -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"  # noqa: SLF001
+        return backend
+
+    def test_json_roundtrip(self):
+        backend = self._backend()
+        value = {"artist": "Test", "score": 99, "tags": ["viral", "music"]}
+        serialized = backend._serialize(value)
+        assert backend._deserialize(serialized) == value
+
+    def test_rejects_legacy_pickle_envelope_even_with_valid_signature(self):
+        backend = self._backend()
+        payload = pickle.dumps({"unsafe": True}, protocol=pickle.HIGHEST_PROTOCOL)
+        signature = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()  # noqa: SLF001
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        raw = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(raw) is None
+
+    def test_serialize_rejects_non_json_serializable_values(self):
+        backend = self._backend()
+        with pytest.raises(ValueError, match="JSON serializable"):
+            backend._serialize(object())
