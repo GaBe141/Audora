@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -87,10 +88,12 @@ class EnhancedNotificationService:
 
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
+        self.project_root = Path(__file__).resolve().parent.parent
         self.config = self._load_config(config_file)
         self.sent_notifications: dict[str, Any] = {}
         self.notification_history: list[dict[str, Any]] = []
         self.failed_deliveries: list[dict[str, Any]] = []
+        self._allowed_attachment_roots = self._parse_allowed_attachment_roots()
 
         # Initialize template engine with autoescape enabled for security
         self.template_env = jinja2.Environment(
@@ -211,6 +214,63 @@ class EnhancedNotificationService:
             "on",
         }
 
+    def _allowed_webhook_ports(self) -> set[int]:
+        """Return allowed destination ports for outbound webhooks."""
+        raw_value = os.getenv("AUDORA_ALLOWED_WEBHOOK_PORTS", "443").strip()
+        if not raw_value:
+            return {443}
+
+        allowed_ports: set[int] = set()
+        for part in raw_value.split(","):
+            candidate = part.strip()
+            if not candidate:
+                continue
+            try:
+                port = int(candidate)
+            except ValueError as e:
+                raise ValueError(
+                    f"Invalid AUDORA_ALLOWED_WEBHOOK_PORTS value: {candidate!r}"
+                ) from e
+            if not 1 <= port <= 65535:
+                raise ValueError(f"Webhook port out of range: {port}")
+            allowed_ports.add(port)
+
+        return allowed_ports or {443}
+
+    def _parse_allowed_attachment_roots(self) -> list[Path]:
+        """Build allowlist of directories that attachments can be read from."""
+        roots = [self.project_root]
+        extra_roots = os.getenv("AUDORA_ALLOWED_ATTACHMENT_DIRS", "").strip()
+        if not extra_roots:
+            return roots
+
+        for raw in extra_roots.split(os.pathsep):
+            candidate = raw.strip()
+            if not candidate:
+                continue
+            try:
+                roots.append(Path(candidate).expanduser().resolve())
+            except Exception as e:
+                self.logger.warning(f"Ignoring invalid attachment allowlist path {candidate!r}: {e}")
+
+        return roots
+
+    def _resolve_safe_attachment_path(self, attachment_path: str) -> Path:
+        """Resolve and validate attachment path against an allowlist."""
+        resolved = Path(attachment_path).expanduser().resolve(strict=True)
+        if not resolved.is_file():
+            raise ValueError(f"Attachment is not a file: {resolved}")
+
+        for root in self._allowed_attachment_roots:
+            root_resolved = root.resolve()
+            if resolved.is_relative_to(root_resolved):
+                return resolved
+
+        allowed_str = ", ".join(str(p) for p in self._allowed_attachment_roots)
+        raise ValueError(
+            f"Attachment path outside allowed directories: {resolved}. Allowed roots: {allowed_str}"
+        )
+
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
         try:
@@ -233,10 +293,21 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
+        if parsed.fragment:
+            raise ValueError("Webhook URL fragments are not allowed")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
             raise ValueError("Localhost webhook URLs are not allowed")
+
+        destination_port = parsed.port or 443
+        if destination_port not in self._allowed_webhook_ports():
+            raise ValueError(
+                f"Webhook URL uses disallowed port {destination_port}. "
+                "Set AUDORA_ALLOWED_WEBHOOK_PORTS to override."
+            )
 
         resolved_ips = set()
         try:
@@ -559,14 +630,22 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
+                    try:
+                        safe_attachment_path = self._resolve_safe_attachment_path(attachment_path)
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Skipping unsafe attachment path {attachment_path!r}: {e}"
+                        )
+                        continue
+
+                    if safe_attachment_path.exists():
+                        with safe_attachment_path.open("rb") as f:
                             attachment = MIMEBase("application", "octet-stream")
                             attachment.set_payload(f.read())
                             encoders.encode_base64(attachment)
                             attachment.add_header(
                                 "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
+                                f"attachment; filename= {safe_attachment_path.name}",
                             )
                             msg.attach(attachment)
 
@@ -574,7 +653,7 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -650,7 +729,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +796,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +856,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
