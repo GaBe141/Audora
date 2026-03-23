@@ -163,6 +163,16 @@ class RedisCacheBackend(CacheBackend):
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
+        self._allow_pickle = os.getenv("AUDORA_CACHE_ALLOW_PICKLE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if self._allow_pickle:
+            logger.warning(
+                "AUDORA_CACHE_ALLOW_PICKLE is enabled. Only use this with trusted Redis access."
+            )
 
         # Test connection
         try:
@@ -188,28 +198,87 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+        serializer = "json"
+        try:
+            payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        except (TypeError, ValueError):
+            if not self._allow_pickle:
+                raise ValueError(
+                    "Refusing to cache non-JSON-serializable value in Redis backend. "
+                    "Set AUDORA_CACHE_ALLOW_PICKLE=true to opt into legacy pickle caching."
+                )
+            serializer = "pickle"
+            payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+
+        signature = self._build_signature(serializer, payload)
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "ser": serializer,
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
+    def _build_signature(self, serializer: str, payload: bytes) -> str:
+        """Build HMAC signature over serializer and payload bytes."""
+        signed_blob = serializer.encode("utf-8") + b":" + payload
+        return hmac.new(self._signing_key, signed_blob, hashlib.sha256).hexdigest()
+
+    def _deserialize_legacy_pickle_envelope(self, envelope: dict[str, Any]) -> Any | None:
+        """Deserialize v1 pickle envelope for backward compatibility."""
+        if not self._allow_pickle:
+            logger.warning(
+                "Rejected legacy pickle cache entry because AUDORA_CACHE_ALLOW_PICKLE is disabled"
+            )
+            return None
+
+        if (
+            envelope.get("alg") != "HMAC-SHA256"
+            or "sig" not in envelope
+            or "payload" not in envelope
+        ):
+            logger.warning("Rejected legacy cache entry with invalid serialization envelope")
+            return None
+
+        payload_b64 = envelope["payload"]
+        if not isinstance(payload_b64, str):
+            logger.warning("Rejected legacy cache entry with non-string payload")
+            return None
+
+        payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+        expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
+            logger.warning("Rejected legacy cache entry with invalid signature")
+            return None
+
+        return pickle.loads(payload)
+
     def _deserialize(self, value: bytes) -> Any | None:
         """Deserialize cache value only after signature verification."""
         try:
             envelope = json.loads(value.decode("utf-8"))
+            if not isinstance(envelope, dict):
+                logger.warning("Rejected cache entry with invalid serialization envelope")
+                return None
+
+            version = envelope.get("v")
+            if version == 1:
+                return self._deserialize_legacy_pickle_envelope(envelope)
+
             if (
-                not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                version != 2
                 or envelope.get("alg") != "HMAC-SHA256"
+                or "ser" not in envelope
                 or "sig" not in envelope
                 or "payload" not in envelope
             ):
                 logger.warning("Rejected cache entry with invalid serialization envelope")
+                return None
+
+            serializer = envelope["ser"]
+            if not isinstance(serializer, str):
+                logger.warning("Rejected cache entry with non-string serializer")
                 return None
 
             payload_b64 = envelope["payload"]
@@ -218,12 +287,24 @@ class RedisCacheBackend(CacheBackend):
                 return None
 
             payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
-            expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+            expected_sig = self._build_signature(serializer, payload)
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            if serializer == "json":
+                return json.loads(payload.decode("utf-8"))
+
+            if serializer == "pickle":
+                if not self._allow_pickle:
+                    logger.warning(
+                        "Rejected pickle cache entry because AUDORA_CACHE_ALLOW_PICKLE is disabled"
+                    )
+                    return None
+                return pickle.loads(payload)
+
+            logger.warning(f"Rejected cache entry with unsupported serializer: {serializer}")
+            return None
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -337,7 +418,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (JSON-serializable by default)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
