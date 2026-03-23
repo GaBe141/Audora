@@ -81,6 +81,13 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_cache_key_hash_uses_sha256_digest_length(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, "x"), {"k": "v"})
+        parts = key.split(":")
+        assert parts[0] == "fn"
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
