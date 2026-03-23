@@ -4,12 +4,15 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import copy
+import hashlib
 import ipaddress
 import json
 import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -193,6 +196,7 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = self._sanitize_config_for_persistence(to_save)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -201,6 +205,36 @@ class EnhancedNotificationService:
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _sanitize_config_for_persistence(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Remove high-risk secrets before writing config to disk."""
+        sanitized = copy.deepcopy(config)
+
+        email_cfg = sanitized.get("email")
+        if isinstance(email_cfg, dict):
+            email_cfg["password"] = ""
+
+        slack_cfg = sanitized.get("slack")
+        if isinstance(slack_cfg, dict):
+            slack_cfg["webhook_url"] = ""
+
+        discord_cfg = sanitized.get("discord")
+        if isinstance(discord_cfg, dict):
+            discord_cfg["webhook_url"] = ""
+
+        webhook_cfg = sanitized.get("webhook")
+        if isinstance(webhook_cfg, dict):
+            webhook_cfg["url"] = ""
+            headers = webhook_cfg.get("headers")
+            if isinstance(headers, dict):
+                headers.pop("Authorization", None)
+
+        sms_cfg = sanitized.get("sms")
+        if isinstance(sms_cfg, dict):
+            sms_cfg["api_key"] = ""
+            sms_cfg["api_secret"] = ""
+
+        return sanitized
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
@@ -509,9 +543,50 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
+        content_hash = hashlib.sha256(
+            f"{message.title}:{message.content[:100]}:{message.priority.value}".encode("utf-8")
+        ).hexdigest()
         return f"{content_hash}:{message.priority.value}"
+
+    def _is_safe_attachment(self, attachment_path: str) -> bool:
+        """Validate attachment path and file type before sending."""
+        allowed_suffixes = {
+            ".csv",
+            ".gif",
+            ".jpeg",
+            ".jpg",
+            ".json",
+            ".log",
+            ".pdf",
+            ".png",
+            ".txt",
+            ".webp",
+        }
+        max_size_bytes = 5 * 1024 * 1024
+
+        candidate = Path(attachment_path).expanduser()
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            return False
+
+        if resolved.suffix.lower() not in allowed_suffixes:
+            return False
+
+        try:
+            size = resolved.stat().st_size
+        except OSError:
+            return False
+        if size > max_size_bytes:
+            return False
+
+        project_root = Path.cwd().resolve()
+        try:
+            resolved.relative_to(project_root)
+        except ValueError:
+            return False
+
+        return True
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""
@@ -559,22 +634,27 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    if not self._is_safe_attachment(attachment_path):
+                        self.logger.warning(
+                            f"Skipped unsafe attachment path or type: {attachment_path}"
+                        )
+                        continue
+                    with Path(attachment_path).open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {Path(attachment_path).name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                tls_context = ssl.create_default_context()
+                server.starttls(context=tls_context)
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
