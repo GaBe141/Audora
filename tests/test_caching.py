@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,31 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSerialization:
+    """Security-focused tests for signed Redis cache serialization."""
+
+    @staticmethod
+    def _backend_with_test_key() -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_json_round_trip(self):
+        backend = self._backend_with_test_key()
+        value = {"track": "vampire", "score": 97.5, "platforms": ["tiktok", "youtube"]}
+
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        assert restored == value
+
+    def test_tampered_payload_is_rejected(self):
+        backend = self._backend_with_test_key()
+        serialized = backend._serialize({"ok": True})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"] = "dGFtcGVyZWQ="
+
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(tampered) is None
