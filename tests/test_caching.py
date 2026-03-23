@@ -3,6 +3,8 @@
 import json
 import time
 
+import pytest
+
 from core.caching import (
     CacheManager,
     LocalCacheBackend,
