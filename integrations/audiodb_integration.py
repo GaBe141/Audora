@@ -41,7 +41,7 @@ class AudioDBAPI:
             url = f"{BASE_URL}/123/{endpoint}"  # Free API key is 123
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, timeout=10)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
