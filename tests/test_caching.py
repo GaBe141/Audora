@@ -1,9 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,48 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSecureRedisSerialization:
+    """Tests for signed JSON serialization in RedisCacheBackend."""
+
+    @staticmethod
+    def _backend(signing_key: bytes = b"test-signing-key") -> RedisCacheBackend:
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = signing_key
+        return backend
+
+    def test_json_roundtrip_for_plain_values(self):
+        backend = self._backend()
+        payload = backend._serialize({"artist": "A", "score": 98, "tags": ["viral"]})
+        value = backend._deserialize(payload)
+        assert value == {"artist": "A", "score": 98, "tags": ["viral"]}
+
+    def test_rejects_legacy_envelope_version(self):
+        backend = self._backend()
+        payload = json.dumps(
+            {"v": 1, "alg": "HMAC-SHA256", "sig": "deadbeef", "payload": "e30="}
+        ).encode("utf-8")
+        assert backend._deserialize(payload) is None
+
+    def test_dataframe_roundtrip_when_pandas_available(self):
+        pd = pytest.importorskip("pandas")
+        backend = self._backend()
+        df = pd.DataFrame([{"track": "Song", "score": 88}, {"track": "Track", "score": 91}])
+        payload = backend._serialize(df)
+        result = backend._deserialize(payload)
+        assert isinstance(result, pd.DataFrame)
+        assert result.to_dict("records") == df.to_dict("records")
+
+
+class TestCacheKeyHashing:
+    """Ensure cache key hashing uses strong digest output."""
+
+    def test_cache_key_uses_sha256_length(self):
+        manager = CacheManager(backend=LocalCacheBackend(max_size=10), key_prefix="audora_test")
+        cache_key = manager._build_cache_key("fn", args=(1, "x"), kwargs={"a": 1})
+        parts = cache_key.split(":")
+        assert len(parts) == 3
+        for digest in parts[1:]:
+            assert len(digest) == 64
+            int(digest, 16)  # Valid hex SHA-256 digest
