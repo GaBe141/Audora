@@ -242,7 +242,7 @@ class RedisCacheBackend(CacheBackend):
             if marker == "tuple":
                 return tuple(self._from_safe_payload(item) for item in value.get("items", []))
             if marker == "set":
-                return set(self._from_safe_payload(item) for item in value.get("items", []))
+                return {self._from_safe_payload(item) for item in value.get("items", [])}
             if marker == "bytes":
                 raw = value.get("value", "")
                 if not isinstance(raw, str):
