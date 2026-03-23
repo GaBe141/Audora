@@ -193,6 +193,7 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = self._sanitize_persisted_config(to_save)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -202,14 +203,43 @@ class EnhancedNotificationService:
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
 
+    def _sanitize_persisted_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Return a safe-to-persist copy that omits high-risk secret material."""
+        sanitized = json.loads(json.dumps(config))
+
+        # Credentials should be supplied from environment variables or secret managers.
+        if isinstance(sanitized.get("email"), dict):
+            sanitized["email"].pop("password", None)
+        if isinstance(sanitized.get("sms"), dict):
+            sanitized["sms"].pop("api_key", None)
+            sanitized["sms"].pop("api_secret", None)
+        if isinstance(sanitized.get("webhook"), dict):
+            headers = sanitized["webhook"].get("headers")
+            if isinstance(headers, dict):
+                headers.pop("Authorization", None)
+
+        return sanitized
+
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
-        return os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
+        allow_private = os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
             "1",
             "true",
             "yes",
             "on",
         }
+        if not allow_private:
+            return False
+
+        ack = os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS_ACK", "").strip()
+        if ack != "I_UNDERSTAND_SSRF_RISK":
+            self.logger.warning(
+                "AUDORA_ALLOW_PRIVATE_WEBHOOKS is set, but private targets remain blocked until "
+                "AUDORA_ALLOW_PRIVATE_WEBHOOKS_ACK=I_UNDERSTAND_SSRF_RISK is also provided."
+            )
+            return False
+
+        return True
 
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
@@ -233,6 +263,8 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":

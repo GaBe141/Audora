@@ -5,6 +5,8 @@ Includes live trend dashboard, history search, notification settings, and accura
 """
 
 import json
+import ipaddress
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +15,7 @@ import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import has_request_context, request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -364,6 +367,43 @@ def _run_command(args: list[str]) -> tuple[str, str]:
         return "Error", str(e)
 
 
+def _allow_remote_gui_actions() -> bool:
+    """Whether non-local users are allowed to trigger privileged GUI actions."""
+    return os.getenv("AUDORA_ALLOW_REMOTE_GUI_ACTIONS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _is_local_client(remote_addr: str | None) -> bool:
+    """Return True when the request appears to come from localhost."""
+    if not remote_addr:
+        return False
+    try:
+        return ipaddress.ip_address(remote_addr).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_sensitive_action_allowed() -> bool:
+    """Whether sensitive dashboard actions are allowed for the active request."""
+    if _allow_remote_gui_actions():
+        return True
+    if not has_request_context():
+        return True
+    return _is_local_client(request.remote_addr)
+
+
+def _deny_remote_actions_message() -> str:
+    """Security message for blocked remote dashboard actions."""
+    return (
+        "Remote GUI actions are disabled by default. "
+        "Use localhost or set AUDORA_ALLOW_REMOTE_GUI_ACTIONS=true to override."
+    )
+
+
 def _get_data_store():
     """Return an EnhancedMusicDataStore pointed at the default DB path."""
     from core.data_store import EnhancedMusicDataStore
@@ -392,6 +432,9 @@ def run_action(
     _validate_clicks,
     demo_value,
 ):
+    if not _is_sensitive_action_allowed():
+        return "Denied", _deny_remote_actions_message()
+
     triggered = ctx.triggered_id
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
@@ -541,7 +584,7 @@ def search_history(_n, platform, min_score, days, artist_filter):
 
     # Optional artist filter (client-side simple substring)
     if artist_filter:
-        mask = df["artist"].str.contains(artist_filter, case=False, na=False)
+        mask = df["artist"].str.contains(artist_filter, case=False, na=False, regex=False)
         df = df[mask]
 
     # Round score
@@ -585,6 +628,9 @@ def export_csv(_n, table_data):
     prevent_initial_call=True,
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+    if not _is_sensitive_action_allowed():
+        return _deny_remote_actions_message()
+
     try:
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
@@ -603,6 +649,8 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         if smtp_pass:
             svc.config["email"]["password"] = smtp_pass
         svc.save_config()
+        if smtp_pass:
+            return "Saved (SMTP password is not persisted; use SMTP_PASSWORD env var)"
         return "Saved"
     except Exception as e:
         return f"Error: {e}"
@@ -618,6 +666,8 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         prevent_initial_call=True,
     )
     def _cb(_n, url):
+        if not _is_sensitive_action_allowed():
+            return "Denied"
         if not url:
             return "No URL"
         try:
