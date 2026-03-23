@@ -10,7 +10,6 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -188,11 +187,13 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        safe_value = self._to_json_safe(value)
+        payload = json.dumps(safe_value, separators=(",", ":"), sort_keys=True).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
             "alg": "HMAC-SHA256",
+            "fmt": "json-safe-v1",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
@@ -206,6 +207,7 @@ class RedisCacheBackend(CacheBackend):
                 not isinstance(envelope, dict)
                 or envelope.get("v") != 1
                 or envelope.get("alg") != "HMAC-SHA256"
+                or envelope.get("fmt") != "json-safe-v1"
                 or "sig" not in envelope
                 or "payload" not in envelope
             ):
@@ -223,10 +225,84 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            decoded_payload = json.loads(payload.decode("utf-8"))
+            return self._from_json_safe(decoded_payload)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
+
+    def _to_json_safe(self, value: Any) -> Any:
+        """Convert python value into a JSON-safe representation."""
+        if value is None or isinstance(value, bool | int | float | str):
+            return value
+
+        if isinstance(value, bytes):
+            return {
+                "__audora_type__": "bytes",
+                "data": base64.b64encode(value).decode("ascii"),
+            }
+
+        if isinstance(value, tuple):
+            return {
+                "__audora_type__": "tuple",
+                "items": [self._to_json_safe(item) for item in value],
+            }
+
+        if isinstance(value, set):
+            return {
+                "__audora_type__": "set",
+                "items": [self._to_json_safe(item) for item in sorted(value, key=repr)],
+            }
+
+        if isinstance(value, list):
+            return [self._to_json_safe(item) for item in value]
+
+        if isinstance(value, dict):
+            serialized: dict[str, Any] = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise TypeError("Cache dictionaries must use string keys for safe serialization")
+                serialized[key] = self._to_json_safe(item)
+            return serialized
+
+        raise TypeError(
+            f"Unsupported cache value type for secure serialization: {type(value).__name__}"
+        )
+
+    def _from_json_safe(self, value: Any) -> Any:
+        """Restore a Python value from a JSON-safe representation."""
+        if value is None or isinstance(value, bool | int | float | str):
+            return value
+
+        if isinstance(value, list):
+            return [self._from_json_safe(item) for item in value]
+
+        if isinstance(value, dict):
+            marker = value.get("__audora_type__")
+            if marker is None:
+                return {key: self._from_json_safe(item) for key, item in value.items()}
+
+            if marker == "bytes":
+                data = value.get("data")
+                if not isinstance(data, str):
+                    raise ValueError("Invalid bytes payload in cached data")
+                return base64.b64decode(data.encode("ascii"), validate=True)
+
+            if marker == "tuple":
+                items = value.get("items")
+                if not isinstance(items, list):
+                    raise ValueError("Invalid tuple payload in cached data")
+                return tuple(self._from_json_safe(item) for item in items)
+
+            if marker == "set":
+                items = value.get("items")
+                if not isinstance(items, list):
+                    raise ValueError("Invalid set payload in cached data")
+                return {self._from_json_safe(item) for item in items}
+
+            raise ValueError(f"Unsupported encoded cache type: {marker}")
+
+        raise ValueError("Unsupported cached JSON payload type")
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
@@ -337,7 +413,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-safe: primitives, list/dict, tuple/set/bytes)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
