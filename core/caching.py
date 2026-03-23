@@ -432,14 +432,19 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(self._stable_hash(args_str))
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(self._stable_hash(kwargs_str))
 
         return ":".join(key_parts)
+
+    @staticmethod
+    def _stable_hash(value: str) -> str:
+        """Create a deterministic, collision-resistant digest for cache keys."""
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 # Global cache instance
