@@ -10,7 +10,6 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -133,6 +132,9 @@ class LocalCacheBackend(CacheBackend):
 class RedisCacheBackend(CacheBackend):
     """Redis cache backend with connection pooling."""
 
+    _TYPE_FIELD = "__audora_cache_type__"
+    _DATA_FIELD = "__audora_cache_data__"
+
     def __init__(
         self,
         host: str = "localhost",
@@ -178,7 +180,7 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
+        # Fallback to process-local random key to keep cache signatures scoped to this process.
         # This keeps the cache safe by default, with only a reduced cross-process hit rate.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
@@ -186,25 +188,92 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _normalize_for_json(self, value: Any) -> Any:
+        """Normalize Python objects into a JSON-safe representation."""
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+
+        if isinstance(value, bytes | bytearray):
+            return {
+                self._TYPE_FIELD: "bytes",
+                self._DATA_FIELD: base64.b64encode(bytes(value)).decode("ascii"),
+            }
+
+        if isinstance(value, list):
+            return [self._normalize_for_json(item) for item in value]
+
+        if isinstance(value, tuple):
+            return {
+                self._TYPE_FIELD: "tuple",
+                self._DATA_FIELD: [self._normalize_for_json(item) for item in value],
+            }
+
+        if isinstance(value, set):
+            return {
+                self._TYPE_FIELD: "set",
+                self._DATA_FIELD: [self._normalize_for_json(item) for item in value],
+            }
+
+        if isinstance(value, dict):
+            normalized: dict[str, Any] = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise TypeError("Cache dictionary keys must be strings")
+                normalized[key] = self._normalize_for_json(item)
+            return normalized
+
+        raise TypeError(f"Unsupported cache value type: {type(value).__name__}")
+
+    def _restore_from_json(self, value: Any) -> Any:
+        """Restore normalized JSON representation to Python objects."""
+        if isinstance(value, list):
+            return [self._restore_from_json(item) for item in value]
+
+        if isinstance(value, dict):
+            marker = value.get(self._TYPE_FIELD)
+            if marker == "bytes":
+                data = value.get(self._DATA_FIELD)
+                if not isinstance(data, str):
+                    raise ValueError("Invalid bytes payload in cached value")
+                return base64.b64decode(data.encode("ascii"), validate=True)
+
+            if marker == "tuple":
+                items = value.get(self._DATA_FIELD)
+                if not isinstance(items, list):
+                    raise ValueError("Invalid tuple payload in cached value")
+                return tuple(self._restore_from_json(item) for item in items)
+
+            if marker == "set":
+                items = value.get(self._DATA_FIELD)
+                if not isinstance(items, list):
+                    raise ValueError("Invalid set payload in cached value")
+                return set(self._restore_from_json(item) for item in items)
+
+            return {key: self._restore_from_json(item) for key, item in value.items()}
+
+        return value
+
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value using signed JSON envelope."""
+        normalized_value = self._normalize_for_json(value)
+        payload_text = json.dumps(normalized_value, separators=(",", ":"), sort_keys=True)
+        payload = payload_text.encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
             "sig": signature,
-            "payload": base64.b64encode(payload).decode("ascii"),
+            "payload": payload_text,
         }
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
     def _deserialize(self, value: bytes) -> Any | None:
-        """Deserialize cache value only after signature verification."""
+        """Deserialize cache value from signed JSON envelope."""
         try:
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -212,18 +281,18 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid serialization envelope")
                 return None
 
-            payload_b64 = envelope["payload"]
-            if not isinstance(payload_b64, str):
+            payload_text = envelope["payload"]
+            if not isinstance(payload_text, str):
                 logger.warning("Rejected cache entry with non-string payload")
                 return None
 
-            payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            payload = payload_text.encode("utf-8")
             expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return self._restore_from_json(json.loads(payload_text))
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -432,12 +501,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode("utf-8")).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode("utf-8")).hexdigest())
 
         return ":".join(key_parts)
 
