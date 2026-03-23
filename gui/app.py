@@ -5,6 +5,8 @@ Includes live trend dashboard, history search, notification settings, and accura
 """
 
 import json
+import os
+import ipaddress
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +15,7 @@ import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -371,6 +374,37 @@ def _get_data_store():
     return EnhancedMusicDataStore(str(db_path))
 
 
+def _sensitive_gui_actions_enabled() -> bool:
+    """Require explicit opt-in for subprocess/config mutation actions."""
+    return os.getenv("AUDORA_ENABLE_GUI_ACTIONS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _request_is_local() -> bool:
+    """Allow sensitive actions only from loopback addresses."""
+    remote = request.remote_addr or ""
+    try:
+        return ipaddress.ip_address(remote).is_loopback
+    except ValueError:
+        return False
+
+
+def _guard_sensitive_action() -> str | None:
+    """Return a blocking reason if sensitive UI actions should be denied."""
+    if not _sensitive_gui_actions_enabled():
+        return (
+            "Sensitive GUI actions are disabled by default. "
+            "Set AUDORA_ENABLE_GUI_ACTIONS=1 in a trusted local environment to enable."
+        )
+    if not _request_is_local():
+        return "Sensitive GUI actions are only allowed from localhost requests."
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Callbacks — sidebar actions
 # ---------------------------------------------------------------------------
@@ -392,6 +426,10 @@ def run_action(
     _validate_clicks,
     demo_value,
 ):
+    blocked_reason = _guard_sensitive_action()
+    if blocked_reason:
+        return "Blocked", blocked_reason
+
     triggered = ctx.triggered_id
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
@@ -585,6 +623,10 @@ def export_csv(_n, table_data):
     prevent_initial_call=True,
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+    blocked_reason = _guard_sensitive_action()
+    if blocked_reason:
+        return f"Blocked: {blocked_reason}"
+
     try:
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
@@ -618,6 +660,10 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         prevent_initial_call=True,
     )
     def _cb(_n, url):
+        blocked_reason = _guard_sensitive_action()
+        if blocked_reason:
+            return "Blocked"
+
         if not url:
             return "No URL"
         try:

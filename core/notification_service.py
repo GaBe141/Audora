@@ -193,6 +193,21 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        if "email" in to_save and isinstance(to_save["email"], dict):
+            email_config = dict(to_save["email"])
+            if email_config.get("password"):
+                self.logger.warning("SMTP password is not persisted to notification config files")
+            email_config["password"] = ""
+            to_save["email"] = email_config
+        if "webhook" in to_save and isinstance(to_save["webhook"], dict):
+            webhook_config = dict(to_save["webhook"])
+            headers = webhook_config.get("headers")
+            if isinstance(headers, dict) and "Authorization" in headers:
+                safe_headers = dict(headers)
+                safe_headers["Authorization"] = ""
+                webhook_config["headers"] = safe_headers
+                self.logger.warning("Webhook authorization header is not persisted to config files")
+            to_save["webhook"] = webhook_config
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -210,6 +225,56 @@ class EnhancedNotificationService:
             "yes",
             "on",
         }
+
+    def _allow_private_smtp(self) -> bool:
+        """Whether private network SMTP targets are allowed."""
+        return os.getenv("AUDORA_ALLOW_PRIVATE_SMTP", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _allow_unsafe_attachments(self) -> bool:
+        """Whether to disable attachment path restrictions."""
+        return os.getenv("AUDORA_ALLOW_UNSAFE_ATTACHMENTS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _resolve_and_validate_hostname(
+        self,
+        hostname: str,
+        *,
+        port: int,
+        allow_private: bool,
+        service_name: str,
+    ) -> str:
+        """Resolve and validate an outbound hostname."""
+        normalized = hostname.strip()
+        if not normalized:
+            raise ValueError(f"{service_name} hostname is required")
+        if normalized.lower() == "localhost":
+            raise ValueError(f"{service_name} localhost targets are not allowed")
+
+        resolved_ips = set()
+        try:
+            # Validate all resolved addresses to avoid DNS-based bypass.
+            for info in socket.getaddrinfo(normalized, port, proto=socket.IPPROTO_TCP):
+                resolved_ips.add(info[4][0])
+        except socket.gaierror as e:
+            raise ValueError(f"Could not resolve {service_name} hostname: {normalized}") from e
+
+        if not allow_private:
+            for ip in resolved_ips:
+                if self._is_restricted_ip(ip):
+                    raise ValueError(
+                        f"{service_name} target resolves to a private or restricted network address"
+                    )
+
+        return normalized
 
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
@@ -234,26 +299,57 @@ class EnhancedNotificationService:
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
 
-        hostname = parsed.hostname
-        if hostname.lower() == "localhost":
-            raise ValueError("Localhost webhook URLs are not allowed")
-
-        resolved_ips = set()
-        try:
-            # Validate all resolved addresses to avoid DNS-based bypass.
-            for info in socket.getaddrinfo(hostname, parsed.port or 443, proto=socket.IPPROTO_TCP):
-                resolved_ips.add(info[4][0])
-        except socket.gaierror as e:
-            raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
-
-        if not allow_private:
-            for ip in resolved_ips:
-                if self._is_restricted_ip(ip):
-                    raise ValueError(
-                        "Webhook URL resolves to a private or restricted network address"
-                    )
+        self._resolve_and_validate_hostname(
+            parsed.hostname,
+            port=parsed.port or 443,
+            allow_private=allow_private,
+            service_name="Webhook",
+        )
 
         return url
+
+    def _validate_smtp_target(
+        self, smtp_server: str, *, smtp_port: int, allow_private: bool = False
+    ) -> str:
+        """Validate SMTP host/port to reduce internal network abuse risk."""
+        if smtp_port <= 0 or smtp_port > 65535:
+            raise ValueError("SMTP port must be between 1 and 65535")
+        return self._resolve_and_validate_hostname(
+            smtp_server,
+            port=smtp_port,
+            allow_private=allow_private,
+            service_name="SMTP",
+        )
+
+    def _resolve_attachment_path(self, attachment_path: str) -> Path | None:
+        """Resolve attachment paths safely to prevent arbitrary file reads."""
+        try:
+            candidate = Path(attachment_path).expanduser().resolve(strict=True)
+        except FileNotFoundError:
+            self.logger.warning(f"Skipped missing attachment: {attachment_path}")
+            return None
+        except (OSError, RuntimeError):
+            self.logger.warning(f"Skipped attachment with invalid path: {attachment_path}")
+            return None
+
+        if not candidate.is_file():
+            self.logger.warning(f"Skipped non-file attachment path: {attachment_path}")
+            return None
+
+        if self._allow_unsafe_attachments():
+            return candidate
+
+        allowed_root = Path(
+            os.getenv("AUDORA_ATTACHMENT_ROOT", "data/notifications")
+        ).expanduser().resolve()
+        try:
+            candidate.relative_to(allowed_root)
+        except ValueError:
+            self.logger.warning(
+                f"Rejected attachment outside allowed root ({allowed_root}): {candidate}"
+            )
+            return None
+        return candidate
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -526,14 +622,22 @@ System status: {{ system_status }}
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
         email_config = self.config.get("email", {})
+        recipients = [r.strip() for r in email_config.get("recipients", []) if str(r).strip()]
+        smtp_server = str(email_config.get("smtp_server", "")).strip()
+        smtp_port = int(email_config.get("port", 587))
 
-        if not email_config.get("smtp_server") or not email_config.get("recipients"):
+        if not smtp_server or not recipients:
             return {"success": False, "error": "Email not configured"}
 
         try:
+            smtp_server = self._validate_smtp_target(
+                smtp_server,
+                smtp_port=smtp_port,
+                allow_private=self._allow_private_smtp(),
+            )
             msg = MIMEMultipart("alternative")
             msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
+            msg["To"] = ", ".join(recipients)
             msg["Subject"] = message.title
 
             # Set priority
@@ -559,19 +663,21 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    resolved_path = self._resolve_attachment_path(attachment_path)
+                    if resolved_path is None:
+                        continue
+                    with resolved_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {resolved_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            server = smtplib.SMTP(smtp_server, smtp_port, timeout=10)
 
             if email_config.get("use_tls", True):
                 server.starttls()
@@ -579,13 +685,13 @@ System status: {{ system_status }}
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
 
-            server.send_message(msg)
+            server.send_message(msg, to_addrs=recipients)
             server.quit()
 
             self.logger.info(
-                f"Email notification sent to {len(email_config['recipients'])} recipients"
+                f"Email notification sent to {len(recipients)} recipients"
             )
-            return {"success": True, "recipients": len(email_config["recipients"])}
+            return {"success": True, "recipients": len(recipients)}
 
         except Exception as e:
             self.logger.error(f"Failed to send email notification: {e}")

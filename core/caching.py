@@ -10,10 +10,10 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
+from io import StringIO
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,14 @@ try:
 except ImportError:
     REDIS_AVAILABLE = False
     logger.warning("Redis not available, using local cache fallback")
+
+try:
+    import pandas as pd
+
+    PANDAS_AVAILABLE = True
+except ImportError:
+    pd = None  # type: ignore[assignment]
+    PANDAS_AVAILABLE = False
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -163,6 +171,7 @@ class RedisCacheBackend(CacheBackend):
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
+        self._max_payload_bytes = int(os.getenv("AUDORA_CACHE_MAX_PAYLOAD_BYTES", "2097152"))
 
         # Test connection
         try:
@@ -186,13 +195,86 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _to_safe_payload(self, value: Any) -> Any:
+        """Convert Python value to a strict JSON-safe representation."""
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+
+        if PANDAS_AVAILABLE and isinstance(value, pd.DataFrame):
+            return {
+                "__audora_type__": "dataframe_split_json",
+                "value": value.to_json(orient="split", date_format="iso"),
+            }
+
+        if isinstance(value, list):
+            return [self._to_safe_payload(item) for item in value]
+
+        if isinstance(value, tuple):
+            return {
+                "__audora_type__": "tuple",
+                "items": [self._to_safe_payload(item) for item in value],
+            }
+
+        if isinstance(value, set):
+            return {
+                "__audora_type__": "set",
+                "items": [self._to_safe_payload(item) for item in sorted(value, key=str)],
+            }
+
+        if isinstance(value, bytes):
+            return {
+                "__audora_type__": "bytes",
+                "value": base64.b64encode(value).decode("ascii"),
+            }
+
+        if isinstance(value, dict):
+            return {str(key): self._to_safe_payload(item) for key, item in value.items()}
+
+        raise TypeError(f"Unsupported cache value type for Redis serialization: {type(value)!r}")
+
+    def _from_safe_payload(self, value: Any) -> Any:
+        """Convert strict JSON-safe representation back into Python values."""
+        if isinstance(value, list):
+            return [self._from_safe_payload(item) for item in value]
+
+        if isinstance(value, dict):
+            marker = value.get("__audora_type__")
+            if marker == "tuple":
+                return tuple(self._from_safe_payload(item) for item in value.get("items", []))
+            if marker == "set":
+                return set(self._from_safe_payload(item) for item in value.get("items", []))
+            if marker == "bytes":
+                raw = value.get("value", "")
+                if not isinstance(raw, str):
+                    raise ValueError("Invalid bytes payload in cache entry")
+                return base64.b64decode(raw.encode("ascii"), validate=True)
+            if marker == "dataframe_split_json":
+                if not PANDAS_AVAILABLE:
+                    raise ValueError("Pandas is required to deserialize cached DataFrame values")
+                raw = value.get("value", "")
+                if not isinstance(raw, str):
+                    raise ValueError("Invalid DataFrame payload in cache entry")
+                return pd.read_json(StringIO(raw), orient="split")
+            return {str(key): self._from_safe_payload(item) for key, item in value.items()}
+
+        return value
+
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value with integrity protection using safe JSON payloads."""
+        payload = json.dumps(
+            self._to_safe_payload(value),
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if len(payload) > self._max_payload_bytes:
+            raise ValueError(
+                f"Serialized cache value exceeds size limit ({len(payload)} > {self._max_payload_bytes})"
+            )
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "fmt": "audora-json",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
@@ -202,10 +284,18 @@ class RedisCacheBackend(CacheBackend):
         """Deserialize cache value only after signature verification."""
         try:
             envelope = json.loads(value.decode("utf-8"))
+            if not isinstance(envelope, dict):
+                logger.warning("Rejected cache entry with invalid serialization envelope")
+                return None
+
+            if envelope.get("v") == 1:
+                logger.warning("Rejected legacy cache entry using unsafe pickle serialization format")
+                return None
+
             if (
-                not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
+                or envelope.get("fmt") != "audora-json"
                 or "sig" not in envelope
                 or "payload" not in envelope
             ):
@@ -223,7 +313,8 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            safe_payload = json.loads(payload.decode("utf-8"))
+            return self._from_safe_payload(safe_payload)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -247,6 +338,8 @@ class RedisCacheBackend(CacheBackend):
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
+        except (TypeError, ValueError) as e:
+            logger.warning(f"Skipping Redis cache set for key {key}: {e}")
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 
@@ -337,7 +430,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (JSON-safe types or pandas DataFrame for Redis backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +525,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest()[:16])
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest()[:16])
 
         return ":".join(key_parts)
 
