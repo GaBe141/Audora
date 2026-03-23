@@ -10,13 +10,21 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
+from datetime import date, datetime
 from functools import wraps
+from io import StringIO
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
+
+try:
+    import pandas as pd
+
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
 
 # Try to import Redis, fall back to local cache if unavailable
 try:
@@ -178,7 +186,7 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
+        # Fallback to process-local random key keeps signed payload validation enabled.
         # This keeps the cache safe by default, with only a reduced cross-process hit rate.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
@@ -186,13 +194,60 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _json_default(self, value: Any) -> Any:
+        """Encode non-JSON-native values into safe tagged JSON structures."""
+        if isinstance(value, datetime):
+            return {"__audora_cache_type__": "datetime", "value": value.isoformat()}
+        if isinstance(value, date):
+            return {"__audora_cache_type__": "date", "value": value.isoformat()}
+        if HAS_PANDAS and isinstance(value, pd.DataFrame):
+            return {
+                "__audora_cache_type__": "pandas_dataframe_split",
+                "value": value.to_json(orient="split", date_format="iso"),
+            }
+
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+    def _json_object_hook(self, obj: dict[str, Any]) -> Any:
+        """Decode tagged JSON structures back into Python objects."""
+        type_marker = obj.get("__audora_cache_type__")
+        if type_marker == "datetime":
+            value = obj.get("value")
+            if isinstance(value, str):
+                try:
+                    return datetime.fromisoformat(value)
+                except ValueError:
+                    return obj
+        elif type_marker == "date":
+            value = obj.get("value")
+            if isinstance(value, str):
+                try:
+                    return date.fromisoformat(value)
+                except ValueError:
+                    return obj
+        elif type_marker == "pandas_dataframe_split":
+            value = obj.get("value")
+            if isinstance(value, str) and HAS_PANDAS:
+                try:
+                    return pd.read_json(StringIO(value), orient="split")
+                except ValueError:
+                    return obj
+
+        return obj
+
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload = json.dumps(
+            value,
+            default=self._json_default,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "fmt": "json",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
@@ -204,8 +259,9 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
+                or envelope.get("fmt") != "json"
                 or "sig" not in envelope
                 or "payload" not in envelope
             ):
@@ -223,7 +279,7 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return json.loads(payload.decode("utf-8"), object_hook=self._json_object_hook)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -337,7 +393,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable or a supported typed object)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +488,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode("utf-8")).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode("utf-8")).hexdigest())
 
         return ":".join(key_parts)
 
