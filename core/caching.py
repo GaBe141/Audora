@@ -429,15 +429,15 @@ class CacheManager:
         # Create deterministic key from args and kwargs
         key_parts = [prefix]
 
-        # Add positional args
+        # Add positional args using SHA-256 for collision-resistant key segments.
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode("utf-8")).hexdigest())
 
-        # Add keyword args
+        # Add keyword args using SHA-256 for collision-resistant key segments.
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode("utf-8")).hexdigest())
 
         return ":".join(key_parts)
 
