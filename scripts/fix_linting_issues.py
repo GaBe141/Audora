@@ -5,6 +5,7 @@ Fixes type hints, imports, and code quality issues identified by linters.
 
 import shlex
 import subprocess
+import sys
 
 
 def print_step(step_num: int, description: str):
@@ -41,12 +42,12 @@ def main() -> None:
     ]
 
     for package in packages:
-        run_command(["pip", "install", package], f"Installing {package}")
+        run_command([sys.executable, "-m", "pip", "install", package], f"Installing {package}")
 
     # Step 2: Run Black formatter
     print_step(2, "Format Code with Black")
     run_command(
-        ["python", "-m", "black", "core/", "scripts/", "--line-length", "100", "--quiet"],
+        [sys.executable, "-m", "black", "core/", "scripts/", "--line-length", "100", "--quiet"],
         "Formatting Python files",
     )
 
@@ -61,12 +62,13 @@ def main() -> None:
 
     for file in files_to_fix:
         run_command(
-            ["python", "-m", "ruff", "check", file, "--fix", "--unsafe-fixes"], f"Fixing {file}"
+            [sys.executable, "-m", "ruff", "check", file, "--fix", "--unsafe-fixes"],
+            f"Fixing {file}",
         )
 
     # Step 4: Run tests
     print_step(4, "Run Tests to Verify Changes")
-    run_command(["python", "test_project.py"], "Running test suite")
+    run_command([sys.executable, "test_project.py"], "Running test suite")
 
     # Step 5: Summary
     print_step(5, "Summary")
