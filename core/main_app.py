@@ -9,6 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SAFE_REPORTS_DIR = PROJECT_ROOT / "data"
+
 from integrations.api_config import SocialAPIManager
 from integrations.extended_platforms import ExtendedSocialDiscoveryEngine
 from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
@@ -336,14 +339,20 @@ class ComprehensiveMusicDiscoveryApp:
     def save_discovery_report(
         self, discovery_results: dict[str, Any], custom_filename: str | None = None
     ) -> str:
-        """Save comprehensive discovery report."""
+        """Save comprehensive discovery report in the project data directory."""
         if custom_filename:
-            filename = custom_filename
+            requested_path = Path(custom_filename)
+            if requested_path.is_absolute():
+                raise ValueError("Absolute report paths are not allowed")
+            filepath = (PROJECT_ROOT / requested_path).resolve()
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            filepath = (SAFE_REPORTS_DIR / f"comprehensive_discovery_report_{timestamp}.json").resolve()
 
-        filepath = Path(filename)
+        safe_root = SAFE_REPORTS_DIR.resolve()
+        if filepath != safe_root and safe_root not in filepath.parents:
+            raise ValueError("Report path must remain within the data directory")
+
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
         with open(filepath, "w", encoding="utf-8") as f:
