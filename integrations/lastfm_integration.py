@@ -3,6 +3,7 @@
 import json
 import logging
 import time
+from urllib.parse import urlparse
 
 import pandas as pd
 import requests
@@ -13,7 +14,7 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
 class LastFmAPI:
@@ -36,6 +37,11 @@ class LastFmAPI:
     def _make_request(self, method: str, **params) -> dict:
         """Make a rate-limited request to Last.fm API."""
         self._rate_limit()
+        if urlparse(BASE_URL).scheme != "https":
+            raise APIConnectionError(
+                message="Insecure Last.fm endpoint configured; HTTPS is required",
+                details={"method": method, "base_url": BASE_URL},
+            )
 
         request_params = {"method": method, "api_key": self.api_key, "format": "json", **params}
 

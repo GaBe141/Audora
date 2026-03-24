@@ -89,3 +89,11 @@ class TestLastFmAPIErrorHandling:
         with patch.object(api.session, "get", return_value=mock_response):
             with pytest.raises(APIConnectionError, match="429"):
                 api.get_top_artists_global(limit=5)
+
+    def test_rejects_insecure_http_base_url(self, monkeypatch):
+        import integrations.lastfm_integration as lastfm_module
+
+        api = LastFmAPI(api_key="test_key")
+        monkeypatch.setattr(lastfm_module, "BASE_URL", "http://ws.audioscrobbler.com/2.0/")
+        with pytest.raises(APIConnectionError, match="HTTPS is required"):
+            api.get_top_artists_global(limit=5)
