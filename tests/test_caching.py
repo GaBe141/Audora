@@ -1,9 +1,14 @@
-"""Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
+"""Tests for core caching (LocalCacheBackend, Redis serialization, CacheManager)."""
 
+import hashlib
 import time
 
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,55 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheKeySecurity:
+    """Security-focused tests for cache key hashing."""
+
+    def test_stable_hash_uses_sha256(self):
+        expected = hashlib.sha256("abc".encode("utf-8")).hexdigest()
+        assert CacheManager._stable_hash("abc") == expected
+
+
+class TestRedisSerializationSecurity:
+    """Security-focused tests for Redis cache serialization."""
+
+    def _backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_roundtrip_json_payload(self):
+        backend = self._backend()
+        value = {"track": "Song", "score": 92, "tags": ["viral", "trend"]}
+        encoded = backend._serialize(value)
+        assert backend._deserialize(encoded) == value
+
+    def test_rejects_non_json_serializable_values(self):
+        backend = self._backend()
+        with pytest.raises(TypeError):
+            backend._serialize({1, 2, 3})
+
+    def test_rejects_tampered_payload_signature(self):
+        backend = self._backend()
+        encoded = backend._serialize({"safe": True})
+
+        import json
+
+        envelope = json.loads(encoded.decode("utf-8"))
+        envelope["sig"] = "0" * 64  # Invalid signature
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(tampered) is None
+
+    def test_roundtrip_dataframe_payload(self):
+        import pandas as pd
+
+        backend = self._backend()
+        frame = pd.DataFrame(
+            [{"track_name": "Song A", "score": 81.5}, {"track_name": "Song B", "score": 77.0}]
+        )
+        encoded = backend._serialize(frame)
+        decoded = backend._deserialize(encoded)
+        assert decoded is not None
+        assert decoded.to_dict("records") == frame.to_dict("records")
