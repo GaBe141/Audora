@@ -73,6 +73,18 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    _EXPORT_SELECT_QUERIES = {
+        "trends": "SELECT * FROM trends",
+        "trend_history": "SELECT * FROM trend_history",
+        "viral_predictions": "SELECT * FROM viral_predictions",
+        "cross_platform_correlations": "SELECT * FROM cross_platform_correlations",
+    }
+    _TABLE_COUNT_QUERIES = {
+        "trends": "SELECT COUNT(*) FROM trends",
+        "trend_history": "SELECT COUNT(*) FROM trend_history",
+        "viral_predictions": "SELECT COUNT(*) FROM viral_predictions",
+        "cross_platform_correlations": "SELECT COUNT(*) FROM cross_platform_correlations",
+    }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
@@ -932,37 +944,27 @@ class EnhancedMusicDataStore:
 
         Note: Table name is validated against whitelist to prevent SQL injection.
         """
-        # Whitelist valid table names to prevent SQL injection
-        valid_tables = {
-            "trends",
-            "trend_history",
-            "viral_predictions",
-            "cross_platform_correlations",
-            "artists",
-            "tracks",
-        }
-        if table not in valid_tables:
-            raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
+        table_name = table.strip().lower()
+        if table_name not in self._EXPORT_SELECT_QUERIES:
+            valid_tables = sorted(self._EXPORT_SELECT_QUERIES)
+            raise ValueError(
+                f"Invalid table name: {table}. Must be one of {valid_tables}"
+            )
 
         with self.get_connection() as conn:
+            base_query = self._EXPORT_SELECT_QUERIES[table_name]
             if days:
-                # Use parameterized query for days parameter
-                query = f"""
-                SELECT * FROM {table}
-                WHERE datetime(created_at) >= datetime('now', ?)
-                ORDER BY created_at DESC
-                """
+                query = f"{base_query} WHERE datetime(created_at) >= datetime('now', ?) ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
             else:
-                # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
+                query = f"{base_query} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
             # Ensure directory exists
             Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
 
             df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            self.logger.info(f"Exported {len(df)} rows from {table_name} to {filepath}")
 
         return filepath
 
@@ -971,14 +973,10 @@ class EnhancedMusicDataStore:
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
-            # Table row counts with validated table names
+            # Table row counts from static queries (no dynamic identifiers)
             table_stats = {}
-            # Whitelist of valid tables to prevent SQL injection
-            tables = ["trends", "trend_history", "viral_predictions", "cross_platform_correlations"]
-
-            for table in tables:
-                # Table names are from whitelist, safe to use
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+            for table, query in self._TABLE_COUNT_QUERIES.items():
+                cursor.execute(query)
                 table_stats[table] = cursor.fetchone()[0]
 
             # Data quality checks
