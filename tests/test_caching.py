@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,31 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for signed Redis cache payload handling."""
+
+    def _backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_json_value_round_trip(self):
+        backend = self._backend()
+        payload = {"artist": "A", "score": 98, "tags": ["viral", "pop"]}
+        serialized = backend._serialize(payload)
+        assert backend._deserialize(serialized) == payload
+
+    def test_tampered_payload_is_rejected(self):
+        backend = self._backend()
+        serialized = backend._serialize({"track": "demo"})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"] = "Zm9v"  # valid base64 for "foo", but signature no longer matches
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(tampered) is None
+
+    def test_unsupported_type_raises(self):
+        backend = self._backend()
+        with pytest.raises(TypeError):
+            backend._serialize(object())
