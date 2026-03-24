@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,52 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for Redis serialization/deserialization."""
+
+    @staticmethod
+    def _backend() -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_round_trip_nested_values(self):
+        backend = self._backend()
+        value = {
+            "int": 1,
+            "nested": {"a": [1, 2, 3], "b": ("x", True)},
+            "text": "safe",
+        }
+
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        assert restored == value
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._backend()
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "invalid",
+            "payload": "cGlja2xlX2J5dGVz",
+        }
+
+        raw = json.dumps(legacy_envelope).encode("utf-8")
+        assert backend._deserialize(raw) is None
+
+    def test_rejects_tampered_signature(self):
+        backend = self._backend()
+        serialized = backend._serialize({"safe": "value"})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["sig"] = "00" * 32
+
+        tampered = json.dumps(envelope).encode("utf-8")
+        assert backend._deserialize(tampered) is None
+
+    def test_rejects_non_string_dict_keys(self):
+        backend = self._backend()
+        with pytest.raises(TypeError, match="string keys"):
+            backend._serialize({1: "invalid"})
