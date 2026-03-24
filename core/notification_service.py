@@ -4,10 +4,12 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
 import os
+import ssl
 import socket
 import smtplib
 from dataclasses import dataclass
@@ -131,6 +133,7 @@ class EnhancedNotificationService:
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
                 "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
                 "use_tls": True,
+                "timeout_seconds": 30,
             },
             "slack": {
                 "webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
@@ -262,6 +265,39 @@ class EnhancedNotificationService:
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    def _sanitize_email_header(self, value: str, field_name: str) -> str:
+        """Sanitize untrusted email header values to prevent header injection."""
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError(f"{field_name} cannot be empty")
+        if "\r" in cleaned or "\n" in cleaned:
+            raise ValueError(f"{field_name} contains invalid newline characters")
+        return cleaned
+
+    def _normalize_email_recipients(self, recipients: Any) -> list[str]:
+        """Normalize and sanitize recipient values from config."""
+        if isinstance(recipients, str):
+            raw_recipients = recipients.split(",")
+        elif isinstance(recipients, list):
+            raw_recipients = recipients
+        else:
+            raw_recipients = []
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for recipient in raw_recipients:
+            if not isinstance(recipient, str):
+                continue
+            stripped = recipient.strip()
+            if not stripped:
+                continue
+            cleaned = self._sanitize_email_header(stripped, "Recipient email")
+            if cleaned not in seen:
+                normalized.append(cleaned)
+                seen.add(cleaned)
+
+        return normalized
 
     def _load_templates(self) -> dict[str, str]:
         """Load message templates."""
@@ -509,9 +545,10 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
-        return f"{content_hash}:{message.priority.value}"
+        # Use deterministic SHA-256 instead of built-in hash() which is process-randomized.
+        payload = f"{message.title}:{message.content[:200]}:{message.priority.value}"
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return f"{digest}:{message.priority.value}"
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""
@@ -526,15 +563,20 @@ System status: {{ system_status }}
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
         email_config = self.config.get("email", {})
+        recipients = self._normalize_email_recipients(email_config.get("recipients", []))
+        smtp_server = str(email_config.get("smtp_server", "")).strip()
 
-        if not email_config.get("smtp_server") or not email_config.get("recipients"):
+        if not smtp_server or not recipients:
             return {"success": False, "error": "Email not configured"}
 
         try:
             msg = MIMEMultipart("alternative")
-            msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
-            msg["Subject"] = message.title
+            msg["From"] = self._sanitize_email_header(
+                str(email_config.get("from_address", "music-discovery@example.com")),
+                "From address",
+            )
+            msg["To"] = ", ".join(recipients)
+            msg["Subject"] = self._sanitize_email_header(message.title, "Subject")
 
             # Set priority
             if message.priority in [NotificationPriority.HIGH, NotificationPriority.CRITICAL]:
@@ -571,21 +613,27 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            server = smtplib.SMTP(
+                smtp_server,
+                int(email_config.get("port", 587)),
+                timeout=int(email_config.get("timeout_seconds", 30)),
+            )
+            server.ehlo()
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
 
-            server.send_message(msg)
+            server.send_message(msg, to_addrs=recipients)
             server.quit()
 
             self.logger.info(
-                f"Email notification sent to {len(email_config['recipients'])} recipients"
+                f"Email notification sent to {len(recipients)} recipients"
             )
-            return {"success": True, "recipients": len(email_config["recipients"])}
+            return {"success": True, "recipients": len(recipients)}
 
         except Exception as e:
             self.logger.error(f"Failed to send email notification: {e}")
@@ -650,7 +698,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +765,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +825,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
