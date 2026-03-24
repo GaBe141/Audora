@@ -1,8 +1,14 @@
 """Security tests for notification webhook URL validation."""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
-from core.notification_service import EnhancedNotificationService
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationMessage,
+    NotificationPriority,
+)
 
 
 class TestWebhookUrlValidation:
@@ -27,3 +33,42 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+
+class TestNotificationEmailSecurity:
+    """Validate SMTP security hardening and header sanitization."""
+
+    def test_sanitize_email_header_rejects_newlines(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="newline"):
+            svc._sanitize_email_header("safe@example.com\nInjected: true", "From address")
+
+    @pytest.mark.asyncio
+    async def test_send_email_uses_tls_with_verified_context(self):
+        svc = EnhancedNotificationService()
+        svc.config["email"]["smtp_server"] = "smtp.example.com"
+        svc.config["email"]["port"] = 587
+        svc.config["email"]["from_address"] = "alerts@example.com"
+        svc.config["email"]["recipients"] = ["user@example.com"]
+        svc.config["email"]["use_tls"] = True
+        svc.config["email"]["username"] = ""
+        svc.config["email"]["password"] = ""
+
+        message = NotificationMessage(
+            title="Security Test",
+            content="Testing SMTP TLS context",
+            priority=NotificationPriority.LOW,
+            channels=[],
+        )
+
+        mock_server = MagicMock()
+        with (
+            patch("core.notification_service.smtplib.SMTP", return_value=mock_server),
+            patch("core.notification_service.ssl.create_default_context", return_value="tls_ctx") as ctx_mock,
+        ):
+            result = await svc._send_email(message)
+
+        assert result["success"] is True
+        ctx_mock.assert_called_once()
+        mock_server.starttls.assert_called_once_with(context="tls_ctx")
+        mock_server.send_message.assert_called_once()

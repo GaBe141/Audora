@@ -6,6 +6,7 @@ Installs dependencies, configures services, and validates the system.
 
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -73,6 +74,11 @@ class EnhancedMusicDiscoverySetup:
             ],
         )
         return logging.getLogger(__name__)
+
+    def _set_secure_file_permissions(self, path: Path) -> None:
+        """Apply restrictive permissions to files containing secrets/config."""
+        if os.name != "nt":
+            os.chmod(path, 0o600)
 
     def run_complete_setup(self) -> bool:
         """Run the complete setup process."""
@@ -193,6 +199,7 @@ class EnhancedMusicDiscoverySetup:
             try:
                 with open(config_path, "w") as f:
                     json.dump(config_data, f, indent=2)
+                self._set_secure_file_permissions(config_path)
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -524,6 +531,7 @@ ENABLE_NOTIFICATIONS=True
         try:
             with open(env_path, "w") as f:
                 f.write(env_template.strip())
+            self._set_secure_file_permissions(env_path)
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True
