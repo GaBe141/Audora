@@ -4,7 +4,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from core.notification_service import EnhancedNotificationService
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationMessage,
+    NotificationPriority,
+)
 
 
 class TestWebhookUrlValidation:
@@ -50,10 +54,10 @@ class TestNotificationEmailSecurity:
         svc.config["email"]["username"] = ""
         svc.config["email"]["password"] = ""
 
-        message = __import__("core.notification_service", fromlist=["NotificationMessage"]).NotificationMessage(
+        message = NotificationMessage(
             title="Security Test",
             content="Testing SMTP TLS context",
-            priority=__import__("core.notification_service", fromlist=["NotificationPriority"]).NotificationPriority.LOW,
+            priority=NotificationPriority.LOW,
             channels=[],
         )
 
