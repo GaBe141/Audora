@@ -4,12 +4,14 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import copy
 import ipaddress
 import json
 import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -181,18 +183,35 @@ class EnhancedNotificationService:
 
         return default_config
 
-    def save_config(self, path: str = "config/notification_config.json") -> None:
+    def save_config(
+        self,
+        path: str = "config/notification_config.json",
+        *,
+        include_secrets: bool = False,
+    ) -> None:
         """Persist the current channel configuration to a JSON file.
 
         Args:
             path: File path to write the configuration to.
+            include_secrets: Whether to persist sensitive credentials.
+                Defaults to False to avoid writing secrets to disk.
         """
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = {k: copy.deepcopy(self.config[k]) for k in saveable_keys if k in self.config}
+        if not include_secrets:
+            if "email" in to_save and isinstance(to_save["email"], dict):
+                to_save["email"]["password"] = ""
+            if "webhook" in to_save and isinstance(to_save["webhook"], dict):
+                headers = to_save["webhook"].get("headers")
+                if isinstance(headers, dict):
+                    headers.pop("Authorization", None)
+            if "sms" in to_save and isinstance(to_save["sms"], dict):
+                to_save["sms"]["api_key"] = ""
+                to_save["sms"]["api_secret"] = ""
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -574,7 +593,7 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -650,7 +669,12 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +741,12 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +806,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
