@@ -1,10 +1,9 @@
-"""Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
+"""Tests for core caching (LocalCacheBackend, CacheManager, Redis serializer, @cached)."""
 
+import json
 import time
 
-from core.caching import (
-    LocalCacheBackend,
-)
+from core.caching import LocalCacheBackend, RedisCacheBackend
 
 
 class TestLocalCacheBackend:
@@ -81,6 +80,13 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, "x"), {"a": True})
+        parts = key.split(":")
+        assert parts[0] == "fn"
+        # SHA-256 hex digest length.
+        assert all(len(part) == 64 for part in parts[1:])
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +124,44 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused serializer/deserializer tests for Redis cache backend."""
+
+    @staticmethod
+    def _backend(*, allow_pickle: bool = False) -> RedisCacheBackend:
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        backend._allow_pickle = allow_pickle
+        return backend
+
+    def test_signed_json_round_trip(self):
+        backend = self._backend()
+        value = {"n": 1, "blob": b"abc", "items": (1, 2)}
+        encoded = backend._serialize(value)
+        decoded = backend._deserialize(encoded)
+        assert decoded["n"] == 1
+        assert decoded["blob"] == b"abc"
+        # Tuples are normalized to JSON arrays in secure mode.
+        assert decoded["items"] == [1, 2]
+
+    def test_rejects_tampered_signature(self):
+        backend = self._backend()
+        encoded = backend._serialize({"ok": True})
+        envelope = json.loads(encoded.decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(tampered) is None
+
+    def test_rejects_pickle_entry_when_opt_in_disabled(self):
+        pickling_backend = self._backend(allow_pickle=True)
+        pickle_payload = pickling_backend._serialize({"legacy": "value"})
+
+        secure_backend = self._backend(allow_pickle=False)
+        assert secure_backend._deserialize(pickle_payload) is None
+
+    def test_allows_pickle_entry_when_opt_in_enabled(self):
+        backend = self._backend(allow_pickle=True)
+        payload = backend._serialize({"legacy": "value"})
+        assert backend._deserialize(payload) == {"legacy": "value"}
