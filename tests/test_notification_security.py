@@ -2,7 +2,11 @@
 
 import pytest
 
-from core.notification_service import EnhancedNotificationService
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationMessage,
+    NotificationPriority,
+)
 
 
 class TestWebhookUrlValidation:
@@ -27,3 +31,20 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+
+class TestNotificationKeying:
+    """Validate deterministic dedupe key generation."""
+
+    def test_message_key_is_deterministic_for_same_message(self):
+        svc = EnhancedNotificationService()
+        msg = NotificationMessage(
+            title="title",
+            content="content",
+            priority=NotificationPriority.MEDIUM,
+            channels=[],
+        )
+        key1 = svc._generate_message_key(msg)
+        key2 = svc._generate_message_key(msg)
+        assert key1 == key2
+        assert ":medium" in key1
