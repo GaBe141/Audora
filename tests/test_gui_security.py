@@ -2,7 +2,7 @@
 
 import importlib
 
-from gui import app as gui_app
+gui_app = importlib.import_module("gui.app")
 
 
 def test_gui_mutation_flag_defaults_disabled():
