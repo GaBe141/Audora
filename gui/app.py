@@ -5,6 +5,7 @@ Includes live trend dashboard, history search, notification settings, and accura
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,7 @@ import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -343,6 +345,29 @@ app.layout = dbc.Container(
 # Helpers
 # ---------------------------------------------------------------------------
 
+_LOOPBACK_REMOTE_ADDRS = {"127.0.0.1", "::1"}
+
+
+def _env_flag_enabled(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_local_request() -> bool:
+    remote_addr = getattr(request, "remote_addr", None)
+    return remote_addr in _LOOPBACK_REMOTE_ADDRS
+
+
+def _admin_access_block_message() -> str:
+    return (
+        "Blocked: remote admin actions are disabled. "
+        "Use localhost access or set AUDORA_GUI_ALLOW_REMOTE_ADMIN=1."
+    )
+
+
+def _can_run_admin_action() -> bool:
+    return _env_flag_enabled("AUDORA_GUI_ALLOW_REMOTE_ADMIN") or _is_local_request()
+
+
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
     try:
@@ -392,6 +417,9 @@ def run_action(
     _validate_clicks,
     demo_value,
 ):
+    if not _can_run_admin_action():
+        return "Blocked", _admin_access_block_message()
+
     triggered = ctx.triggered_id
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
@@ -541,7 +569,7 @@ def search_history(_n, platform, min_score, days, artist_filter):
 
     # Optional artist filter (client-side simple substring)
     if artist_filter:
-        mask = df["artist"].str.contains(artist_filter, case=False, na=False)
+        mask = df["artist"].str.contains(artist_filter, case=False, na=False, regex=False)
         df = df[mask]
 
     # Round score
@@ -585,6 +613,9 @@ def export_csv(_n, table_data):
     prevent_initial_call=True,
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+    if not _can_run_admin_action():
+        return _admin_access_block_message()
+
     try:
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
@@ -618,6 +649,9 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         prevent_initial_call=True,
     )
     def _cb(_n, url):
+        if not _can_run_admin_action():
+            return _admin_access_block_message()
+
         if not url:
             return "No URL"
         try:

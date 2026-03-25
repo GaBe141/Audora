@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import smtplib
 from dataclasses import dataclass
@@ -262,6 +263,12 @@ class EnhancedNotificationService:
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    def _sanitize_email_header(self, value: str) -> str:
+        """Sanitize user-controlled header values to prevent header injection."""
+        # Strip CR/LF/NUL to avoid introducing additional headers.
+        cleaned = re.sub(r"[\r\n\0]+", " ", value).strip()
+        return cleaned or "Audora Notification"
 
     def _load_templates(self) -> dict[str, str]:
         """Load message templates."""
@@ -534,7 +541,7 @@ System status: {{ system_status }}
             msg = MIMEMultipart("alternative")
             msg["From"] = email_config.get("from_address", "music-discovery@example.com")
             msg["To"] = ", ".join(email_config["recipients"])
-            msg["Subject"] = message.title
+            msg["Subject"] = self._sanitize_email_header(message.title)
 
             # Set priority
             if message.priority in [NotificationPriority.HIGH, NotificationPriority.CRITICAL]:
