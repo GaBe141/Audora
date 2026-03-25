@@ -10,13 +10,18 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
+from datetime import date, datetime
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
+
+try:
+    import pandas as pd
+except ImportError:  # pragma: no cover - pandas is optional for cache serialization
+    pd = None
 
 # Try to import Redis, fall back to local cache if unavailable
 try:
@@ -186,13 +191,54 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _json_default(self, value: Any) -> Any:
+        """Serialize non-primitive values into safe JSON-compatible structures."""
+        if isinstance(value, datetime):
+            return {"__audora_type__": "datetime", "value": value.isoformat()}
+        if isinstance(value, date):
+            return {"__audora_type__": "date", "value": value.isoformat()}
+        if isinstance(value, set):
+            # Use repr key so mixed-type sets can be serialized deterministically.
+            return {"__audora_type__": "set", "value": sorted(value, key=repr)}
+        if pd is not None and isinstance(value, pd.DataFrame):
+            return {"__audora_type__": "dataframe", "value": value.to_dict(orient="split")}
+        raise TypeError(f"Type {type(value).__name__} is not JSON-serializable")
+
+    def _json_object_hook(self, value: Any) -> Any:
+        """Restore supported typed values from JSON structures."""
+        if not isinstance(value, dict):
+            return value
+
+        marker = value.get("__audora_type__")
+        if marker == "datetime":
+            return datetime.fromisoformat(value["value"])
+        if marker == "date":
+            return date.fromisoformat(value["value"])
+        if marker == "set":
+            return set(value["value"])
+        if marker == "dataframe" and pd is not None:
+            payload = value.get("value")
+            if isinstance(payload, dict):
+                return pd.DataFrame(
+                    data=payload.get("data", []),
+                    columns=payload.get("columns", []),
+                    index=payload.get("index", []),
+                )
+        return value
+
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value with integrity protection using safe JSON."""
+        payload = json.dumps(
+            value,
+            default=self._json_default,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
             "alg": "HMAC-SHA256",
+            "fmt": "json",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
@@ -206,6 +252,7 @@ class RedisCacheBackend(CacheBackend):
                 not isinstance(envelope, dict)
                 or envelope.get("v") != 1
                 or envelope.get("alg") != "HMAC-SHA256"
+                or envelope.get("fmt") != "json"
                 or "sig" not in envelope
                 or "payload" not in envelope
             ):
@@ -223,7 +270,7 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return json.loads(payload.decode("utf-8"), object_hook=self._json_object_hook)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -337,7 +384,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable or supported typed value)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +479,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

@@ -1,9 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+from datetime import date, datetime
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,49 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for Redis serialization integrity checks."""
+
+    def _build_backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_secure_json_round_trip_supported_types(self):
+        backend = self._build_backend()
+        original = {
+            "artist": "Example",
+            "released": date(2025, 1, 15),
+            "seen_at": datetime(2026, 3, 25, 10, 0, 0),
+            "regions": {"US", "GB"},
+        }
+
+        serialized = backend._serialize(original)
+        restored = backend._deserialize(serialized)
+
+        assert restored is not None
+        assert restored["artist"] == original["artist"]
+        assert restored["released"] == original["released"]
+        assert restored["seen_at"] == original["seen_at"]
+        assert restored["regions"] == original["regions"]
+
+    def test_rejects_tampered_signature(self):
+        backend = self._build_backend()
+        serialized = backend._serialize({"track": "safe"})
+
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(tampered) is None
+
+    def test_rejects_legacy_or_invalid_envelope_format(self):
+        backend = self._build_backend()
+        serialized = backend._serialize({"track": "safe"})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope.pop("fmt", None)
+        invalid = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(invalid) is None
