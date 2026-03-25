@@ -6,10 +6,12 @@ Supports multiple channels, smart filtering, and customizable triggers.
 import asyncio
 import ipaddress
 import json
+import hashlib
 import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -129,8 +131,9 @@ class EnhancedNotificationService:
                 "username": os.getenv("SMTP_USERNAME", ""),
                 "password": os.getenv("SMTP_PASSWORD", ""),
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
-                "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
+                "recipients": self._parse_recipients(os.getenv("EMAIL_RECIPIENTS", "")),
                 "use_tls": True,
+                "timeout_seconds": int(os.getenv("SMTP_TIMEOUT_SECONDS", "30")),
             },
             "slack": {
                 "webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
@@ -156,7 +159,7 @@ class EnhancedNotificationService:
                 "api_key": os.getenv("SMS_API_KEY", ""),
                 "api_secret": os.getenv("SMS_API_SECRET", ""),
                 "from_number": os.getenv("SMS_FROM_NUMBER", ""),
-                "recipients": os.getenv("SMS_RECIPIENTS", "").split(","),
+                "recipients": self._parse_recipients(os.getenv("SMS_RECIPIENTS", "")),
             },
         }
 
@@ -179,7 +182,56 @@ class EnhancedNotificationService:
             except Exception as e:
                 self.logger.warning(f"Could not load {default_path}: {e}")
 
+        # Normalize recipient lists after config merges to avoid blank recipients.
+        default_config["email"]["recipients"] = self._parse_recipients(
+            default_config.get("email", {}).get("recipients", [])
+        )
+        default_config["sms"]["recipients"] = self._parse_recipients(
+            default_config.get("sms", {}).get("recipients", [])
+        )
+
         return default_config
+
+    def _parse_recipients(self, recipients: str | list[str]) -> list[str]:
+        """Normalize recipient inputs and drop empty values."""
+        if isinstance(recipients, str):
+            source = recipients.split(",")
+        elif isinstance(recipients, list):
+            source = recipients
+        else:
+            return []
+
+        return [str(item).strip() for item in source if str(item).strip()]
+
+    def _persist_notification_secrets(self) -> bool:
+        """Whether secrets should be persisted to notification config files."""
+        return os.getenv("AUDORA_PERSIST_NOTIFICATION_SECRETS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _redact_sensitive_fields(self, config: dict[str, Any]) -> None:
+        """Remove sensitive values before writing configuration to disk."""
+        if "email" in config and isinstance(config["email"], dict):
+            config["email"]["password"] = ""
+
+        if "slack" in config and isinstance(config["slack"], dict):
+            config["slack"]["webhook_url"] = ""
+
+        if "discord" in config and isinstance(config["discord"], dict):
+            config["discord"]["webhook_url"] = ""
+
+        if "webhook" in config and isinstance(config["webhook"], dict):
+            config["webhook"]["url"] = ""
+            headers = config["webhook"].get("headers")
+            if isinstance(headers, dict):
+                headers.pop("Authorization", None)
+
+        if "sms" in config and isinstance(config["sms"], dict):
+            config["sms"]["api_key"] = ""
+            config["sms"]["api_secret"] = ""
 
     def save_config(self, path: str = "config/notification_config.json") -> None:
         """Persist the current channel configuration to a JSON file.
@@ -193,6 +245,12 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        if not self._persist_notification_secrets():
+            self._redact_sensitive_fields(to_save)
+            self.logger.info(
+                "Sensitive notification credentials were redacted before saving config. "
+                "Set AUDORA_PERSIST_NOTIFICATION_SECRETS=true to persist them."
+            )
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -509,9 +567,16 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
-        return f"{content_hash}:{message.priority.value}"
+        key_material = {
+            "title": message.title,
+            "content_prefix": message.content[:500],
+            "priority": message.priority.value,
+            "channels": [channel.value for channel in message.channels],
+        }
+        digest = hashlib.sha256(
+            json.dumps(key_material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return f"{digest}:{message.priority.value}"
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""
@@ -526,14 +591,15 @@ System status: {{ system_status }}
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
         email_config = self.config.get("email", {})
+        recipients = self._parse_recipients(email_config.get("recipients", []))
 
-        if not email_config.get("smtp_server") or not email_config.get("recipients"):
+        if not email_config.get("smtp_server") or not recipients:
             return {"success": False, "error": "Email not configured"}
 
         try:
             msg = MIMEMultipart("alternative")
             msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
+            msg["To"] = ", ".join(recipients)
             msg["Subject"] = message.title
 
             # Set priority
@@ -571,21 +637,23 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            timeout = int(email_config.get("timeout_seconds", 30))
+            with smtplib.SMTP(
+                email_config["smtp_server"], email_config.get("port", 587), timeout=timeout
+            ) as server:
+                server.ehlo()
+                if email_config.get("use_tls", True):
+                    tls_context = ssl.create_default_context()
+                    server.starttls(context=tls_context)
+                    server.ehlo()
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
+                server.send_message(msg)
 
-            server.send_message(msg)
-            server.quit()
-
-            self.logger.info(
-                f"Email notification sent to {len(email_config['recipients'])} recipients"
-            )
-            return {"success": True, "recipients": len(email_config["recipients"])}
+            self.logger.info(f"Email notification sent to {len(recipients)} recipients")
+            return {"success": True, "recipients": len(recipients)}
 
         except Exception as e:
             self.logger.error(f"Failed to send email notification: {e}")
