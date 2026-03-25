@@ -944,6 +944,20 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        export_root = Path("data/exports").resolve()
+        export_root.mkdir(parents=True, exist_ok=True)
+        requested_path = Path(filepath).expanduser()
+        if requested_path.is_absolute():
+            target_path = requested_path.resolve()
+        else:
+            target_path = (export_root / requested_path).resolve()
+        if export_root not in target_path.parents:
+            raise ValueError(
+                f"Export path is outside of the allowed export directory: {target_path}"
+            )
+        if target_path.suffix.lower() != ".csv":
+            raise ValueError("Export path must end with .csv")
+
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -958,13 +972,13 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            # Ensure directory exists (within the validated export root)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(target_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {target_path}")
 
-        return filepath
+        return str(target_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
