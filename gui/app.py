@@ -5,6 +5,7 @@ Includes live trend dashboard, history search, notification settings, and accura
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +17,15 @@ from dash import Input, Output, State, ctx, dash_table, dcc, html
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _is_env_flag_enabled(flag_name: str) -> bool:
+    """Return True when an env flag is explicitly enabled."""
+    return os.getenv(flag_name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+GUI_MUTATIONS_ENABLED = _is_env_flag_enabled("AUDORA_GUI_ENABLE_MUTATIONS")
+ALLOW_GUI_PASSWORD_SAVE = _is_env_flag_enabled("AUDORA_GUI_ALLOW_PASSWORD_SAVE")
 
 app = dash.Dash(
     __name__,
@@ -271,6 +281,13 @@ _accuracy_tab = dbc.Tab(
 
 app.layout = dbc.Container(
     [
+        dbc.Alert(
+            "Security mode is enabled: command execution and settings writes are disabled. "
+            "Set AUDORA_GUI_ENABLE_MUTATIONS=true to enable mutating actions.",
+            color="warning",
+            className="mb-3",
+            is_open=not GUI_MUTATIONS_ENABLED,
+        ),
         dcc.Store(id="last-status", data="Idle"),
         dcc.Store(id="last-output", data=""),
         dbc.Row([
@@ -283,6 +300,7 @@ app.layout = dbc.Container(
                         "Run single discovery",
                         id="btn-discovery",
                         color="primary",
+                        disabled=not GUI_MUTATIONS_ENABLED,
                         className="w-100 mb-2",
                     ),
                     html.Label("Run demo:", className="mt-2 small text-muted"),
@@ -302,6 +320,7 @@ app.layout = dbc.Container(
                         "Run demo",
                         id="btn-demo",
                         color="secondary",
+                        disabled=not GUI_MUTATIONS_ENABLED,
                         className="w-100 mb-2",
                     ),
                     dbc.Button(
@@ -309,6 +328,7 @@ app.layout = dbc.Container(
                         id="btn-setup",
                         color="info",
                         outline=True,
+                        disabled=not GUI_MUTATIONS_ENABLED,
                         className="w-100 mb-2",
                     ),
                     dbc.Button(
@@ -316,6 +336,7 @@ app.layout = dbc.Container(
                         id="btn-validate",
                         color="info",
                         outline=True,
+                        disabled=not GUI_MUTATIONS_ENABLED,
                         className="w-100 mb-2",
                     ),
                 ],
@@ -392,6 +413,13 @@ def run_action(
     _validate_clicks,
     demo_value,
 ):
+    if not GUI_MUTATIONS_ENABLED:
+        return (
+            "Blocked",
+            "Command execution is disabled by default for security. "
+            "Set AUDORA_GUI_ENABLE_MUTATIONS=true to enable it.",
+        )
+
     triggered = ctx.triggered_id
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
@@ -541,7 +569,13 @@ def search_history(_n, platform, min_score, days, artist_filter):
 
     # Optional artist filter (client-side simple substring)
     if artist_filter:
-        mask = df["artist"].str.contains(artist_filter, case=False, na=False)
+        safe_artist_filter = str(artist_filter).strip()[:120]
+        mask = df["artist"].astype(str).str.contains(
+            safe_artist_filter,
+            case=False,
+            na=False,
+            regex=False,
+        )
         df = df[mask]
 
     # Round score
@@ -585,6 +619,12 @@ def export_csv(_n, table_data):
     prevent_initial_call=True,
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+    if not GUI_MUTATIONS_ENABLED:
+        return (
+            "Blocked: settings writes are disabled. "
+            "Set AUDORA_GUI_ENABLE_MUTATIONS=true to enable."
+        )
+
     try:
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
@@ -600,9 +640,14 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
             svc.config["email"]["port"] = int(smtp_port)
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
-        if smtp_pass:
+        if smtp_pass and ALLOW_GUI_PASSWORD_SAVE:
             svc.config["email"]["password"] = smtp_pass
         svc.save_config()
+        if smtp_pass and not ALLOW_GUI_PASSWORD_SAVE:
+            return (
+                "Saved (SMTP password was not persisted; "
+                "set AUDORA_GUI_ALLOW_PASSWORD_SAVE=true to override)"
+            )
         return "Saved"
     except Exception as e:
         return f"Error: {e}"
@@ -618,6 +663,8 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         prevent_initial_call=True,
     )
     def _cb(_n, url):
+        if not GUI_MUTATIONS_ENABLED:
+            return "Blocked"
         if not url:
             return "No URL"
         try:
