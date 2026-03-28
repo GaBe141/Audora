@@ -4,6 +4,7 @@ Handles trending data, viral predictions, and cross-platform analysis.
 """
 
 import json
+import hashlib
 import logging
 import sqlite3
 from contextlib import contextmanager
@@ -665,8 +666,11 @@ class EnhancedMusicDataStore:
         if not track_artist_pairs:
             return pd.DataFrame()
 
-        # Create cache key from the pairs
-        cache_key = f"tracks_bulk:{hash(tuple(sorted(track_artist_pairs)))}"
+        # Create deterministic, process-stable cache key for the pair list.
+        normalized_pairs = tuple(sorted(track_artist_pairs))
+        pairs_json = json.dumps(normalized_pairs, separators=(",", ":"), ensure_ascii=True)
+        pairs_digest = hashlib.sha256(pairs_json.encode("utf-8")).hexdigest()
+        cache_key = f"tracks_bulk:{pairs_digest}"
         cached_result = self._cache.get(cache_key)
         if cached_result is not None:
             self.logger.debug(f"Cache hit for bulk tracks query ({len(track_artist_pairs)} pairs)")
