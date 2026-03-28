@@ -1,5 +1,6 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import re
 import time
 
 from core.caching import (
@@ -80,6 +81,14 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+    def test_build_cache_key_uses_sha256_digests(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ({"a": 1},), {"b": 2})
+        parts = key.split(":")
+        assert parts[0] == "prefix"
+        assert len(parts) == 3
+        for digest in parts[1:]:
+            assert re.fullmatch(r"[a-f0-9]{64}", digest) is not None
 
 
 class TestCachedDecorator:
