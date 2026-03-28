@@ -74,7 +74,7 @@ class TestGetTracksWithArtistsBulk:
         normalized_pairs = tuple(sorted(pairs))
         pairs_json = json.dumps(normalized_pairs, separators=(",", ":"), ensure_ascii=True)
         expected_hash = hashlib.sha256(pairs_json.encode("utf-8")).hexdigest()
-        expected_key = f"tracks_bulk:{expected_hash}"
+        expected_key = f"audora:tracks_bulk:{expected_hash}"
 
         data_store.get_tracks_with_artists_bulk(pairs)
 
