@@ -571,14 +571,13 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
-            # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
-
-            if email_config.get("use_tls", True):
-                tls_context = ssl.create_default_context()
-                server.starttls(context=tls_context)
-            else:
+            if not email_config.get("use_tls", True):
                 return {"success": False, "error": "TLS is required for SMTP notifications"}
+
+            # Send email only over TLS to prevent credential/data exposure.
+            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            tls_context = ssl.create_default_context()
+            server.starttls(context=tls_context)
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
