@@ -6,10 +6,12 @@ Supports multiple channels, smart filtering, and customizable triggers.
 import asyncio
 import ipaddress
 import json
+import hashlib
 import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -413,6 +415,10 @@ System status: {{ system_status }}
             ),
         ]
 
+    def _is_redirect_status(self, status_code: int) -> bool:
+        """Return True if status code is an HTTP redirect."""
+        return 300 <= status_code < 400
+
     async def send_notification(self, message: NotificationMessage) -> dict[str, Any]:
         """
         Send notification through configured channels.
@@ -509,8 +515,17 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
+        # Use a deterministic cryptographic digest for stable deduplication
+        # across restarts and to avoid predictable/colliding built-in hashes.
+        key_payload = {
+            "title": message.title,
+            "content": message.content[:500],
+            "priority": message.priority.value,
+            "channels": sorted(channel.value for channel in message.channels),
+            "data": message.data or {},
+        }
+        serialized = json.dumps(key_payload, sort_keys=True, ensure_ascii=True, default=str)
+        content_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
         return f"{content_hash}:{message.priority.value}"
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
@@ -574,7 +589,7 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -650,8 +665,21 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    allow_redirects=False,
+                ) as response,
             ):
+                if self._is_redirect_status(response.status):
+                    location = response.headers.get("Location", "<missing>")
+                    self.logger.error(
+                        f"Slack notification blocked redirect response: {response.status} -> {location}"
+                    )
+                    return {
+                        "success": False,
+                        "error": f"Redirect responses are not allowed (HTTP {response.status})",
+                    }
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -717,8 +745,22 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    allow_redirects=False,
+                ) as response,
             ):
+                if self._is_redirect_status(response.status):
+                    location = response.headers.get("Location", "<missing>")
+                    self.logger.error(
+                        "Discord notification blocked redirect response: "
+                        f"{response.status} -> {location}"
+                    )
+                    return {
+                        "success": False,
+                        "error": f"Redirect responses are not allowed (HTTP {response.status})",
+                    }
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -777,9 +819,22 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
+                if self._is_redirect_status(response.status):
+                    location = response.headers.get("Location", "<missing>")
+                    self.logger.error(
+                        f"Webhook notification blocked redirect response: {response.status} -> {location}"
+                    )
+                    return {
+                        "success": False,
+                        "error": f"Redirect responses are not allowed (HTTP {response.status})",
+                    }
                 if 200 <= response.status < 300:
                     self.logger.info(f"Webhook notification sent successfully: {response.status}")
                     return {"success": True, "status_code": response.status}
