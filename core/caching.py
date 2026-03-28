@@ -431,13 +431,15 @@ class CacheManager:
 
         # Add positional args
         if args:
-            args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            args_str = json.dumps(args, sort_keys=True, default=str, separators=(",", ":"))
+            # Use a collision-resistant digest to reduce cache-poisoning risk
+            # when untrusted input contributes to cache key material.
+            key_parts.append(hashlib.sha256(args_str.encode("utf-8")).hexdigest())
 
         # Add keyword args
         if kwargs:
-            kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            kwargs_str = json.dumps(kwargs, sort_keys=True, default=str, separators=(",", ":"))
+            key_parts.append(hashlib.sha256(kwargs_str.encode("utf-8")).hexdigest())
 
         return ":".join(key_parts)
 

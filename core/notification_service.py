@@ -4,12 +4,14 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -526,14 +528,19 @@ System status: {{ system_status }}
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
         email_config = self.config.get("email", {})
+        recipients = [
+            recipient.strip()
+            for recipient in email_config.get("recipients", [])
+            if isinstance(recipient, str) and recipient.strip()
+        ]
 
-        if not email_config.get("smtp_server") or not email_config.get("recipients"):
+        if not email_config.get("smtp_server") or not recipients:
             return {"success": False, "error": "Email not configured"}
 
         try:
             msg = MIMEMultipart("alternative")
             msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
+            msg["To"] = ", ".join(recipients)
             msg["Subject"] = message.title
 
             # Set priority
@@ -553,8 +560,8 @@ System status: {{ system_status }}
             msg.attach(MIMEText(text_content, "plain"))
 
             # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
-            msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
+            escaped_html = html.escape(text_content).replace("\n", "<br>")
+            msg.attach(MIMEText(f"<html><body><pre>{escaped_html}</pre></body></html>", "html"))
 
             # Add attachments
             if message.attachments:
@@ -571,21 +578,25 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            server = smtplib.SMTP(
+                email_config["smtp_server"], email_config.get("port", 587), timeout=30
+            )
+            server.ehlo()
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
 
-            server.send_message(msg)
+            server.send_message(msg, to_addrs=recipients)
             server.quit()
 
             self.logger.info(
-                f"Email notification sent to {len(email_config['recipients'])} recipients"
+                f"Email notification sent to {len(recipients)} recipients"
             )
-            return {"success": True, "recipients": len(email_config["recipients"])}
+            return {"success": True, "recipients": len(recipients)}
 
         except Exception as e:
             self.logger.error(f"Failed to send email notification: {e}")
