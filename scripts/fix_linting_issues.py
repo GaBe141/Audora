@@ -1,8 +1,11 @@
 """
-Automated Fix Script for Audora Codebase Issues
-Fixes type hints, imports, and code quality issues identified by linters.
+Automated Fix Script for Audora code quality tasks.
+
+Security note:
+Commands are executed without `shell=True` to avoid shell injection risks.
 """
 
+import shlex
 import subprocess
 
 
@@ -13,11 +16,17 @@ def print_step(step_num: int, description: str):
     print(f"{'='*60}")
 
 
-def run_command(cmd: str, description: str) -> bool:
-    """Run a command and return success status."""
+def run_command(cmd: str | list[str], description: str) -> bool:
+    """Run a command and return success status.
+
+    Args:
+        cmd: Command as a string (split safely with shlex) or list of args.
+        description: Human-readable command description.
+    """
     print(f"  → {description}")
     try:
-        subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+        command_args = shlex.split(cmd) if isinstance(cmd, str) else cmd
+        subprocess.run(command_args, check=True, capture_output=True, text=True)
         print("  ✅ Success")
         return True
     except subprocess.CalledProcessError as e:
