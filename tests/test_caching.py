@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import hmac
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,40 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSecurity:
+    """Security-focused tests for Redis serialization behavior."""
+
+    def _backend(self) -> RedisCacheBackend:
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key-123"
+        return backend
+
+    def test_json_envelope_roundtrip(self):
+        backend = self._backend()
+        value = {"track": "Song", "score": 98.5, "tags": ["viral", "new"], "active": True}
+        encoded = backend._serialize(value)
+        decoded = backend._deserialize(encoded)
+        assert decoded == value
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._backend()
+        legacy_payload = "gASVBwAAAAAAAABdlCiMAWGUhZQu"
+        signature = hmac.new(
+            backend._signing_key, legacy_payload.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": legacy_payload,
+        }
+        assert backend._deserialize(json.dumps(legacy_envelope).encode("utf-8")) is None
+
+    def test_rejects_tampered_payload_with_invalid_signature(self):
+        backend = self._backend()
+        envelope_bytes = backend._serialize({"safe": "value"})
+        envelope = json.loads(envelope_bytes.decode("utf-8"))
+        envelope["payload"] = '{"safe":"tampered"}'
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
