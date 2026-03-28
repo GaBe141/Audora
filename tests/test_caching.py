@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,53 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_build_cache_key_uses_sha256(self):
+        manager = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+        key = manager._build_cache_key("pref", ("x", 1), {"a": 2})
+        parts = key.split(":")
+        assert parts[0] == "pref"
+        # prefix + args hash + kwargs hash
+        assert len(parts) == 3
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+
+
+class TestRedisCacheBackendSecurity:
+    """Security-focused tests for Redis cache payload handling."""
+
+    def test_deserialize_rejects_invalid_signature(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        payload = b"trusted-bytes"
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "not-a-valid-signature",
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        serialized = json.dumps(envelope).encode("utf-8")
+        assert backend._deserialize(serialized) is None
+
+    def test_deserialize_rejects_invalid_json_payload(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        assert backend._deserialize(b"not-json") is None
+
+    def test_deserialize_rejects_non_pickle_payload_even_with_valid_signature(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        payload = b"definitely-not-a-pickle-stream"
+        sig = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": sig,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        serialized = json.dumps(envelope).encode("utf-8")
+        assert backend._deserialize(serialized) is None
