@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -570,11 +571,13 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
-            # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            if not email_config.get("use_tls", True):
+                return {"success": False, "error": "TLS is required for SMTP notifications"}
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+            # Send email only over TLS to prevent credential/data exposure.
+            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            tls_context = ssl.create_default_context()
+            server.starttls(context=tls_context)
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
