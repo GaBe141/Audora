@@ -12,6 +12,7 @@ import logging
 import os
 import pickle
 import time
+from io import StringIO
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -163,6 +164,7 @@ class RedisCacheBackend(CacheBackend):
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
+        self._allow_pickle = self._read_pickle_policy()
 
         # Test connection
         try:
@@ -186,13 +188,80 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    @staticmethod
+    def _read_pickle_policy() -> bool:
+        """Return whether legacy pickle cache values are explicitly allowed."""
+        return os.getenv("AUDORA_CACHE_ALLOW_PICKLE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _encode_payload(self, value: Any) -> tuple[str, bytes]:
+        """Encode values using safe formats by default.
+
+        Supported safe formats:
+        - JSON-serializable values
+        - pandas.DataFrame via JSON split orientation
+        """
+        if value.__class__.__name__ == "DataFrame":
+            dataframe_json = value.to_json(orient="split", date_format="iso")
+            payload_obj = {"__audora_type__": "dataframe_split_json", "value": dataframe_json}
+            return "json-v2", json.dumps(payload_obj, separators=(",", ":"), ensure_ascii=False).encode(
+                "utf-8"
+            )
+
+        payload_obj = {"__audora_type__": "json", "value": value}
+        try:
+            payload_bytes = json.dumps(
+                payload_obj,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+            return "json-v2", payload_bytes
+        except (TypeError, ValueError):
+            if self._allow_pickle:
+                logger.warning("Using pickle cache payload due to AUDORA_CACHE_ALLOW_PICKLE=true")
+                return "pickle-v1", pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+            raise TypeError(
+                "Cache value is not JSON-serializable. "
+                "Set AUDORA_CACHE_ALLOW_PICKLE=true only if you fully trust your Redis cache."
+            )
+
+    def _decode_json_payload(self, payload: bytes) -> Any | None:
+        """Decode JSON payload used by the secure serializer."""
+        decoded = json.loads(payload.decode("utf-8"))
+
+        if not isinstance(decoded, dict):
+            return decoded
+
+        marker = decoded.get("__audora_type__")
+        if marker == "json":
+            return decoded.get("value")
+        if marker == "dataframe_split_json":
+            dataframe_json = decoded.get("value")
+            if not isinstance(dataframe_json, str):
+                logger.warning("Rejected cache entry with invalid DataFrame payload")
+                return None
+            try:
+                import pandas as pd
+            except ImportError:
+                logger.error("pandas is required to decode cached DataFrame payloads")
+                return None
+            return pd.read_json(StringIO(dataframe_json), orient="split")
+
+        logger.warning("Rejected cache entry with unknown JSON payload marker")
+        return None
+
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload_format, payload = self._encode_payload(value)
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "fmt": payload_format,
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
@@ -202,14 +271,12 @@ class RedisCacheBackend(CacheBackend):
         """Deserialize cache value only after signature verification."""
         try:
             envelope = json.loads(value.decode("utf-8"))
-            if (
-                not isinstance(envelope, dict)
-                or envelope.get("v") != 1
-                or envelope.get("alg") != "HMAC-SHA256"
-                or "sig" not in envelope
-                or "payload" not in envelope
-            ):
+            if not isinstance(envelope, dict):
                 logger.warning("Rejected cache entry with invalid serialization envelope")
+                return None
+
+            if envelope.get("alg") != "HMAC-SHA256" or "sig" not in envelope or "payload" not in envelope:
+                logger.warning("Rejected cache entry with invalid serialization envelope metadata")
                 return None
 
             payload_b64 = envelope["payload"]
@@ -223,7 +290,36 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            envelope_version = envelope.get("v")
+            payload_format = envelope.get("fmt")
+
+            if envelope_version == 2:
+                if payload_format == "json-v2":
+                    return self._decode_json_payload(payload)
+                if payload_format == "pickle-v1":
+                    if not self._allow_pickle:
+                        logger.warning(
+                            "Rejected pickle cache payload. "
+                            "Set AUDORA_CACHE_ALLOW_PICKLE=true only for trusted legacy migrations."
+                        )
+                        return None
+                    return pickle.loads(payload)
+
+                logger.warning("Rejected cache entry with unknown payload format")
+                return None
+
+            # Legacy envelope migration path. Default: reject unsafe pickle payload.
+            if envelope_version == 1:
+                if not self._allow_pickle:
+                    logger.warning(
+                        "Rejected legacy pickle cache entry. "
+                        "Set AUDORA_CACHE_ALLOW_PICKLE=true only if your Redis cache is trusted."
+                    )
+                    return None
+                return pickle.loads(payload)
+
+            logger.warning("Rejected cache entry with unknown envelope version")
+            return None
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -337,7 +433,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (JSON-serializable/DataFrame by default)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +528,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

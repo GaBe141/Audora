@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,52 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheDeserializationPolicy:
+    """Security tests for Redis cache deserialization behavior."""
+
+    @staticmethod
+    def _build_backend(*, allow_pickle: bool) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        backend._allow_pickle = allow_pickle
+        return backend
+
+    @staticmethod
+    def _sign_envelope(
+        signing_key: bytes, payload: bytes, *, version: int, payload_format: str | None
+    ) -> bytes:
+        signature = hmac.new(signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": version,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        if payload_format is not None:
+            envelope["fmt"] = payload_format
+        return json.dumps(envelope).encode("utf-8")
+
+    def test_rejects_signed_pickle_payload_by_default(self):
+        backend = self._build_backend(allow_pickle=False)
+        payload = pickle.dumps({"danger": "blocked"}, protocol=pickle.HIGHEST_PROTOCOL)
+        raw = self._sign_envelope(
+            backend._signing_key, payload, version=2, payload_format="pickle-v1"
+        )
+        assert backend._deserialize(raw) is None
+
+    def test_allows_signed_pickle_payload_when_explicitly_enabled(self):
+        backend = self._build_backend(allow_pickle=True)
+        expected = {"legacy": True}
+        payload = pickle.dumps(expected, protocol=pickle.HIGHEST_PROTOCOL)
+        raw = self._sign_envelope(
+            backend._signing_key, payload, version=2, payload_format="pickle-v1"
+        )
+        assert backend._deserialize(raw) == expected
+
+    def test_rejects_legacy_pickle_envelope_by_default(self):
+        backend = self._build_backend(allow_pickle=False)
+        payload = pickle.dumps({"legacy": "v1"}, protocol=pickle.HIGHEST_PROTOCOL)
+        raw = self._sign_envelope(backend._signing_key, payload, version=1, payload_format=None)
+        assert backend._deserialize(raw) is None

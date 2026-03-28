@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -129,7 +130,11 @@ class EnhancedNotificationService:
                 "username": os.getenv("SMTP_USERNAME", ""),
                 "password": os.getenv("SMTP_PASSWORD", ""),
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
-                "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
+                "recipients": [
+                    recipient.strip()
+                    for recipient in os.getenv("EMAIL_RECIPIENTS", "").split(",")
+                    if recipient.strip()
+                ],
                 "use_tls": True,
             },
             "slack": {
@@ -526,14 +531,19 @@ System status: {{ system_status }}
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
         email_config = self.config.get("email", {})
+        recipients = [
+            recipient.strip()
+            for recipient in email_config.get("recipients", [])
+            if isinstance(recipient, str) and recipient.strip()
+        ]
 
-        if not email_config.get("smtp_server") or not email_config.get("recipients"):
+        if not email_config.get("smtp_server") or not recipients:
             return {"success": False, "error": "Email not configured"}
 
         try:
             msg = MIMEMultipart("alternative")
             msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
+            msg["To"] = ", ".join(recipients)
             msg["Subject"] = message.title
 
             # Set priority
@@ -574,7 +584,8 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                tls_context = ssl.create_default_context()
+                server.starttls(context=tls_context)
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -583,9 +594,9 @@ System status: {{ system_status }}
             server.quit()
 
             self.logger.info(
-                f"Email notification sent to {len(email_config['recipients'])} recipients"
+                f"Email notification sent to {len(recipients)} recipients"
             )
-            return {"success": True, "recipients": len(email_config["recipients"])}
+            return {"success": True, "recipients": len(recipients)}
 
         except Exception as e:
             self.logger.error(f"Failed to send email notification: {e}")
