@@ -4,13 +4,11 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
-import base64
 import hashlib
 import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -187,14 +185,21 @@ class RedisCacheBackend(CacheBackend):
         return os.urandom(32)
 
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+        """Serialize cache value with integrity protection.
+
+        Security note:
+            We intentionally use JSON-only serialization instead of pickle to
+            avoid arbitrary code execution risks during deserialization.
+        """
+        payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        payload_bytes = payload.encode("utf-8")
+        signature = hmac.new(self._signing_key, payload_bytes, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "encoding": "json",
             "sig": signature,
-            "payload": base64.b64encode(payload).decode("ascii"),
+            "payload": payload,
         }
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
@@ -204,7 +209,7 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") not in (1, 2)
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -212,18 +217,27 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid serialization envelope")
                 return None
 
-            payload_b64 = envelope["payload"]
-            if not isinstance(payload_b64, str):
-                logger.warning("Rejected cache entry with non-string payload")
+            # v1 used pickle payloads and is intentionally rejected.
+            if envelope.get("v") == 1:
+                logger.warning("Rejected legacy pickle-based cache entry")
                 return None
 
-            payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
-            expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+            if envelope.get("encoding") != "json":
+                logger.warning("Rejected cache entry with unsupported encoding")
+                return None
+
+            payload_text = envelope["payload"]
+            if not isinstance(payload_text, str):
+                logger.warning("Rejected cache entry with non-text payload")
+                return None
+
+            payload_bytes = payload_text.encode("utf-8")
+            expected_sig = hmac.new(self._signing_key, payload_bytes, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return json.loads(payload_text)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -247,6 +261,10 @@ class RedisCacheBackend(CacheBackend):
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
+        except TypeError as e:
+            logger.error(
+                f"Redis set error for key {key}: value is not JSON-serializable ({e})"
+            )
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 
@@ -337,7 +355,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable for Redis backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
