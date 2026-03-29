@@ -7,14 +7,16 @@ fallback to in-memory caching when Redis is unavailable.
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +180,7 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
+        # Fallback to process-local random key.
         # This keeps the cache safe by default, with only a reduced cross-process hit rate.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
@@ -186,12 +188,43 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _encode_cache_value(self, value: Any) -> dict[str, Any]:
+        """Encode supported values into a JSON-safe payload."""
+        if isinstance(value, pd.DataFrame):
+            return {
+                "kind": "dataframe",
+                "orient": "split",
+                "payload": value.to_json(orient="split", date_format="iso"),
+            }
+
+        # Ensure plain values are JSON-serializable. Unsupported types are rejected.
+        json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        return {"kind": "json", "payload": value}
+
+    def _decode_cache_value(self, encoded: dict[str, Any]) -> Any | None:
+        """Decode JSON-safe payload back to a Python value."""
+        kind = encoded.get("kind")
+        if kind == "json":
+            return encoded.get("payload")
+
+        if kind == "dataframe":
+            payload = encoded.get("payload")
+            orient = encoded.get("orient", "split")
+            if not isinstance(payload, str) or not isinstance(orient, str):
+                logger.warning("Rejected cache entry with invalid DataFrame payload")
+                return None
+            return pd.read_json(io.StringIO(payload), orient=orient)
+
+        logger.warning("Rejected cache entry with unsupported value kind: %s", kind)
+        return None
+
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        encoded = self._encode_cache_value(value)
+        payload = json.dumps(encoded, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
@@ -204,7 +237,7 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -223,7 +256,12 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            decoded_payload = json.loads(payload.decode("utf-8"))
+            if not isinstance(decoded_payload, dict):
+                logger.warning("Rejected cache entry with malformed payload")
+                return None
+
+            return self._decode_cache_value(decoded_payload)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -337,7 +375,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (JSON-serializable or pandas DataFrame for Redis backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
