@@ -1,10 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
 import time
 
-from core.caching import (
-    LocalCacheBackend,
-)
+import pandas as pd
+
+from core.caching import LocalCacheBackend, RedisCacheBackend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +120,50 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis cache payload encoding and signature checks."""
+
+    def test_encode_decode_json_value(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        raw = backend._serialize({"hello": "world", "n": 1})
+        out = backend._deserialize(raw)
+        assert out == {"hello": "world", "n": 1}
+
+    def test_encode_decode_dataframe_value(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        df = pd.DataFrame(
+            {
+                "track": ["a", "b"],
+                "score": [10, 20],
+            }
+        )
+
+        raw = backend._serialize(df)
+        out = backend._deserialize(raw)
+
+        assert isinstance(out, pd.DataFrame)
+        assert out.equals(df)
+
+    def test_rejects_tampered_payload_signature(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        raw = backend._serialize({"safe": True})
+        envelope = json.loads(raw.decode("utf-8"))
+        envelope["payload"]["value"] = {"safe": False}
+        tampered = json.dumps(envelope, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        assert backend._deserialize(tampered) is None
+
+    def test_cache_key_builder_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, "a"), {"x": 2})
+        args_str = json.dumps((1, "a"), sort_keys=True, default=str)
+        kwargs_str = json.dumps({"x": 2}, sort_keys=True, default=str)
+        args_digest = hashlib.sha256(args_str.encode("utf-8")).hexdigest()
+        kwargs_digest = hashlib.sha256(kwargs_str.encode("utf-8")).hexdigest()
+        assert key == f"fn:{args_digest}:{kwargs_digest}"
