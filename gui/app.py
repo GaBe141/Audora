@@ -587,12 +587,18 @@ def export_csv(_n, table_data):
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
     try:
         from core.notification_service import EnhancedNotificationService
+
         svc = EnhancedNotificationService()
         if slack_url:
+            svc._validate_webhook_url(slack_url, allow_private=False)
             svc.config["slack"]["webhook_url"] = slack_url
         if discord_url:
+            svc._validate_webhook_url(discord_url, allow_private=False)
             svc.config["discord"]["webhook_url"] = discord_url
         if webhook_url:
+            svc._validate_webhook_url(
+                webhook_url, allow_private=svc._allow_private_webhooks()
+            )
             svc.config["webhook"]["url"] = webhook_url
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
@@ -600,9 +606,9 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
             svc.config["email"]["port"] = int(smtp_port)
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
-        if smtp_pass:
-            svc.config["email"]["password"] = smtp_pass
         svc.save_config()
+        if smtp_pass:
+            return "Saved (SMTP password is env-only: set SMTP_PASSWORD)"
         return "Saved"
     except Exception as e:
         return f"Error: {e}"

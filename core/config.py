@@ -100,16 +100,13 @@ class SecureConfig:
         """Get AudioDB API configuration with validation."""
         api_key = os.getenv("AUDIODB_API_KEY")
 
-        # AudioDB provides a free API key (123) that everyone can use
-        # Premium keys are longer alphanumeric strings
+        # Require explicit configuration to avoid accidental use of shared defaults.
         if not api_key or api_key in ("your_audiodb_api_key_here", ""):
-            return {"api_key": "123", "tier": "free"}  # Free API key
+            return None
 
-        # Validate premium key format (should be longer than the free key)
-        if len(api_key) > 5:  # Premium keys are longer
-            return {"api_key": api_key, "tier": "premium"}
-
-        return {"api_key": "123", "tier": "free"}  # Default to free
+        # Accept user-provided key as-is; tier is best-effort metadata.
+        tier = "premium" if len(api_key) > 5 else "free"
+        return {"api_key": api_key, "tier": tier}
 
     def _is_valid_lastfm_key(self, key: str) -> bool:
         """Validate Last.fm API key format."""
@@ -168,10 +165,9 @@ SPOTIFY_SCOPES=user-top-read user-read-recently-played playlist-read-private use
 LASTFM_API_KEY=your_lastfm_api_key_here
 LASTFM_SHARED_SECRET=your_lastfm_shared_secret_here
 
-# AudioDB API Configuration (Optional - defaults to free tier)
-# Get premium key from: https://www.theaudiodb.com/ (after creating account)
-# Free tier (123) provides basic access, premium unlocks additional features
-AUDIODB_API_KEY=123
+# AudioDB API Configuration (Optional)
+# Get key from: https://www.theaudiodb.com/ (after creating account)
+AUDIODB_API_KEY=your_audiodb_api_key_here
 
 # Security Notes:
 # - Never commit this file to version control

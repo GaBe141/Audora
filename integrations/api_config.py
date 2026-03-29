@@ -11,6 +11,8 @@ from typing import Any
 
 from core.utils import read_json, write_json
 
+_TRUTHY_VALUES = {"1", "true", "yes", "on"}
+
 
 @dataclass
 class APIConfig:
@@ -45,6 +47,9 @@ class SocialAPIManager:
     def __init__(self, config_file: str = "config/social_apis.json"):
         self.config_file = Path(config_file)
         self.configs: dict[str, APIConfig] = {}
+        self._allow_plaintext_secret_storage = (
+            os.getenv("AUDORA_ALLOW_PLAINTEXT_API_SECRETS", "").strip().lower() in _TRUTHY_VALUES
+        )
         self.load_configs()
 
     def load_configs(self):
@@ -118,11 +123,20 @@ class SocialAPIManager:
         """Save configurations to file using centralized utility."""
         config_data = {}
         for platform, config in self.configs.items():
+            api_key = config.api_key
+            secret_key = config.secret_key
+            access_token = config.access_token
+            refresh_token = config.refresh_token
+            if not self._allow_plaintext_secret_storage:
+                api_key = ""
+                secret_key = ""
+                access_token = ""
+                refresh_token = ""
             config_data[platform] = {
-                "api_key": config.api_key,
-                "secret_key": config.secret_key,
-                "access_token": config.access_token,
-                "refresh_token": config.refresh_token,
+                "api_key": api_key,
+                "secret_key": secret_key,
+                "access_token": access_token,
+                "refresh_token": refresh_token,
                 "requests_per_minute": config.requests_per_minute,
                 "requests_per_hour": config.requests_per_hour,
                 "requests_per_day": config.requests_per_day,
@@ -131,6 +145,12 @@ class SocialAPIManager:
                 "error_count": config.error_count,
             }
 
+        if not self._allow_plaintext_secret_storage:
+            print(
+                "⚠️ API secrets are not persisted to disk by default. "
+                "Use environment variables for credentials. "
+                "Set AUDORA_ALLOW_PLAINTEXT_API_SECRETS=true to override."
+            )
         written_path = write_json(self.config_file, config_data)
         if os.name != "nt":
             os.chmod(written_path, 0o600)

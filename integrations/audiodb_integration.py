@@ -257,13 +257,17 @@ def get_audiodb_client() -> AudioDBAPI:
         # Initialize config manager but don't store unused variable
         SecureConfig()
         # Try to get AudioDB config if available
-        api_key = os.getenv("AUDIODB_API_KEY", "123")  # Default to free key
+        api_key = os.getenv("AUDIODB_API_KEY", "").strip()
+        if not api_key:
+            api_key = "123"  # Public free key fallback for local/demo use
         return AudioDBAPI(api_key)
     except ImportError:
         # Fallback for standalone execution
         import os
 
-        api_key = os.getenv("AUDIODB_API_KEY", "123")  # Default to free key
+        api_key = os.getenv("AUDIODB_API_KEY", "").strip()
+        if not api_key:
+            api_key = "123"  # Public free key fallback for local/demo use
         return AudioDBAPI(api_key)
     except Exception:
         return AudioDBAPI("123")  # Default to free key
