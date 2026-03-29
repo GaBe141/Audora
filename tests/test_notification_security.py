@@ -27,3 +27,57 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    @pytest.mark.asyncio
+    async def test_webhook_post_disables_redirect_following(self, monkeypatch):
+        svc = EnhancedNotificationService()
+        svc.config["webhook"]["url"] = "https://example.com/hook"
+
+        captured: dict[str, object] = {}
+
+        class DummyResponse:
+            status = 200
+
+            async def text(self):
+                return "ok"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class DummySession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, url, **kwargs):
+                captured["url"] = url
+                captured.update(kwargs)
+                return DummyResponse()
+
+        monkeypatch.setattr(
+            "core.notification_service.aiohttp.ClientSession",
+            lambda *args, **kwargs: DummySession(),
+        )
+        monkeypatch.setattr(
+            "core.notification_service.EnhancedNotificationService._validate_webhook_url",
+            lambda self, url, allow_private=False: url,
+        )
+
+        from core.notification_service import NotificationMessage, NotificationPriority
+
+        result = await svc._send_webhook(
+            NotificationMessage(
+                title="test",
+                content="body",
+                priority=NotificationPriority.LOW,
+                channels=[],
+            )
+        )
+
+        assert result["success"] is True
+        assert captured.get("allow_redirects") is False
