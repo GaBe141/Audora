@@ -2,9 +2,7 @@
 
 import time
 
-from core.caching import (
-    LocalCacheBackend,
-)
+from core.caching import CacheManager, LocalCacheBackend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +116,17 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheKeySecurity:
+    """Security-focused tests for deterministic cache key hashing."""
+
+    def test_build_cache_key_uses_sha256_digests(self):
+        backend = LocalCacheBackend(max_size=10)
+        manager = CacheManager(backend=backend)
+        key = manager._build_cache_key("demo", args=("a", 1), kwargs={"x": 2})
+        parts = key.split(":")
+
+        assert parts[0] == "demo"
+        assert len(parts) == 3
+        assert all(len(part) == 64 for part in parts[1:])
