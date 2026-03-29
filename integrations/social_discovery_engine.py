@@ -7,6 +7,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -755,10 +756,20 @@ class SocialMusicDiscoveryEngine:
         return recommendations
 
     def save_discovery_report(self, report: dict[str, Any], filepath: str = None) -> str:
-        """Save discovery report to file using centralized utility."""
+        """Save discovery report to file using centralized utility.
+
+        For security, reject absolute paths and parent traversal segments to
+        prevent writes outside the project directory.
+        """
         if filepath is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filepath = f"data/social_discovery_report_{timestamp}.json"
+        else:
+            requested = Path(filepath)
+            if requested.is_absolute():
+                raise ValueError("Absolute report paths are not allowed")
+            if ".." in requested.parts:
+                raise ValueError("Report path cannot traverse parent directories")
 
         saved_path = write_json(filepath, report)
         return str(saved_path)
