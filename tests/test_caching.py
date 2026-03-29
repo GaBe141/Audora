@@ -3,6 +3,7 @@
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
 )
 
@@ -80,6 +81,15 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+    def test_build_cache_key_uses_sha256_length(self):
+        manager = CacheManager(backend=LocalCacheBackend())
+        key = manager._build_cache_key("fn", (1, "a"), {"b": 2})
+        parts = key.split(":")
+        assert len(parts) == 3
+        # SHA-256 hex digest length
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
 
 
 class TestCachedDecorator:
