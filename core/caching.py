@@ -32,6 +32,11 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
+def _cache_key_digest(value: str) -> str:
+    """Create a deterministic digest for cache key components."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 class CacheBackend:
     """Base cache backend interface."""
 
@@ -432,12 +437,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(_cache_key_digest(args_str))
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(_cache_key_digest(kwargs_str))
 
         return ":".join(key_parts)
 
