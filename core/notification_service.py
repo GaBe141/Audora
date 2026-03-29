@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import ssl
 import socket
 import smtplib
 from dataclasses import dataclass
@@ -131,6 +132,7 @@ class EnhancedNotificationService:
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
                 "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
                 "use_tls": True,
+                "timeout_seconds": 30,
             },
             "slack": {
                 "webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
@@ -262,6 +264,17 @@ class EnhancedNotificationService:
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    def _sanitize_header_value(self, value: str, header_name: str) -> str:
+        """Sanitize email headers to prevent CRLF/header injection."""
+        sanitized = value.replace("\r", "").replace("\n", "").strip()
+        if not sanitized:
+            raise ValueError(f"{header_name} cannot be empty")
+        return sanitized
+
+    def _normalize_recipients(self, recipients: list[str]) -> list[str]:
+        """Normalize recipient list and drop empty entries."""
+        return [recipient.strip() for recipient in recipients if recipient and recipient.strip()]
 
     def _load_templates(self) -> dict[str, str]:
         """Load message templates."""
@@ -526,15 +539,18 @@ System status: {{ system_status }}
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
         email_config = self.config.get("email", {})
+        recipients = self._normalize_recipients(email_config.get("recipients", []))
 
-        if not email_config.get("smtp_server") or not email_config.get("recipients"):
+        if not email_config.get("smtp_server") or not recipients:
             return {"success": False, "error": "Email not configured"}
 
         try:
             msg = MIMEMultipart("alternative")
-            msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
-            msg["Subject"] = message.title
+            msg["From"] = self._sanitize_header_value(
+                email_config.get("from_address", "music-discovery@example.com"), "From address"
+            )
+            msg["To"] = ", ".join(recipients)
+            msg["Subject"] = self._sanitize_header_value(message.title, "Subject")
 
             # Set priority
             if message.priority in [NotificationPriority.HIGH, NotificationPriority.CRITICAL]:
@@ -570,22 +586,25 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
-            # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            # Send email with explicit certificate-verifying TLS context.
+            timeout_seconds = float(email_config.get("timeout_seconds", 30))
+            with smtplib.SMTP(
+                email_config["smtp_server"], email_config.get("port", 587), timeout=timeout_seconds
+            ) as server:
+                server.ehlo()
+                if email_config.get("use_tls", True):
+                    server.starttls(context=ssl.create_default_context())
+                    server.ehlo()
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
-
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
 
             self.logger.info(
-                f"Email notification sent to {len(email_config['recipients'])} recipients"
+                f"Email notification sent to {len(recipients)} recipients"
             )
-            return {"success": True, "recipients": len(email_config["recipients"])}
+            return {"success": True, "recipients": len(recipients)}
 
         except Exception as e:
             self.logger.error(f"Failed to send email notification: {e}")
