@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
 import time
+
+import pandas as pd
+import pandas.testing as pdt
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,47 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSerialization:
+    """Security-focused tests for Redis serialization envelope."""
+
+    @staticmethod
+    def _build_backend() -> RedisCacheBackend:
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_json_round_trip(self):
+        backend = self._build_backend()
+        value = {"artist": "Aurora", "score": 97}
+        serialized = backend._serialize(value)
+        assert backend._deserialize(serialized) == value
+
+    def test_dataframe_round_trip(self):
+        backend = self._build_backend()
+        df = pd.DataFrame([{"track": "Song A", "score": 88}, {"track": "Song B", "score": 91}])
+        serialized = backend._serialize(df)
+        restored = backend._deserialize(serialized)
+        assert isinstance(restored, pd.DataFrame)
+        pdt.assert_frame_equal(restored, df)
+
+    def test_tampered_signature_is_rejected(self):
+        backend = self._build_backend()
+        serialized = backend._serialize({"safe": True})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"] = base64.b64encode(
+            b'{"kind":"json","payload":{"safe":false}}'
+        ).decode("ascii")
+        tampered = json.dumps(envelope).encode("utf-8")
+        assert backend._deserialize(tampered) is None
+
+    def test_legacy_envelope_version_is_rejected(self):
+        backend = self._build_backend()
+        legacy = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "not-used",
+            "payload": base64.b64encode(b"legacy").decode("ascii"),
+        }
+        assert backend._deserialize(json.dumps(legacy).encode("utf-8")) is None
