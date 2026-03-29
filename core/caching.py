@@ -10,7 +10,6 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -187,8 +186,11 @@ class RedisCacheBackend(CacheBackend):
         return os.urandom(32)
 
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value with integrity protection.
+
+        Only JSON-serializable values are accepted for Redis cache entries.
+        """
+        payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
@@ -223,7 +225,7 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return json.loads(payload.decode("utf-8"))
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -247,6 +249,8 @@ class RedisCacheBackend(CacheBackend):
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
+        except TypeError as e:
+            logger.warning(f"Redis cache value for key {key} is not JSON-serializable: {e}")
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 
@@ -337,7 +341,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
