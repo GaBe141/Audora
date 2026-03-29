@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,41 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for Redis JSON-only cache serialization."""
+
+    def _backend(self) -> RedisCacheBackend:
+        # Create instance without network initialization; tests private serializers directly.
+        return RedisCacheBackend.__new__(RedisCacheBackend)
+
+    def test_roundtrip_nested_structures_without_pickle(self):
+        backend = self._backend()
+        value = {
+            "name": "audora",
+            "tuple_value": (1, "x"),
+            "set_value": {"a", "b"},
+            "nested": [{"ok": True}, {"count": 2}],
+        }
+
+        serialized = backend._serialize(value)
+        assert json.loads(serialized.decode("utf-8"))["format"] == "json"
+
+        restored = backend._deserialize(serialized)
+        assert restored["name"] == "audora"
+        assert restored["tuple_value"] == (1, "x")
+        assert restored["set_value"] == {"a", "b"}
+        assert restored["nested"] == [{"ok": True}, {"count": 2}]
+
+    def test_roundtrip_dataframe(self):
+        pd = pytest.importorskip("pandas")
+        backend = self._backend()
+        df = pd.DataFrame({"track": ["Song A", "Song B"], "score": [91.0, 88.5]})
+
+        restored = backend._deserialize(backend._serialize(df))
+        assert restored.equals(df)
+
+    def test_rejects_invalid_envelope(self):
+        backend = self._backend()
+        assert backend._deserialize(b'{"v":1,"payload":{"x":1}}') is None
