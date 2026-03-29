@@ -4,6 +4,7 @@ Fixes type hints, imports, and code quality issues identified by linters.
 """
 
 import subprocess
+import shlex
 
 
 def print_step(step_num: int, description: str):
@@ -13,15 +14,16 @@ def print_step(step_num: int, description: str):
     print(f"{'='*60}")
 
 
-def run_command(cmd: str, description: str) -> bool:
+def run_command(cmd: str | list[str], description: str) -> bool:
     """Run a command and return success status."""
     print(f"  → {description}")
     try:
-        subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+        safe_cmd = shlex.split(cmd) if isinstance(cmd, str) else cmd
+        subprocess.run(safe_cmd, check=True, capture_output=True, text=True)
         print("  ✅ Success")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"  ❌ Failed: {e.stderr}")
+        print(f"  ❌ Failed: {e.stderr or e.stdout}")
         return False
 
 
