@@ -1,8 +1,14 @@
 """Security tests for report output path handling."""
 
 from pathlib import Path
+import sys
 
 import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+INTEGRATIONS_DIR = REPO_ROOT / "integrations"
+if str(INTEGRATIONS_DIR) not in sys.path:
+    sys.path.insert(0, str(INTEGRATIONS_DIR))
 
 from core.main_app import ComprehensiveMusicDiscoveryApp
 from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
