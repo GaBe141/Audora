@@ -4,12 +4,14 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -263,6 +265,49 @@ class EnhancedNotificationService:
             else:
                 base[key] = value
 
+    def _get_allowed_attachment_dirs(self) -> list[Path]:
+        """Return directories allowed for email attachments."""
+        configured_dirs = os.getenv("AUDORA_ALLOWED_ATTACHMENT_DIRS", "").strip()
+        if configured_dirs:
+            dirs = [Path(part.strip()) for part in configured_dirs.split(",") if part.strip()]
+        else:
+            # Restrict attachments to known output directories by default.
+            dirs = [
+                Path("exports"),
+                Path("data/exports"),
+                Path("data/reports"),
+                Path("data/visualizations"),
+            ]
+
+        return [d.resolve() for d in dirs]
+
+    def _validate_attachment_path(self, attachment_path: str) -> Path:
+        """Validate attachment path to avoid sensitive file exfiltration."""
+        resolved_file = Path(attachment_path).resolve()
+        if not resolved_file.exists() or not resolved_file.is_file():
+            raise ValueError(f"Attachment path is invalid or does not exist: {attachment_path}")
+
+        max_size_bytes = int(os.getenv("AUDORA_MAX_ATTACHMENT_BYTES", str(5 * 1024 * 1024)))
+        file_size = resolved_file.stat().st_size
+        if file_size > max_size_bytes:
+            raise ValueError(
+                f"Attachment exceeds size limit ({file_size} > {max_size_bytes} bytes): "
+                f"{resolved_file.name}"
+            )
+
+        allowed_dirs = self._get_allowed_attachment_dirs()
+        is_allowed = any(
+            allowed_dir == resolved_file or allowed_dir in resolved_file.parents
+            for allowed_dir in allowed_dirs
+        )
+        if not is_allowed:
+            raise ValueError(
+                "Attachment path is outside allowed directories. "
+                f"Allowed: {[str(p) for p in allowed_dirs]}"
+            )
+
+        return resolved_file
+
     def _load_templates(self) -> dict[str, str]:
         """Load message templates."""
         return {
@@ -509,9 +554,19 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
-        return f"{content_hash}:{message.priority.value}"
+        fingerprint = {
+            "title": message.title,
+            "content": message.content,
+            "priority": message.priority.value,
+            "channels": sorted(channel.value for channel in message.channels),
+            "data": message.data or {},
+        }
+        digest = hashlib.sha256(
+            json.dumps(fingerprint, sort_keys=True, separators=(",", ":"), default=str).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        return f"{digest}:{message.priority.value}"
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""
@@ -559,28 +614,38 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
+                    try:
+                        validated_attachment = self._validate_attachment_path(attachment_path)
+                        with validated_attachment.open("rb") as f:
                             attachment = MIMEBase("application", "octet-stream")
                             attachment.set_payload(f.read())
                             encoders.encode_base64(attachment)
                             attachment.add_header(
                                 "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
+                                f"attachment; filename= {validated_attachment.name}",
                             )
                             msg.attach(attachment)
+                    except ValueError as e:
+                        self.logger.warning(f"Skipping unsafe attachment '{attachment_path}': {e}")
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            with smtplib.SMTP(
+                email_config["smtp_server"],
+                email_config.get("port", 587),
+                timeout=15,
+            ) as server:
+                server.ehlo()
+                if email_config.get("use_tls", True):
+                    if not server.has_extn("starttls"):
+                        raise ValueError("SMTP server does not support STARTTLS")
+                    tls_context = ssl.create_default_context()
+                    server.starttls(context=tls_context)
+                    server.ehlo()
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
-
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"
@@ -650,7 +715,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +782,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +842,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
