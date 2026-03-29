@@ -600,6 +600,7 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
             svc.config["email"]["port"] = int(smtp_port)
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
+        # Keep SMTP credentials in environment variables only; do not persist to disk.
         if smtp_pass:
             svc.config["email"]["password"] = smtp_pass
         svc.save_config()

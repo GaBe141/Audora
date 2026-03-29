@@ -193,6 +193,16 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        # Never persist secret material to disk.
+        if "email" in to_save and isinstance(to_save["email"], dict):
+            to_save["email"].pop("password", None)
+        if "sms" in to_save and isinstance(to_save["sms"], dict):
+            to_save["sms"].pop("api_key", None)
+            to_save["sms"].pop("api_secret", None)
+        if "webhook" in to_save and isinstance(to_save["webhook"], dict):
+            headers = to_save["webhook"].get("headers")
+            if isinstance(headers, dict):
+                headers.pop("Authorization", None)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
