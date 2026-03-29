@@ -27,3 +27,13 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_rejects_embedded_credentials(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="credentials"):
+            svc._validate_webhook_url("https://user:pass@example.com/webhook")
+
+    def test_rejects_url_fragments(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="fragments"):
+            svc._validate_webhook_url("https://example.com/webhook#internal")

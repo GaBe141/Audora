@@ -532,9 +532,21 @@ class TrendingSchema:
         }
 
     def export_trending_snapshot(self, filepath: str | None = None) -> dict[str, Any]:
-        """Export current trending analysis snapshot."""
+        """Export current trending analysis snapshot.
+
+        For security, restrict custom file paths to project-relative locations
+        and reject absolute / parent-traversal paths.
+        """
         if filepath is None:
             filepath = f"data/trending_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        else:
+            from pathlib import Path
+
+            requested = Path(filepath)
+            if requested.is_absolute():
+                raise ValueError("Absolute snapshot paths are not allowed")
+            if ".." in requested.parts:
+                raise ValueError("Snapshot path cannot traverse parent directories")
 
         snapshot: dict[str, Any] = {
             "timestamp": datetime.now().isoformat(),

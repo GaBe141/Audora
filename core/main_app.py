@@ -5,6 +5,7 @@ Integrates all social media APIs for Gen Z/Alpha music trend analysis.
 
 import asyncio
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -336,18 +337,37 @@ class ComprehensiveMusicDiscoveryApp:
     def save_discovery_report(
         self, discovery_results: dict[str, Any], custom_filename: str | None = None
     ) -> str:
-        """Save comprehensive discovery report."""
+        """Save a discovery report to a constrained reports directory.
+
+        Prevents path traversal / arbitrary file write by forcing reports to be
+        written under data/reports and only accepting a simple filename.
+        """
+        reports_dir = Path("data/reports").resolve()
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
         if custom_filename:
-            filename = custom_filename
+            requested = Path(custom_filename)
+            if requested.is_absolute() or requested.parent != Path("."):
+                raise ValueError(
+                    "Custom report filename must be a simple file name without path components"
+                )
+            safe_name = requested.name
+            if not safe_name:
+                raise ValueError("Custom report filename must not be empty")
+            if not safe_name.lower().endswith(".json"):
+                safe_name = f"{safe_name}.json"
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            safe_name = f"comprehensive_discovery_report_{timestamp}.json"
 
-        filepath = Path(filename)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
+        filepath = (reports_dir / safe_name).resolve()
+        if filepath.parent != reports_dir:
+            raise ValueError("Report output path must remain within data/reports")
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        with filepath.open("w", encoding="utf-8") as f:
             json.dump(discovery_results, f, indent=2, default=str, ensure_ascii=False)
+        if os.name != "nt":
+            os.chmod(filepath, 0o600)
 
         return str(filepath)
 
