@@ -10,7 +10,7 @@ import hmac
 import json
 import logging
 import os
-import pickle
+import pickle  # nosec B403 - guarded deserialization with HMAC signature verification
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -163,6 +163,7 @@ class RedisCacheBackend(CacheBackend):
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
+        self._max_payload_bytes = self._get_max_payload_bytes()
 
         # Test connection
         try:
@@ -185,6 +186,21 @@ class RedisCacheBackend(CacheBackend):
             "Set AUDORA_CACHE_SIGNING_KEY for shared Redis cache across processes."
         )
         return os.urandom(32)
+
+    def _get_max_payload_bytes(self) -> int:
+        """Return maximum accepted decoded payload size to reduce memory DoS risk."""
+        raw_limit = os.getenv("AUDORA_CACHE_MAX_PAYLOAD_BYTES", "5242880").strip()
+        try:
+            parsed = int(raw_limit)
+        except ValueError:
+            logger.warning(
+                "Invalid AUDORA_CACHE_MAX_PAYLOAD_BYTES=%r; using default 5242880 bytes",
+                raw_limit,
+            )
+            parsed = 5 * 1024 * 1024
+
+        # Keep bounds sane even if env var is misconfigured.
+        return min(max(parsed, 1024), 50 * 1024 * 1024)
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
@@ -218,12 +234,19 @@ class RedisCacheBackend(CacheBackend):
                 return None
 
             payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            if len(payload) > self._max_payload_bytes:
+                logger.warning(
+                    "Rejected cache entry exceeding payload limit (%d bytes > %d bytes)",
+                    len(payload),
+                    self._max_payload_bytes,
+                )
+                return None
             expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return pickle.loads(payload)  # nosec B301 - payload integrity verified above
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -432,12 +455,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
