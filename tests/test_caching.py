@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +126,94 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class _DummyRedisClient:
+    """In-memory stand-in for Redis client used in serializer tests."""
+
+    def __init__(self):
+        self._store: dict[str, bytes] = {}
+
+    def ping(self):
+        return True
+
+    def get(self, key: str):
+        return self._store.get(key)
+
+    def set(self, key: str, value: bytes):
+        self._store[key] = value
+        return True
+
+    def setex(self, key: str, _ttl: int, value: bytes):
+        self._store[key] = value
+        return True
+
+    def delete(self, key: str):
+        self._store.pop(key, None)
+        return 1
+
+    def exists(self, key: str):
+        return 1 if key in self._store else 0
+
+    def flushdb(self):
+        self._store.clear()
+        return True
+
+
+class TestRedisCacheBackendSerialization:
+    """Security and compatibility tests for Redis cache serialization."""
+
+    def _build_backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._client = _DummyRedisClient()  # noqa: SLF001
+        backend._signing_key = b"test-signing-key-32-bytes-minimum!"  # noqa: SLF001
+        return backend
+
+    def test_json_round_trip_common_types(self):
+        backend = self._build_backend()
+        value = {
+            "a": [1, "x", True, None],
+            "b": {"nested": 2},
+            "tuple": (1, 2),
+            "set": {3, 4},
+            "date": "2026-03-30",
+            "bytes": b"abc",
+        }
+        payload = backend._serialize(value)  # noqa: SLF001
+        decoded = backend._deserialize(payload)  # noqa: SLF001
+        assert decoded["a"] == value["a"]
+        assert decoded["b"] == value["b"]
+        assert decoded["tuple"] == value["tuple"]
+        assert decoded["set"] == value["set"]
+        assert decoded["bytes"] == value["bytes"]
+
+    def test_dataframe_round_trip(self):
+        backend = self._build_backend()
+        df = pd.DataFrame({"track": ["a", "b"], "score": [90, 80]})
+        payload = backend._serialize(df)  # noqa: SLF001
+        decoded = backend._deserialize(payload)  # noqa: SLF001
+        assert isinstance(decoded, pd.DataFrame)
+        assert decoded.equals(df)
+
+    def test_rejects_tampered_signature(self):
+        backend = self._build_backend()
+        raw = backend._serialize({"safe": True})  # noqa: SLF001
+        envelope = json.loads(raw.decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(tampered) is None  # noqa: SLF001
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._build_backend()
+        malicious_payload = pickle.dumps({"legacy": "pickle"})
+        sig = hmac.new(
+            backend._signing_key, malicious_payload, hashlib.sha256  # noqa: SLF001
+        ).hexdigest()
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": sig,
+            "payload": base64.b64encode(malicious_payload).decode("ascii"),
+        }
+        wire = json.dumps(legacy_envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(wire) is None  # noqa: SLF001
