@@ -424,6 +424,11 @@ class CacheManager:
 
         return decorator
 
+    @staticmethod
+    def _hash_cache_component(value: str) -> str:
+        """Hash cache key components with SHA-256 for collision resistance."""
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
     def _build_cache_key(self, prefix: str, args: tuple, kwargs: dict) -> str:
         """Build cache key from function arguments."""
         # Create deterministic key from args and kwargs
@@ -432,12 +437,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(self._hash_cache_component(args_str))
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(self._hash_cache_component(kwargs_str))
 
         return ":".join(key_parts)
 
