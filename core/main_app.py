@@ -337,13 +337,19 @@ class ComprehensiveMusicDiscoveryApp:
         self, discovery_results: dict[str, Any], custom_filename: str | None = None
     ) -> str:
         """Save comprehensive discovery report."""
+        reports_dir = Path("data/reports").resolve()
         if custom_filename:
-            filename = custom_filename
+            requested_path = Path(custom_filename).expanduser()
+            if requested_path.is_absolute():
+                candidate_path = requested_path.resolve()
+            else:
+                candidate_path = (reports_dir / requested_path).resolve()
+            if reports_dir not in [candidate_path, *candidate_path.parents]:
+                raise ValueError("custom_filename must resolve under data/reports")
+            filepath = candidate_path
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
-
-        filepath = Path(filename)
+            filepath = reports_dir / f"comprehensive_discovery_report_{timestamp}.json"
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
         with open(filepath, "w", encoding="utf-8") as f:

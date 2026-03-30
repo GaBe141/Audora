@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,7 @@ def write_json(
     indent: int = 2,
     ensure_ascii: bool = False,
     create_dirs: bool = True,
+    base_dir: Path | str | None = None,
 ) -> Path:
     """
     Write JSON file safely.
@@ -64,6 +66,7 @@ def write_json(
         indent: JSON indentation level
         ensure_ascii: Whether to escape non-ASCII characters
         create_dirs: Whether to create parent directories
+        base_dir: Optional base directory to constrain writes within
 
     Returns:
         Path object of the written file
@@ -71,7 +74,7 @@ def write_json(
     Raises:
         Exception: If writing fails
     """
-    path = Path(path)
+    path = resolve_path_within_base(path, base_dir) if base_dir is not None else Path(path)
     try:
         if create_dirs:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -84,6 +87,22 @@ def write_json(
     except Exception as e:
         logger.error(f"Failed to write JSON to {path}: {e}")
         raise
+
+
+def resolve_path_within_base(path: Path | str, base_dir: Path | str) -> Path:
+    """Resolve a path and ensure it stays within a trusted base directory."""
+    base = Path(base_dir).resolve()
+    requested = Path(path).expanduser()
+    candidate = requested.resolve() if requested.is_absolute() else (base / requested).resolve()
+
+    if os.name == "nt":
+        if candidate.drive.lower() != base.drive.lower():
+            raise ValueError(f"Path {candidate} is outside allowed directory {base}")
+
+    if base != candidate and base not in candidate.parents:
+        raise ValueError(f"Path {candidate} is outside allowed directory {base}")
+
+    return candidate
 
 
 def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> Path:  # pd.DataFrame

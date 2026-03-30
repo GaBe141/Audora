@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+from core.utils import resolve_path_within_base
 
 
 class NotificationPriority(Enum):
@@ -187,7 +188,8 @@ class EnhancedNotificationService:
         Args:
             path: File path to write the configuration to.
         """
-        config_path = Path(path)
+        config_base_dir = Path("config").resolve()
+        config_path = resolve_path_within_base(path, config_base_dir)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
@@ -199,6 +201,8 @@ class EnhancedNotificationService:
             if os.name != "nt":
                 os.chmod(config_path, 0o600)
             self.logger.info(f"Notification config saved to {config_path}")
+        except ValueError:
+            raise
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
 
@@ -650,7 +654,10 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                # Disable redirects to avoid redirect-based SSRF bypasses.
+                session.post(
+                    webhook_url, json=slack_message, allow_redirects=False
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +724,10 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                # Disable redirects to avoid redirect-based SSRF bypasses.
+                session.post(
+                    webhook_url, json=discord_message, allow_redirects=False
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +787,12 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    # Disable redirects to avoid redirect-based SSRF bypasses.
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
