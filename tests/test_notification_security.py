@@ -27,3 +27,11 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+
+class TestWebhookRedirectPolicy:
+    """Validate redirect behavior for outbound webhooks."""
+
+    def test_redirects_disabled_for_all_webhook_posts(self):
+        svc = EnhancedNotificationService()
+        assert svc._request_redirect_policy() is False
