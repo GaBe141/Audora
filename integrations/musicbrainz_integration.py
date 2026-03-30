@@ -34,7 +34,7 @@ class MusicBrainzAPI:
         params.update({"fmt": "json"})
 
         try:
-            response = self.session.get(f"{BASE_URL}{endpoint}", params=params)
+            response = self.session.get(f"{BASE_URL}{endpoint}", params=params, timeout=15)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
