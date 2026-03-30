@@ -18,6 +18,18 @@ from integrations.lastfm_integration import LastFmAPI
 class TestLastFmAPISuccess:
     """Test successful API responses with mocked session.get."""
 
+    def test_requests_use_https_base_url(self):
+        api = LastFmAPI(api_key="test_key")
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"artists": {"artist": []}}
+
+        with patch.object(api.session, "get", return_value=mock_response) as mocked_get:
+            api.get_top_artists_global(limit=1)
+
+        called_url = mocked_get.call_args.args[0]
+        assert called_url.startswith("https://")
+
     def test_get_top_artists_global_parses_response(self):
         api = LastFmAPI(api_key="test_key")
         mock_response = MagicMock()
