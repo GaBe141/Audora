@@ -233,6 +233,8 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
@@ -650,11 +652,22 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
                     return {"success": True, "status_code": response.status}
+                if 300 <= response.status < 400:
+                    self.logger.error(
+                        "Slack webhook returned redirect (%s); redirects are disallowed",
+                        response.status,
+                    )
+                    return {"success": False, "error": f"Redirect not allowed (HTTP {response.status})"}
                 else:
                     error_text = await response.text()
                     self.logger.error(
@@ -717,11 +730,22 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
                     return {"success": True, "status_code": response.status}
+                if 300 <= response.status < 400:
+                    self.logger.error(
+                        "Discord webhook returned redirect (%s); redirects are disallowed",
+                        response.status,
+                    )
+                    return {"success": False, "error": f"Redirect not allowed (HTTP {response.status})"}
                 else:
                     error_text = await response.text()
                     self.logger.error(
@@ -777,12 +801,22 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
                     self.logger.info(f"Webhook notification sent successfully: {response.status}")
                     return {"success": True, "status_code": response.status}
+                if 300 <= response.status < 400:
+                    self.logger.error(
+                        "Webhook endpoint returned redirect (%s); redirects are disallowed",
+                        response.status,
+                    )
+                    return {"success": False, "error": f"Redirect not allowed (HTTP {response.status})"}
                 else:
                     error_text = await response.text()
                     self.logger.error(
