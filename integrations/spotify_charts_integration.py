@@ -49,7 +49,7 @@ class SpotifyChartsAPI:
         url = f"{CHARTS_BASE_URL}/charts/view/regional-{country_code}-daily/{date}"
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=15)
             response.raise_for_status()
 
             # Parse the HTML
@@ -141,7 +141,7 @@ class SpotifyChartsAPI:
         url = f"{CHARTS_BASE_URL}/charts/view/viral-{country_code}-daily/{date}"
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=15)
             response.raise_for_status()
 
             BeautifulSoup(response.content, "html.parser")
