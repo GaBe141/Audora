@@ -5,6 +5,7 @@ Handles trending data, viral predictions, and cross-platform analysis.
 
 import json
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -73,6 +74,7 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    _ALLOWED_EXPORT_BASE_DIR = Path("exports").resolve()
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
@@ -958,13 +960,28 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
+            # Prevent writing CSV exports outside approved export directory.
+            requested_path = Path(filepath)
+            if not requested_path.suffix:
+                requested_path = requested_path.with_suffix(".csv")
+
+            if not requested_path.is_absolute():
+                requested_path = self._ALLOWED_EXPORT_BASE_DIR / requested_path
+
+            resolved_path = requested_path.resolve()
+            allowed_root = self._ALLOWED_EXPORT_BASE_DIR
+            if not os.path.commonpath([str(allowed_root), str(resolved_path)]) == str(allowed_root):
+                raise ValueError(
+                    f"Export path must be inside {allowed_root}, got: {resolved_path}"
+                )
+
             # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            resolved_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(resolved_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {resolved_path}")
 
-        return filepath
+        return str(resolved_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
