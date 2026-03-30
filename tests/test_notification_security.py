@@ -133,3 +133,76 @@ class TestEmailTlsSecurity:
 
         assert result["success"] is True
         assert result["recipients"] == 2
+
+
+class _DummyResponse:
+    """Simple async response stub for aiohttp posts."""
+
+    def __init__(self, status: int = 200, text: str = "ok"):
+        self.status = status
+        self._text = text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+    async def text(self) -> str:
+        return self._text
+
+
+class _DummySession:
+    """Simple async ClientSession stub that records request kwargs."""
+
+    last_post_kwargs = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+    def post(self, _url, **kwargs):
+        _DummySession.last_post_kwargs = kwargs
+        return _DummyResponse(status=200)
+
+
+class TestWebhookRedirectSecurity:
+    """Ensure outbound webhook calls do not follow redirects."""
+
+    def test_webhook_post_disables_redirects(self):
+        svc = EnhancedNotificationService()
+        svc.config["webhook"]["url"] = "https://example.com/webhook"
+        message = NotificationMessage(
+            title="Webhook Redirect Test",
+            content="Ensure allow_redirects is False",
+            priority=NotificationPriority.LOW,
+            channels=[NotificationChannel.WEBHOOK],
+        )
+
+        with patch("core.notification_service.socket.getaddrinfo", return_value=[(None, None, None, None, ("93.184.216.34", 443))]):
+            with patch("core.notification_service.aiohttp.ClientSession", _DummySession):
+                result = asyncio.run(svc._send_webhook(message))
+
+        assert result["success"] is True
+        assert _DummySession.last_post_kwargs is not None
+        assert _DummySession.last_post_kwargs["allow_redirects"] is False
+
+    def test_slack_post_disables_redirects(self):
+        svc = EnhancedNotificationService()
+        svc.config["slack"]["webhook_url"] = "https://hooks.slack.com/services/test"
+        message = NotificationMessage(
+            title="Slack Redirect Test",
+            content="Ensure allow_redirects is False",
+            priority=NotificationPriority.LOW,
+            channels=[NotificationChannel.SLACK],
+        )
+
+        with patch("core.notification_service.socket.getaddrinfo", return_value=[(None, None, None, None, ("18.205.93.0", 443))]):
+            with patch("core.notification_service.aiohttp.ClientSession", _DummySession):
+                result = asyncio.run(svc._send_slack(message))
+
+        assert result["success"] is True
+        assert _DummySession.last_post_kwargs is not None
+        assert _DummySession.last_post_kwargs["allow_redirects"] is False
