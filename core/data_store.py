@@ -931,6 +931,7 @@ class EnhancedMusicDataStore:
         """Export table data to CSV.
 
         Note: Table name is validated against whitelist to prevent SQL injection.
+        Export path is constrained to data/exports to prevent path traversal.
         """
         # Whitelist valid table names to prevent SQL injection
         valid_tables = {
@@ -958,13 +959,23 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
+            exports_dir = Path("data/exports").resolve()
+            requested_path = Path(filepath).expanduser()
+            if requested_path.is_absolute():
+                output_path = requested_path.resolve()
+            else:
+                output_path = (exports_dir / requested_path).resolve()
+
+            if exports_dir not in [output_path, *output_path.parents]:
+                raise ValueError("filepath must resolve under data/exports")
+
             # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(output_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {output_path}")
 
-        return filepath
+        return str(output_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
