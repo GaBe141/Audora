@@ -11,6 +11,7 @@ import os
 import socket
 import smtplib
 import ssl
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -265,8 +266,9 @@ class EnhancedNotificationService:
         *,
         headers: dict[str, str] | None = None,
         timeout_seconds: int = 30,
+        allow_private: bool = False,
     ) -> tuple[int, str]:
-        """POST JSON with redirects disabled to prevent SSRF bypasses."""
+        """POST JSON with redirects disabled and peer IP checks."""
         timeout_seconds = max(1, min(int(timeout_seconds), 120))
         timeout = aiohttp.ClientTimeout(
             total=timeout_seconds,
@@ -276,7 +278,7 @@ class EnhancedNotificationService:
         )
 
         async with (
-            aiohttp.ClientSession(timeout=timeout) as session,
+            aiohttp.ClientSession(timeout=timeout, trust_env=False) as session,
             session.post(
                 url,
                 json=payload,
@@ -285,6 +287,17 @@ class EnhancedNotificationService:
                 ssl=True,
             ) as response,
         ):
+            peer_ip = None
+            if response.connection and response.connection.transport:
+                peer = response.connection.transport.get_extra_info("peername")
+                if isinstance(peer, tuple) and peer:
+                    peer_ip = peer[0]
+
+            if peer_ip and not allow_private and self._is_restricted_ip(str(peer_ip)):
+                raise ValueError(
+                    "Webhook request connected to a private or restricted network address"
+                )
+
             body_text = await response.text()
             return response.status, body_text
 
@@ -542,9 +555,10 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
-        return f"{content_hash}:{message.priority.value}"
+        # Use deterministic hashing to avoid collisions/manipulation from built-in hash randomization.
+        payload = f"{message.title}:{message.content[:100]}:{message.priority.value}"
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+        return digest
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""
@@ -691,6 +705,7 @@ System status: {{ system_status }}
                 webhook_url,
                 slack_message,
                 timeout_seconds=30,
+                allow_private=False,
             )
             if status_code == 200:
                 self.logger.info("Slack notification sent successfully")
@@ -766,6 +781,7 @@ System status: {{ system_status }}
                 webhook_url,
                 discord_message,
                 timeout_seconds=30,
+                allow_private=False,
             )
             if status_code in [200, 204]:
                 self.logger.info("Discord notification sent successfully")
@@ -833,6 +849,7 @@ System status: {{ system_status }}
                 payload,
                 headers=headers,
                 timeout_seconds=int(timeout),
+                allow_private=self._allow_private_webhooks(),
             )
             if 200 <= status_code < 300:
                 self.logger.info(f"Webhook notification sent successfully: {status_code}")
