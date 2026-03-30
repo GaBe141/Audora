@@ -74,7 +74,7 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
-    _ALLOWED_EXPORT_BASE_DIR = Path("exports").resolve()
+    _ALLOWED_EXPORT_BASE_DIR = Path(__file__).resolve().parent.parent / "exports"
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
