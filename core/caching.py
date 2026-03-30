@@ -11,7 +11,6 @@ import io
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -164,7 +163,6 @@ class RedisCacheBackend(CacheBackend):
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
-        self._allow_pickle = self._is_pickle_enabled()
 
         # Test connection
         try:
@@ -180,28 +178,18 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
-        # This keeps the cache safe by default, with only a reduced cross-process hit rate.
+        # Fallback to process-local random key for signed cache payload validation.
+        # This keeps cache integrity guarantees by default, with reduced cross-process hit rate.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
             "Set AUDORA_CACHE_SIGNING_KEY for shared Redis cache across processes."
         )
         return os.urandom(32)
 
-    def _is_pickle_enabled(self) -> bool:
-        """Whether pickle serialization is explicitly enabled for Redis cache entries."""
-        return os.getenv("AUDORA_CACHE_ALLOW_PICKLE", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection.
 
-        Prefers safe formats (JSON, DataFrame JSON). Pickle is opt-in only via
-        AUDORA_CACHE_ALLOW_PICKLE=1.
+        Supports only safe formats (JSON, DataFrame JSON).
         """
         payload: bytes
         payload_type: str
@@ -218,14 +206,10 @@ class RedisCacheBackend(CacheBackend):
             if pd is not None and isinstance(value, pd.DataFrame):
                 payload = value.to_json(orient="split", date_format="iso").encode("utf-8")
                 payload_type = "pandas_dataframe"
-            elif self._allow_pickle:
-                payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-                payload_type = "pickle"
             else:
                 raise TypeError(
                     "Value is not safely serializable. "
-                    "Use JSON-serializable values, pandas DataFrame, "
-                    "or set AUDORA_CACHE_ALLOW_PICKLE=1."
+                    "Use JSON-serializable values or pandas DataFrame."
                 )
 
         signed_payload = payload_type.encode("utf-8") + b":" + payload
@@ -242,9 +226,7 @@ class RedisCacheBackend(CacheBackend):
     def _deserialize(self, value: bytes) -> Any | None:
         """Deserialize cache value only after signature verification.
 
-        Supports:
-        - v2 envelopes with explicit payload type
-        - legacy v1 envelopes (pickle payload), only when pickle is enabled
+        Supports only v2 envelopes with explicit, safe payload types.
         """
         try:
             envelope = json.loads(value.decode("utf-8"))
@@ -255,12 +237,9 @@ class RedisCacheBackend(CacheBackend):
             version = envelope.get("v")
             if version == 2:
                 payload_type = envelope.get("typ")
-                if payload_type not in {"json", "pandas_dataframe", "pickle"}:
+                if payload_type not in {"json", "pandas_dataframe"}:
                     logger.warning("Rejected cache entry with unsupported payload type")
                     return None
-            elif version == 1:
-                # Legacy envelope format had only signed pickle payload.
-                payload_type = "pickle"
             else:
                 logger.warning("Rejected cache entry with unsupported serialization version")
                 return None
@@ -272,9 +251,6 @@ class RedisCacheBackend(CacheBackend):
 
             payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
             signed_payload = payload_type.encode("utf-8") + b":" + payload
-            if version == 1:
-                # v1 signed only raw payload bytes.
-                signed_payload = payload
             expected_sig = hmac.new(self._signing_key, signed_payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
@@ -289,13 +265,6 @@ class RedisCacheBackend(CacheBackend):
                     logger.error("Cannot deserialize pandas DataFrame cache entry without pandas")
                     return None
                 return pd.read_json(io.StringIO(payload.decode("utf-8")), orient="split")
-            if payload_type == "pickle":
-                if not self._allow_pickle:
-                    logger.warning(
-                        "Rejected pickle cache entry because AUDORA_CACHE_ALLOW_PICKLE is disabled"
-                    )
-                    return None
-                return pickle.loads(payload)
 
             logger.warning("Rejected cache entry with unknown payload type")
             return None
@@ -412,7 +381,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable or DataFrame on Redis backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
