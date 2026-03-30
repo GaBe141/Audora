@@ -4,6 +4,7 @@ Handles API keys, rate limiting, and platform-specific settings.
 """
 
 import os
+from getpass import getpass
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -292,7 +293,7 @@ def setup_api_credentials():
     print("📱 TikTok Research API:")
     print("   Get credentials at: https://developers.tiktok.com/")
     tiktok_key = input("   API Key: ").strip()
-    tiktok_secret = input("   Secret Key: ").strip()
+    tiktok_secret = getpass("   Secret Key (hidden): ").strip()
 
     if tiktok_key:
         manager.set_api_key("tiktok", tiktok_key, tiktok_secret)
@@ -310,7 +311,7 @@ def setup_api_credentials():
     # Twitter
     print("\n🐦 Twitter API v2:")
     print("   Get credentials at: https://developer.twitter.com/")
-    twitter_bearer = input("   Bearer Token: ").strip()
+    twitter_bearer = getpass("   Bearer Token (hidden): ").strip()
 
     if twitter_bearer:
         manager.set_api_key("twitter", access_token=twitter_bearer)
@@ -319,7 +320,7 @@ def setup_api_credentials():
     # Instagram
     print("\n📸 Instagram Basic Display API:")
     print("   Get credentials at: https://developers.facebook.com/")
-    instagram_token = input("   Access Token: ").strip()
+    instagram_token = getpass("   Access Token (hidden): ").strip()
 
     if instagram_token:
         manager.set_api_key("instagram", access_token=instagram_token)
@@ -329,7 +330,7 @@ def setup_api_credentials():
     print("\n🤖 Reddit API:")
     print("   Get credentials at: https://www.reddit.com/prefs/apps")
     reddit_key = input("   Client ID: ").strip()
-    reddit_secret = input("   Client Secret: ").strip()
+    reddit_secret = getpass("   Client Secret (hidden): ").strip()
 
     if reddit_key:
         manager.set_api_key("reddit", reddit_key, reddit_secret)
@@ -339,7 +340,7 @@ def setup_api_credentials():
     print("\n📝 Tumblr API:")
     print("   Get credentials at: https://www.tumblr.com/oauth/apps")
     tumblr_key = input("   Consumer Key: ").strip()
-    tumblr_secret = input("   Consumer Secret: ").strip()
+    tumblr_secret = getpass("   Consumer Secret (hidden): ").strip()
 
     if tumblr_key:
         manager.set_api_key("tumblr", tumblr_key, tumblr_secret)
