@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import hmac
+import json
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,60 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSerializationSecurity:
+    """Security-focused tests for Redis cache serialization."""
+
+    def _backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_roundtrip_supported_payload(self):
+        backend = self._backend()
+        original = {
+            "artist": "Daft Punk",
+            "count": 3,
+            "flags": ["featured", "cached"],
+            "extra": {"bytes": b"abc", "tuple": (1, "x")},
+        }
+
+        serialized = backend._serialize(original)
+        restored = backend._deserialize(serialized)
+
+        assert restored == original
+
+    def test_rejects_tampered_signature(self):
+        backend = self._backend()
+        serialized = backend._serialize({"safe": True})
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        envelope["payload"] = json.dumps({"safe": False})
+        tampered = json.dumps(envelope).encode("utf-8")
+
+        assert backend._deserialize(tampered) is None
+
+    def test_rejects_legacy_envelope_version(self):
+        backend = self._backend()
+        legacy_payload = json.dumps({"safe": True}, separators=(",", ":"))
+        legacy_sig = hmac.new(
+            backend._signing_key, legacy_payload.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": legacy_sig,
+            "payload": legacy_payload,
+        }
+
+        assert backend._deserialize(json.dumps(legacy_envelope).encode("utf-8")) is None
+
+    def test_rejects_unsupported_object_types(self):
+        backend = self._backend()
+
+        class UnsafeObject:
+            pass
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            backend._serialize(UnsafeObject())
