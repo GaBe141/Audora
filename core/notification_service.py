@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -131,6 +132,8 @@ class EnhancedNotificationService:
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
                 "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
                 "use_tls": True,
+                "verify_tls": os.getenv("SMTP_VERIFY_TLS", "true").strip().lower()
+                in {"1", "true", "yes", "on"},
             },
             "slack": {
                 "webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
@@ -574,7 +577,16 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                verify_tls = bool(email_config.get("verify_tls", True))
+                if verify_tls:
+                    # Use verified TLS context to prevent MITM on SMTP connections.
+                    tls_context = ssl.create_default_context()
+                    server.starttls(context=tls_context)
+                else:
+                    self.logger.warning(
+                        "SMTP TLS certificate verification is disabled for this notification service"
+                    )
+                    server.starttls()
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
