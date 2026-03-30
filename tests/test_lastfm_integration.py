@@ -12,7 +12,7 @@ if "integrations.config" not in sys.modules:
     sys.modules["integrations.config"] = _config_mock
 
 from core.exceptions import APIConnectionError, APIResponseError
-from integrations.lastfm_integration import LastFmAPI
+from integrations.lastfm_integration import BASE_URL, LastFmAPI
 
 
 class TestLastFmAPISuccess:
@@ -89,3 +89,22 @@ class TestLastFmAPIErrorHandling:
         with patch.object(api.session, "get", return_value=mock_response):
             with pytest.raises(APIConnectionError, match="429"):
                 api.get_top_artists_global(limit=5)
+
+
+class TestLastFmAPITransportSecurity:
+    """Ensure Last.fm requests use encrypted transport."""
+
+    def test_base_url_uses_https(self):
+        assert BASE_URL.startswith("https://")
+
+    def test_requests_are_sent_to_https_endpoint(self):
+        api = LastFmAPI(api_key="test_key")
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"artists": {"artist": []}}
+
+        with patch.object(api.session, "get", return_value=mock_response) as mock_get:
+            api.get_top_artists_global(limit=1)
+
+        called_url = mock_get.call_args.args[0]
+        assert called_url.startswith("https://")
