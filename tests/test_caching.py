@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,45 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerializationSecurity:
+    """Security tests for Redis cache envelope serialization."""
+
+    def _build_backend(self) -> RedisCacheBackend:
+        # Bypass __init__ (which requires a live Redis connection) and set signing key directly.
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_round_trip_json_payload(self):
+        backend = self._build_backend()
+        original = {"track": "Song A", "score": 91.5, "tags": ["viral", "rising"]}
+
+        encoded = backend._serialize(original)
+        decoded = backend._deserialize(encoded)
+
+        assert decoded == original
+
+    def test_rejects_legacy_pickle_envelope_version(self):
+        backend = self._build_backend()
+        payload = b"not-json-pickle-payload"
+        sig = "deadbeef"
+        legacy_envelope = {
+            "v": 1,  # legacy format should be rejected
+            "alg": "HMAC-SHA256",
+            "sig": sig,
+            "payload": json.dumps(payload.decode("utf-8", errors="ignore")),
+        }
+
+        encoded = json.dumps(legacy_envelope).encode("utf-8")
+        assert backend._deserialize(encoded) is None
+
+    def test_rejects_tampered_signature(self):
+        backend = self._build_backend()
+        encoded = backend._serialize({"safe": True})
+        envelope = json.loads(encoded.decode("utf-8"))
+        envelope["sig"] = "0" * 64
+
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(tampered) is None

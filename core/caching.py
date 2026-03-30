@@ -10,7 +10,6 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -186,12 +185,87 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _to_serializable(self, value: Any) -> Any:
+        """Convert a Python value into a JSON-safe structure."""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+
+        if isinstance(value, list):
+            return [self._to_serializable(item) for item in value]
+
+        if isinstance(value, tuple):
+            return {
+                "__audora_type__": "tuple",
+                "items": [self._to_serializable(item) for item in value],
+            }
+
+        if isinstance(value, dict):
+            if not all(isinstance(key, str) for key in value):
+                raise TypeError("Redis cache only supports dictionaries with string keys")
+            return {key: self._to_serializable(item) for key, item in value.items()}
+
+        # Optional support for DataFrame payloads commonly cached by data_store.
+        try:
+            import pandas as pd  # type: ignore[import-untyped]
+
+            if isinstance(value, pd.DataFrame):
+                return {
+                    "__audora_type__": "dataframe",
+                    "value": json.loads(value.to_json(orient="split", date_format="iso")),
+                }
+        except ImportError:
+            pass
+
+        raise TypeError(f"Unsupported cache value type for Redis backend: {type(value).__name__}")
+
+    def _from_serializable(self, value: Any) -> Any:
+        """Restore Python values from JSON-safe structures."""
+        if isinstance(value, list):
+            return [self._from_serializable(item) for item in value]
+
+        if isinstance(value, dict):
+            marker = value.get("__audora_type__")
+            if marker == "tuple":
+                items = value.get("items", [])
+                if isinstance(items, list):
+                    return tuple(self._from_serializable(item) for item in items)
+                return tuple()
+            if marker == "dataframe":
+                try:
+                    import pandas as pd  # type: ignore[import-untyped]
+
+                    frame_payload = value.get("value")
+                    if not isinstance(frame_payload, dict):
+                        return None
+                    return pd.DataFrame(
+                        data=frame_payload.get("data", []),
+                        columns=frame_payload.get("columns", []),
+                        index=frame_payload.get("index", []),
+                    )
+                except ImportError:
+                    return None
+            return {key: self._from_serializable(item) for key, item in value.items()}
+
+        return value
+
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value with integrity protection.
+
+        Security note:
+            Redis payloads are intentionally restricted to JSON-safe values.
+            This avoids code execution risks tied to loading pickled objects.
+        """
+        serializable_value = self._to_serializable(value)
+        payload = json.dumps(
+            serializable_value,
+            separators=(",", ":"),
+            sort_keys=True,
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
@@ -204,12 +278,17 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
             ):
                 logger.warning("Rejected cache entry with invalid serialization envelope")
+                return None
+            if envelope.get("v") != 2:
+                logger.warning(
+                    "Rejected legacy/incompatible cache entry format (v=%s)",
+                    envelope.get("v"),
+                )
                 return None
 
             payload_b64 = envelope["payload"]
@@ -223,7 +302,11 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            deserialized = json.loads(payload.decode("utf-8"))
+            return self._from_serializable(deserialized)
+        except (TypeError, ValueError) as e:
+            logger.error(f"Failed to deserialize cache entry: {e}")
+            return None
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -337,7 +420,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +515,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
