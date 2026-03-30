@@ -1,5 +1,7 @@
 """Security tests for notification webhook URL validation."""
 
+import ssl
+
 import pytest
 
 from core.notification_service import EnhancedNotificationService
@@ -27,3 +29,15 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+
+class TestNotificationTlsContext:
+    """Validate TLS context creation for outbound notifications."""
+
+    def test_create_tls_context_enforces_certificate_validation(self):
+        svc = EnhancedNotificationService()
+        tls_context = svc._create_tls_context()
+
+        assert isinstance(tls_context, ssl.SSLContext)
+        assert tls_context.check_hostname is True
+        assert tls_context.verify_mode == ssl.CERT_REQUIRED

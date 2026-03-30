@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -210,6 +211,13 @@ class EnhancedNotificationService:
             "yes",
             "on",
         }
+
+    def _create_tls_context(self) -> ssl.SSLContext:
+        """Create strict TLS context for outbound SMTP sessions."""
+        tls_context = ssl.create_default_context()
+        tls_context.check_hostname = True
+        tls_context.verify_mode = ssl.CERT_REQUIRED
+        return tls_context
 
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
@@ -574,7 +582,8 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                # Use verified TLS context to prevent silent MITM downgrades.
+                server.starttls(context=self._create_tls_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
