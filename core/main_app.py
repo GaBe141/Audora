@@ -13,6 +13,7 @@ from integrations.api_config import SocialAPIManager
 from integrations.extended_platforms import ExtendedSocialDiscoveryEngine
 from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
 from integrations.trending_schema import TrendingSchema
+from core.utils import write_json
 
 
 class ComprehensiveMusicDiscoveryApp:
@@ -338,18 +339,17 @@ class ComprehensiveMusicDiscoveryApp:
     ) -> str:
         """Save comprehensive discovery report."""
         if custom_filename:
-            filename = custom_filename
+            requested = Path(custom_filename)
+            if requested.is_absolute() or requested.parent != Path("."):
+                raise ValueError("custom_filename must be a file name without path components")
+            filename = requested.name
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            filename = f"comprehensive_discovery_report_{timestamp}.json"
 
-        filepath = Path(filename)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(discovery_results, f, indent=2, default=str, ensure_ascii=False)
-
-        return str(filepath)
+        filepath = Path("data") / filename
+        saved_path = write_json(filepath, discovery_results, ensure_ascii=False)
+        return str(saved_path)
 
     async def run_continuous_monitoring(
         self, interval_hours: int = 4, regions: list[str] | None = None

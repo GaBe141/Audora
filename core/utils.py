@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Re-export for convenience
 try:
@@ -54,6 +55,7 @@ def write_json(
     indent: int = 2,
     ensure_ascii: bool = False,
     create_dirs: bool = True,
+    allowed_base_dir: Path | str | None = None,
 ) -> Path:
     """
     Write JSON file safely.
@@ -71,22 +73,27 @@ def write_json(
     Raises:
         Exception: If writing fails
     """
-    path = Path(path)
+    resolved_path = _resolve_secure_path(path, allowed_base_dir=allowed_base_dir)
     try:
         if create_dirs:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            resolved_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with path.open("w", encoding="utf-8") as fh:
+        with resolved_path.open("w", encoding="utf-8") as fh:
             json.dump(obj, fh, indent=indent, ensure_ascii=ensure_ascii, default=str)
 
-        logger.debug(f"Wrote JSON to {path}")
-        return path
+        logger.debug(f"Wrote JSON to {resolved_path}")
+        return resolved_path
     except Exception as e:
-        logger.error(f"Failed to write JSON to {path}: {e}")
+        logger.error(f"Failed to write JSON to {resolved_path}: {e}")
         raise
 
 
-def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> Path:  # pd.DataFrame
+def save_dataframe(
+    df: Any,
+    filepath: Path | str,
+    create_dirs: bool = True,
+    allowed_base_dir: Path | str | None = None,
+) -> Path:  # pd.DataFrame
     """
     Save DataFrame to CSV with consistent settings.
 
@@ -98,14 +105,14 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    resolved_filepath = _resolve_secure_path(filepath, allowed_base_dir=allowed_base_dir)
 
     if create_dirs:
-        filepath.parent.mkdir(parents=True, exist_ok=True)
+        resolved_filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
-    logger.debug(f"Saved DataFrame to {filepath}")
-    return filepath
+    df.to_csv(resolved_filepath, index=False)
+    logger.debug(f"Saved DataFrame to {resolved_filepath}")
+    return resolved_filepath
 
 
 def get_timestamp_filename(prefix: str = "", suffix: str = "") -> str:
@@ -345,18 +352,52 @@ def save_report(
     if filename is None:
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{timestamp_str}.json"
+    else:
+        requested_name = Path(filename)
+        if requested_name.is_absolute() or requested_name.parent != Path("."):
+            raise ValueError("filename must be a simple file name without path components")
+        filename = requested_name.name
 
     # Create full path
-    output_path = Path(output_dir)
+    output_path = _resolve_secure_path(output_dir, allowed_base_dir=REPO_ROOT)
     output_path.mkdir(parents=True, exist_ok=True)
-    filepath = output_path / filename
+    filepath = _resolve_secure_path(output_path / filename, allowed_base_dir=output_path)
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:
         data = {**data, "timestamp": get_iso_timestamp()}
 
     # Save using write_json
-    write_json(filepath, data)
+    write_json(filepath, data, create_dirs=False, allowed_base_dir=output_path)
     logger.info(f"Saved report to {filepath}")
 
     return filepath
+
+
+def _resolve_secure_path(
+    path: Path | str,
+    allowed_base_dir: Path | str | None = None,
+) -> Path:
+    """Resolve a path and ensure it stays inside an allowed base directory."""
+    base_dir = (
+        Path(allowed_base_dir).resolve()
+        if allowed_base_dir is not None
+        else REPO_ROOT.resolve()
+    )
+    requested_path = Path(path).expanduser()
+    if not requested_path.is_absolute():
+        requested_path = base_dir / requested_path
+    resolved_path = requested_path.resolve()
+
+    if resolved_path != base_dir and base_dir not in resolved_path.parents:
+        raise ValueError(f"Refusing path outside allowed base directory: {resolved_path}")
+
+    return resolved_path
+
+
+def resolve_secure_path(
+    path: Path | str,
+    allowed_base_dir: Path | str | None = None,
+) -> Path:
+    """Public wrapper for secure path resolution."""
+    return _resolve_secure_path(path, allowed_base_dir=allowed_base_dir)

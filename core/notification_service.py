@@ -87,6 +87,7 @@ class EnhancedNotificationService:
 
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
+        self.project_root = Path(__file__).resolve().parent.parent
         self.config = self._load_config(config_file)
         self.sent_notifications: dict[str, Any] = {}
         self.notification_history: list[dict[str, Any]] = []
@@ -112,6 +113,40 @@ class EnhancedNotificationService:
 
         # Notification rules
         self.notification_rules = self._load_notification_rules()
+
+    def _allowed_attachment_dirs(self) -> list[Path]:
+        """Return directories allowed for email attachments."""
+        configured = os.getenv("AUDORA_ALLOWED_ATTACHMENT_DIRS", "").strip()
+        if configured:
+            candidates = [p.strip() for p in configured.split(",") if p.strip()]
+            allowed: list[Path] = []
+            for candidate in candidates:
+                path = Path(candidate).expanduser()
+                if not path.is_absolute():
+                    path = self.project_root / path
+                allowed.append(path.resolve())
+            return allowed
+
+        default_dirs = [
+            self.project_root / "data",
+            self.project_root / "exports",
+            self.project_root / "reports",
+            self.project_root / "demo_visualizations",
+        ]
+        return [p.resolve() for p in default_dirs]
+
+    def _resolve_allowed_attachment_path(self, attachment_path: str) -> Path:
+        """Resolve and validate an attachment path to avoid local file exfiltration."""
+        candidate = Path(attachment_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.project_root / candidate
+        resolved = candidate.resolve()
+
+        for allowed_dir in self._allowed_attachment_dirs():
+            if resolved == allowed_dir or allowed_dir in resolved.parents:
+                return resolved
+
+        raise ValueError(f"Attachment path is outside allowed directories: {resolved}")
 
     def _load_config(self, config_file: str | None) -> dict[str, Any]:
         """Load notification configuration."""
@@ -559,14 +594,20 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
+                    try:
+                        resolved_attachment = self._resolve_allowed_attachment_path(attachment_path)
+                    except ValueError as err:
+                        self.logger.warning(f"Skipping disallowed attachment: {err}")
+                        continue
+
+                    if resolved_attachment.exists():
+                        with resolved_attachment.open("rb") as f:
                             attachment = MIMEBase("application", "octet-stream")
                             attachment.set_payload(f.read())
                             encoders.encode_base64(attachment)
                             attachment.add_header(
                                 "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
+                                f"attachment; filename= {resolved_attachment.name}",
                             )
                             msg.attach(attachment)
 
