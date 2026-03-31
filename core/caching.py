@@ -10,7 +10,6 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -186,13 +185,26 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
-    def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    def _serialize(self, value: Any) -> bytes | None:
+        """Serialize cache value with integrity protection.
+
+        Security posture:
+        - Safe-by-default JSON serialization only.
+        - Non-JSON values are skipped instead of using unsafe deserialization formats.
+        """
+        try:
+            payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        except (TypeError, ValueError):
+            logger.warning(
+                "Skipping Redis cache write for non-JSON-serializable value."
+            )
+            return None
+
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "ser": "json",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
@@ -202,14 +214,21 @@ class RedisCacheBackend(CacheBackend):
         """Deserialize cache value only after signature verification."""
         try:
             envelope = json.loads(value.decode("utf-8"))
-            if (
-                not isinstance(envelope, dict)
-                or envelope.get("v") != 1
-                or envelope.get("alg") != "HMAC-SHA256"
-                or "sig" not in envelope
-                or "payload" not in envelope
-            ):
+            if not isinstance(envelope, dict) or envelope.get("alg") != "HMAC-SHA256":
                 logger.warning("Rejected cache entry with invalid serialization envelope")
+                return None
+
+            if "sig" not in envelope or "payload" not in envelope:
+                logger.warning("Rejected cache entry with invalid serialization envelope")
+                return None
+
+            if envelope.get("v") != 2 or envelope.get("ser") != "json":
+                # Reject legacy formats (including historical pickle payloads).
+                logger.warning("Rejected cache entry with unsupported serialization version")
+                return None
+
+            if envelope.get("ser") != "json":
+                logger.warning("Rejected cache entry with unsupported serializer")
                 return None
 
             payload_b64 = envelope["payload"]
@@ -223,7 +242,7 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return json.loads(payload.decode("utf-8"))
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -243,6 +262,8 @@ class RedisCacheBackend(CacheBackend):
         """Set value in cache with optional TTL."""
         try:
             serialized = self._serialize(value)
+            if serialized is None:
+                return
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
@@ -432,12 +453,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
