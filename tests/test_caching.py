@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,42 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSerialization:
+    """Tests for secure Redis payload serialization helpers."""
+
+    @pytest.fixture
+    def redis_backend(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_serializes_json_native_values(self, redis_backend):
+        payload = redis_backend._serialize_payload({"a": 1, "b": [1, 2, 3], "ok": True})
+        assert payload["t"] == "json"
+        assert payload["v"]["a"] == 1
+
+    def test_serializes_and_deserializes_dataframe(self, redis_backend):
+        df = pd.DataFrame({"artist": ["A", "B"], "score": [91.2, 87.5]})
+        payload = redis_backend._serialize_payload(df)
+        assert payload["t"] == "pd.DataFrame"
+        restored = redis_backend._deserialize_payload(payload)
+        pd.testing.assert_frame_equal(restored, df)
+
+    def test_rejects_unsupported_types(self, redis_backend):
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            redis_backend._serialize_payload(set([1, 2, 3]))
+
+    def test_rejects_legacy_pickle_envelope_version(self, redis_backend):
+        legacy_payload = b"legacy-pickle-bytes"
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "deadbeef",
+            "payload": base64.b64encode(legacy_payload).decode("ascii"),
+        }
+        encoded = b'{"v":1,"alg":"HMAC-SHA256","sig":"deadbeef","payload":"%s"}' % envelope[
+            "payload"
+        ].encode("ascii")
+        assert redis_backend._deserialize(encoded) is None

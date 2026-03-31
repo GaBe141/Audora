@@ -13,6 +13,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from gui.app import app  # noqa: E402
+from gui.app import configure_security_from_env  # noqa: E402
 
 if __name__ == "__main__":
+    configure_security_from_env(app)
     app.run(host="127.0.0.1", port=8050, debug=False)

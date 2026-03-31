@@ -5,14 +5,17 @@ Includes live trend dashboard, history search, notification settings, and accura
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Callable
 
 import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import Response, request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -23,6 +26,75 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Audora",
 )
+_AUTH_CONFIGURED = False
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _unauthorized() -> Response:
+    return Response(
+        "Authentication required.",
+        401,
+        {"WWW-Authenticate": 'Basic realm="Audora GUI"'},
+    )
+
+
+def _basic_auth_checker(username: str, password: str) -> Callable[[], Response | None]:
+    """Create a request checker that enforces HTTP basic auth."""
+    import base64
+    import hmac
+
+    def _check_request() -> Response | None:
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Basic "):
+            return _unauthorized()
+
+        try:
+            decoded = base64.b64decode(auth_header.split(" ", 1)[1]).decode("utf-8")
+            provided_user, provided_password = decoded.split(":", 1)
+        except Exception:
+            return _unauthorized()
+
+        if not (
+            hmac.compare_digest(provided_user, username)
+            and hmac.compare_digest(provided_password, password)
+        ):
+            return _unauthorized()
+        return None
+
+    return _check_request
+
+
+def configure_security_from_env(dash_app: dash.Dash) -> dict[str, str]:
+    """Configure GUI auth from env and return effective security mode."""
+    global _AUTH_CONFIGURED
+    if _AUTH_CONFIGURED:
+        return {"mode": "already_configured"}
+
+    if _bool_env("AUDORA_GUI_DISABLE_AUTH", default=False):
+        _AUTH_CONFIGURED = True
+        return {"mode": "disabled"}
+
+    username = os.getenv("AUDORA_GUI_USERNAME", "audora").strip() or "audora"
+    password = os.getenv("AUDORA_GUI_PASSWORD", "").strip()
+    if not password:
+        # Secure default: if no password is supplied, use a temporary random one.
+        import secrets
+
+        password = secrets.token_urlsafe(24)
+        print(
+            "AUDORA GUI basic auth enabled with generated credentials. "
+            f"Username: {username} Password: {password}"
+        )
+
+    dash_app.server.before_request(_basic_auth_checker(username, password))
+    _AUTH_CONFIGURED = True
+    return {"mode": "basic_auth", "username": username}
 
 # ---------------------------------------------------------------------------
 # Layout helpers
@@ -539,9 +611,9 @@ def search_history(_n, platform, min_score, days, artist_filter):
         if drop_col in df.columns:
             df = df.drop(columns=[drop_col])
 
-    # Optional artist filter (client-side simple substring)
+    # Optional artist filter (client-side literal substring, not regex)
     if artist_filter:
-        mask = df["artist"].str.contains(artist_filter, case=False, na=False)
+        mask = df["artist"].str.contains(artist_filter, case=False, na=False, regex=False)
         df = df[mask]
 
     # Round score

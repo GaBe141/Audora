@@ -10,8 +10,8 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
+from io import StringIO
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -188,10 +188,11 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload_object = self._serialize_payload(value)
+        payload = json.dumps(payload_object, separators=(",", ":"), sort_keys=True).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
@@ -204,7 +205,7 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -223,10 +224,59 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            payload_object = json.loads(payload.decode("utf-8"))
+            return self._deserialize_payload(payload_object)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
+
+    def _serialize_payload(self, value: Any) -> dict[str, Any]:
+        """Convert Python values into a safe JSON payload wrapper."""
+        # Fast path for JSON-native values.
+        if value is None or isinstance(value, (str, int, float, bool, list, dict)):
+            try:
+                json.dumps(value)
+                return {"t": "json", "v": value}
+            except TypeError:
+                pass
+
+        # DataFrame/Series are common cache values for this project.
+        try:
+            import pandas as pd
+        except Exception:
+            pd = None
+        if pd is not None:
+            if isinstance(value, pd.DataFrame):
+                return {"t": "pd.DataFrame", "v": value.to_json(orient="split", date_format="iso")}
+            if isinstance(value, pd.Series):
+                return {"t": "pd.Series", "v": value.to_json(date_format="iso")}
+
+        raise TypeError(f"Unsupported cache value type for Redis serialization: {type(value)!r}")
+
+    def _deserialize_payload(self, payload_object: Any) -> Any:
+        """Restore Python values from a safe JSON payload wrapper."""
+        if not isinstance(payload_object, dict):
+            raise ValueError("Invalid serialized payload format")
+
+        payload_type = payload_object.get("t")
+        payload_value = payload_object.get("v")
+
+        if payload_type == "json":
+            return payload_value
+        if payload_type == "pd.DataFrame":
+            import pandas as pd
+
+            if not isinstance(payload_value, str):
+                raise ValueError("Invalid DataFrame payload")
+            return pd.read_json(StringIO(payload_value), orient="split")
+        if payload_type == "pd.Series":
+            import pandas as pd
+
+            if not isinstance(payload_value, str):
+                raise ValueError("Invalid Series payload")
+            return pd.read_json(StringIO(payload_value), typ="series")
+
+        raise ValueError(f"Unsupported serialized payload type: {payload_type!r}")
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
