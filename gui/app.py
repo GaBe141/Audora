@@ -4,7 +4,11 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
+import base64
+import binascii
+import hmac
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +17,7 @@ import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import Response, request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -23,6 +28,65 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Audora",
 )
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_basic_auth(auth_header: str) -> tuple[str, str] | None:
+    if not auth_header.startswith("Basic "):
+        return None
+    token = auth_header[6:].strip()
+    if not token:
+        return None
+    try:
+        decoded = base64.b64decode(token.encode("ascii"), validate=True).decode("utf-8")
+    except (ValueError, binascii.Error, UnicodeDecodeError):
+        return None
+    if ":" not in decoded:
+        return None
+    username, password = decoded.split(":", 1)
+    return username, password
+
+
+def _auth_challenge() -> Response:
+    return Response(
+        "Authentication required.",
+        401,
+        {"WWW-Authenticate": 'Basic realm="Audora GUI"'},
+    )
+
+
+def _enforce_gui_basic_auth():
+    """Protect the GUI with HTTP Basic Auth when AUDORA_GUI_REQUIRE_AUTH is enabled."""
+    if not _env_flag("AUDORA_GUI_REQUIRE_AUTH", default=False):
+        return None
+
+    expected_user = os.getenv("AUDORA_GUI_USERNAME", "")
+    expected_pass = os.getenv("AUDORA_GUI_PASSWORD", "")
+    if not expected_user or not expected_pass:
+        # Fail closed when auth is explicitly enabled but not configured.
+        return Response("GUI auth is enabled but credentials are not configured.", 503)
+
+    creds = _parse_basic_auth(request.headers.get("Authorization", ""))
+    if creds is None:
+        return _auth_challenge()
+
+    username, password = creds
+    if not (
+        hmac.compare_digest(username, expected_user)
+        and hmac.compare_digest(password, expected_pass)
+    ):
+        return _auth_challenge()
+
+    return None
+
+
+app.server.before_request(_enforce_gui_basic_auth)
 
 # ---------------------------------------------------------------------------
 # Layout helpers
@@ -210,6 +274,11 @@ _settings_tab = dbc.Tab(
             dbc.Col(dbc.Input(id="input-smtp-user", placeholder="username"), width=3),
             dbc.Col(dbc.Input(id="input-smtp-pass", placeholder="password", type="password"), width=3),
         ], className="mb-2"),
+        dbc.FormText(
+            "SMTP password is not saved to config files. Set SMTP_PASSWORD in your environment.",
+            color="warning",
+            className="mb-2",
+        ),
         dbc.Row([
             dbc.Col(
                 dbc.Button("Save Settings", id="btn-save-settings", color="primary"),
@@ -588,6 +657,7 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
     try:
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
+        password_note = ""
         if slack_url:
             svc.config["slack"]["webhook_url"] = slack_url
         if discord_url:
@@ -601,9 +671,10 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
         if smtp_pass:
-            svc.config["email"]["password"] = smtp_pass
+            # Do not persist SMTP passwords in plaintext config files.
+            password_note = " (SMTP password ignored; use SMTP_PASSWORD environment variable)"
         svc.save_config()
-        return "Saved"
+        return f"Saved{password_note}"
     except Exception as e:
         return f"Error: {e}"
 
