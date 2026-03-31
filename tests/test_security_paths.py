@@ -2,11 +2,11 @@
 
 from datetime import datetime
 from pathlib import Path
+import sys
 
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
-from core.main_app import ComprehensiveMusicDiscoveryApp
 from core.utils import resolve_path_within_base, write_json
 from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
 
@@ -43,6 +43,12 @@ def test_social_discovery_report_stays_in_data_dir(tmp_path, monkeypatch):
 
 def test_main_app_report_stays_in_data_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    integrations_dir = Path(__file__).resolve().parent.parent / "integrations"
+    if str(integrations_dir) not in sys.path:
+        sys.path.insert(0, str(integrations_dir))
+
+    from core.main_app import ComprehensiveMusicDiscoveryApp
+
     app = object.__new__(ComprehensiveMusicDiscoveryApp)
     report = {"timestamp": datetime.now().isoformat(), "ok": True}
 
