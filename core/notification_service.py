@@ -4,6 +4,7 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import copy
 import ipaddress
 import json
 import logging
@@ -147,8 +148,8 @@ class EnhancedNotificationService:
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
                 "headers": {
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
                 },
+                "auth_token_env": "WEBHOOK_TOKEN",
                 "timeout": 30,
             },
             "sms": {
@@ -193,6 +194,7 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = self._sanitize_config_for_persistence(to_save)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -201,6 +203,47 @@ class EnhancedNotificationService:
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _sanitize_config_for_persistence(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Return config safe to write to disk without secrets."""
+        sanitized = copy.deepcopy(config)
+
+        # Keep credentials environment-backed; do not persist secret values.
+        if isinstance(sanitized.get("email"), dict):
+            sanitized["email"]["password"] = ""
+
+        if isinstance(sanitized.get("sms"), dict):
+            sanitized["sms"]["api_key"] = ""
+            sanitized["sms"]["api_secret"] = ""
+
+        if isinstance(sanitized.get("webhook"), dict):
+            headers = sanitized["webhook"].get("headers")
+            if isinstance(headers, dict):
+                headers.pop("Authorization", None)
+            sanitized["webhook"].pop("auth_token", None)
+            sanitized["webhook"].pop("token", None)
+
+        return sanitized
+
+    def _build_webhook_headers(self, webhook_config: dict[str, Any]) -> dict[str, str]:
+        """Build webhook headers from config + environment secret token."""
+        raw_headers = webhook_config.get("headers", {"Content-Type": "application/json"})
+        headers: dict[str, str] = {}
+
+        if isinstance(raw_headers, dict):
+            headers = {str(k): str(v) for k, v in raw_headers.items()}
+
+        headers.setdefault("Content-Type", "application/json")
+        # Prevent persisted static Authorization headers from being reused.
+        headers.pop("Authorization", None)
+
+        token_env_name = str(webhook_config.get("auth_token_env", "WEBHOOK_TOKEN") or "").strip()
+        if token_env_name:
+            token = os.getenv(token_env_name, "").strip()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+
+        return headers
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
@@ -771,7 +814,7 @@ System status: {{ system_status }}
                 )
                 payload["formatted_content"] = template.render(**message.template_vars)
 
-            headers = webhook_config.get("headers", {"Content-Type": "application/json"})
+            headers = self._build_webhook_headers(webhook_config)
             timeout = webhook_config.get("timeout", 30)
 
             async with (

@@ -7,10 +7,10 @@ fallback to in-memory caching when Redis is unavailable.
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -178,7 +178,7 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
+        # Fallback to process-local random key for signed payload verification.
         # This keeps the cache safe by default, with only a reduced cross-process hit rate.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
@@ -188,10 +188,11 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload_obj = {"v": 2, "value": self._encode_safe_value(value)}
+        payload = json.dumps(payload_obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
@@ -204,12 +205,12 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
             ):
-                logger.warning("Rejected cache entry with invalid serialization envelope")
+                logger.warning("Rejected cache entry with invalid or legacy serialization envelope")
                 return None
 
             payload_b64 = envelope["payload"]
@@ -223,10 +224,90 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            payload_obj = json.loads(payload.decode("utf-8"))
+            if (
+                not isinstance(payload_obj, dict)
+                or payload_obj.get("v") != 2
+                or "value" not in payload_obj
+            ):
+                logger.warning("Rejected cache entry with invalid payload format")
+                return None
+
+            return self._decode_safe_value(payload_obj["value"])
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
+
+    def _encode_safe_value(self, value: Any) -> dict[str, Any]:
+        """Encode supported cache values into a safe, JSON-only representation."""
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return {"t": "primitive", "v": value}
+
+        if isinstance(value, bytes):
+            return {"t": "bytes_b64", "v": base64.b64encode(value).decode("ascii")}
+
+        if isinstance(value, list):
+            return {"t": "list", "v": [self._encode_safe_value(item) for item in value]}
+
+        if isinstance(value, tuple):
+            return {"t": "tuple", "v": [self._encode_safe_value(item) for item in value]}
+
+        if isinstance(value, dict):
+            encoded_dict: dict[str, Any] = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise TypeError("Redis cache only supports dictionaries with string keys")
+                encoded_dict[key] = self._encode_safe_value(item)
+            return {"t": "dict", "v": encoded_dict}
+
+        value_cls = value.__class__
+        if value_cls.__name__ == "DataFrame" and value_cls.__module__.startswith("pandas"):
+            return {
+                "t": "pandas_dataframe_split",
+                "v": value.to_json(orient="split", date_format="iso"),
+            }
+
+        raise TypeError(f"Unsupported cache value type for Redis backend: {value_cls.__name__}")
+
+    def _decode_safe_value(self, encoded: Any) -> Any:
+        """Decode values created by _encode_safe_value."""
+        if not isinstance(encoded, dict) or "t" not in encoded:
+            raise ValueError("Encoded cache value is malformed")
+
+        value_type = encoded["t"]
+        raw_value = encoded.get("v")
+
+        if value_type == "primitive":
+            return raw_value
+
+        if value_type == "bytes_b64":
+            if not isinstance(raw_value, str):
+                raise ValueError("Encoded bytes cache value is malformed")
+            return base64.b64decode(raw_value.encode("ascii"), validate=True)
+
+        if value_type == "list":
+            if not isinstance(raw_value, list):
+                raise ValueError("Encoded list cache value is malformed")
+            return [self._decode_safe_value(item) for item in raw_value]
+
+        if value_type == "tuple":
+            if not isinstance(raw_value, list):
+                raise ValueError("Encoded tuple cache value is malformed")
+            return tuple(self._decode_safe_value(item) for item in raw_value)
+
+        if value_type == "dict":
+            if not isinstance(raw_value, dict):
+                raise ValueError("Encoded dict cache value is malformed")
+            return {key: self._decode_safe_value(item) for key, item in raw_value.items()}
+
+        if value_type == "pandas_dataframe_split":
+            if not isinstance(raw_value, str):
+                raise ValueError("Encoded DataFrame cache value is malformed")
+            import pandas as pd
+
+            return pd.read_json(io.StringIO(raw_value), orient="split")
+
+        raise ValueError(f"Unsupported encoded cache value type: {value_type}")
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
@@ -337,7 +418,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-safe/encodable for backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +513,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

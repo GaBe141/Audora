@@ -601,8 +601,11 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
         if smtp_pass:
+            # Keep secrets in environment variables rather than persisting to disk.
             svc.config["email"]["password"] = smtp_pass
         svc.save_config()
+        if smtp_pass:
+            return "Saved (SMTP password remains runtime-only; not persisted to file)"
         return "Saved"
     except Exception as e:
         return f"Error: {e}"
