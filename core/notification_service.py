@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -70,6 +71,45 @@ class NotificationMessage:
     data: dict[str, Any] | None = None
     attachments: list[str] | None = None
     template_vars: dict[str, Any] | None = None
+
+
+class _RestrictedAddressResolver(aiohttp.abc.AbstractResolver):
+    """Resolver that blocks private/restricted IPs at connection time.
+
+    This prevents DNS-rebinding style bypasses where hostname validation passes,
+    but the final connection resolves to a private address.
+    """
+
+    def __init__(
+        self,
+        *,
+        allow_private: bool,
+        is_restricted_ip: Callable[[str], bool],
+    ) -> None:
+        self._allow_private = allow_private
+        self._is_restricted_ip = is_restricted_ip
+        self._resolver = aiohttp.resolver.DefaultResolver()
+
+    async def resolve(
+        self,
+        host: str,
+        port: int = 0,
+        family: int = socket.AF_INET,
+    ) -> list[dict[str, Any]]:
+        records = await self._resolver.resolve(host, port, family=family)
+
+        if not self._allow_private:
+            for record in records:
+                ip = str(record.get("host", ""))
+                if self._is_restricted_ip(ip):
+                    raise ValueError(
+                        "Webhook URL resolves to a private or restricted network address"
+                    )
+
+        return records
+
+    async def close(self) -> None:
+        await self._resolver.close()
 
 
 class EnhancedNotificationService:
@@ -226,6 +266,30 @@ class EnhancedNotificationService:
         except ValueError:
             return True
 
+    def _validate_resolved_ips(self, ips: set[str], *, allow_private: bool = False) -> None:
+        """Validate resolved destination IPs for webhook requests."""
+        if allow_private:
+            return
+
+        for ip in ips:
+            if self._is_restricted_ip(ip):
+                raise ValueError("Webhook URL resolves to a private or restricted network address")
+
+    def _create_secure_http_session(
+        self,
+        *,
+        allow_private: bool,
+        timeout_seconds: int | None = None,
+    ) -> aiohttp.ClientSession:
+        """Create an HTTP session with destination IP restrictions enforced."""
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds) if timeout_seconds else None
+        resolver = _RestrictedAddressResolver(
+            allow_private=allow_private,
+            is_restricted_ip=self._is_restricted_ip,
+        )
+        connector = aiohttp.TCPConnector(resolver=resolver)
+        return aiohttp.ClientSession(connector=connector, timeout=timeout)
+
     def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
         """Validate outbound webhook URL to reduce SSRF risk."""
         parsed = urlparse(url.strip())
@@ -246,12 +310,7 @@ class EnhancedNotificationService:
         except socket.gaierror as e:
             raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
 
-        if not allow_private:
-            for ip in resolved_ips:
-                if self._is_restricted_ip(ip):
-                    raise ValueError(
-                        "Webhook URL resolves to a private or restricted network address"
-                    )
+        self._validate_resolved_ips(resolved_ips, allow_private=allow_private)
 
         return url
 
@@ -649,7 +708,7 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
+                self._create_secure_http_session(allow_private=False) as session,
                 session.post(webhook_url, json=slack_message) as response,
             ):
                 if response.status == 200:
@@ -716,7 +775,7 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
+                self._create_secure_http_session(allow_private=False) as session,
                 session.post(webhook_url, json=discord_message) as response,
             ):
                 if response.status in [200, 204]:
@@ -775,10 +834,10 @@ System status: {{ system_status }}
             timeout = webhook_config.get("timeout", 30)
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
-                ) as response,
+                self._create_secure_http_session(
+                    allow_private=self._allow_private_webhooks(), timeout_seconds=timeout
+                ) as session,
+                session.post(url, json=payload, headers=headers) as response,
             ):
                 if 200 <= response.status < 300:
                     self.logger.info(f"Webhook notification sent successfully: {response.status}")
