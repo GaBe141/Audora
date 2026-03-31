@@ -73,6 +73,24 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    _EXPORTABLE_TABLES = {
+        "trends": "SELECT * FROM trends",
+        "trend_history": "SELECT * FROM trend_history",
+        "viral_predictions": "SELECT * FROM viral_predictions",
+        "cross_platform_correlations": "SELECT * FROM cross_platform_correlations",
+        "platform_metrics": "SELECT * FROM platform_metrics",
+        "alert_rules": "SELECT * FROM alert_rules",
+        "data_quality_logs": "SELECT * FROM data_quality_logs",
+    }
+    _QUALITY_REPORT_COUNT_QUERIES = {
+        "trends": "SELECT COUNT(*) FROM trends",
+        "trend_history": "SELECT COUNT(*) FROM trend_history",
+        "viral_predictions": "SELECT COUNT(*) FROM viral_predictions",
+        "cross_platform_correlations": "SELECT COUNT(*) FROM cross_platform_correlations",
+        "platform_metrics": "SELECT COUNT(*) FROM platform_metrics",
+        "alert_rules": "SELECT COUNT(*) FROM alert_rules",
+        "data_quality_logs": "SELECT COUNT(*) FROM data_quality_logs",
+    }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
@@ -930,32 +948,24 @@ class EnhancedMusicDataStore:
     def export_to_csv(self, table: str, filepath: str, days: int | None = None) -> str:
         """Export table data to CSV.
 
-        Note: Table name is validated against whitelist to prevent SQL injection.
+        Note: Uses pre-defined query map to prevent SQL injection via table identifiers.
         """
-        # Whitelist valid table names to prevent SQL injection
-        valid_tables = {
-            "trends",
-            "trend_history",
-            "viral_predictions",
-            "cross_platform_correlations",
-            "artists",
-            "tracks",
-        }
-        if table not in valid_tables:
-            raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
+        base_query = self._EXPORTABLE_TABLES.get(table)
+        if not base_query:
+            allowed = sorted(self._EXPORTABLE_TABLES.keys())
+            raise ValueError(f"Invalid table name: {table}. Must be one of {allowed}")
 
         with self.get_connection() as conn:
             if days:
-                # Use parameterized query for days parameter
-                query = f"""
-                SELECT * FROM {table}
-                WHERE datetime(created_at) >= datetime('now', ?)
-                ORDER BY created_at DESC
-                """
+                # Use parameterized query for days constraint.
+                query = (
+                    f"{base_query} "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                )
                 df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
             else:
-                # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
+                query = f"{base_query} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
             # Ensure directory exists
@@ -971,14 +981,10 @@ class EnhancedMusicDataStore:
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
-            # Table row counts with validated table names
+            # Table row counts via static queries (no dynamic SQL identifiers).
             table_stats = {}
-            # Whitelist of valid tables to prevent SQL injection
-            tables = ["trends", "trend_history", "viral_predictions", "cross_platform_correlations"]
-
-            for table in tables:
-                # Table names are from whitelist, safe to use
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+            for table, query in self._QUALITY_REPORT_COUNT_QUERIES.items():
+                cursor.execute(query)
                 table_stats[table] = cursor.fetchone()[0]
 
             # Data quality checks

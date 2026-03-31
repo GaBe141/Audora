@@ -107,3 +107,20 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportToCsvSecurity:
+    """Security tests for export_to_csv table handling."""
+
+    def test_export_to_csv_rejects_invalid_table_name(self, data_store, tmp_path):
+        output = tmp_path / "export.csv"
+        with pytest.raises(ValueError, match="Invalid table name"):
+            data_store.export_to_csv("trends; DROP TABLE trends;--", str(output))
+
+    def test_export_to_csv_allows_known_table(self, data_store, sample_trends, tmp_path):
+        data_store.save_trends_bulk(sample_trends)
+        output = tmp_path / "trends_export.csv"
+        result = data_store.export_to_csv("trends", str(output))
+
+        assert result == str(output)
+        assert output.exists()
