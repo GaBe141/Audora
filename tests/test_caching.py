@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,34 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSecurity:
+    """Security behavior for Redis serialization/deserialization helpers."""
+
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("pref", ("a", 1), {"x": 2})  # noqa: SLF001
+        parts = key.split(":")
+        assert parts[0] == "pref"
+        assert len(parts) == 3
+        assert all(len(p) == 64 for p in parts[1:])  # sha256 hex digest length
+
+    def test_deserialize_rejects_legacy_v1_envelope(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)  # bypass Redis init
+        backend._signing_key = b"unit-test-signing-key"  # noqa: SLF001
+        legacy_payload = b'{"danger":"legacy"}'
+        legacy_sig = hmac.new(backend._signing_key, legacy_payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": legacy_sig,
+            "payload": base64.b64encode(legacy_payload).decode("ascii"),
+        }
+        value = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(value) is None  # noqa: SLF001
+
+    def test_serialize_skips_non_json_values(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)  # bypass Redis init
+        backend._signing_key = b"unit-test-signing-key"  # noqa: SLF001
+        # set is not JSON serializable by default
+        assert backend._serialize({"bad": {1, 2, 3}}) is None  # noqa: SLF001
