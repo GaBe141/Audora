@@ -25,8 +25,21 @@ python main.py --mode continuous      # Continuous monitoring
 python main.py --demo all            # See all demonstrations
 
 # 5. (Optional) Prototyping GUI - run discovery, demos, setup from the browser
-python run_gui.py                     # Opens http://127.0.0.1:8050
+python run_gui.py                     # Opens http://127.0.0.1:8050 (loopback-only by default)
 ```
+
+### Security notes for GUI and cache
+
+- `run_gui.py` defaults to `127.0.0.1` and will refuse remote bind unless all are set:
+  - `AUDORA_GUI_ALLOW_REMOTE=1`
+  - `AUDORA_GUI_REQUIRE_AUTH=1`
+  - `AUDORA_GUI_USERNAME=<username>`
+  - `AUDORA_GUI_PASSWORD=<strong-password>`
+- Optional GUI bind controls:
+  - `AUDORA_GUI_HOST` (default: `127.0.0.1`)
+  - `AUDORA_GUI_PORT` (default: `8050`)
+- For Redis-backed cache integrity across multiple processes, set:
+  - `AUDORA_CACHE_SIGNING_KEY=<long-random-secret>`
 
 ## 🎯 **Key Features**
 

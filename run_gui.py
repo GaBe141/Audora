@@ -4,6 +4,8 @@ Audora prototyping GUI - entry point.
 Starts the Dash server at http://127.0.0.1:8050
 """
 
+import ipaddress
+import os
 import sys
 from pathlib import Path
 
@@ -14,5 +16,50 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from gui.app import app  # noqa: E402
 
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = (host or "").strip().lower()
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_gui_security_policy(host: str) -> None:
+    """Enforce secure defaults when binding the GUI server."""
+    if _is_loopback_host(host):
+        return
+
+    if not _env_flag("AUDORA_GUI_ALLOW_REMOTE", default=False):
+        raise RuntimeError(
+            "Refusing to bind GUI to a non-loopback host without AUDORA_GUI_ALLOW_REMOTE=1."
+        )
+
+    if not _env_flag("AUDORA_GUI_REQUIRE_AUTH", default=False):
+        raise RuntimeError(
+            "Remote GUI requires AUDORA_GUI_REQUIRE_AUTH=1 to prevent unauthenticated access."
+        )
+
+    username = os.getenv("AUDORA_GUI_USERNAME", "").strip()
+    password = os.getenv("AUDORA_GUI_PASSWORD", "").strip()
+    if not username or not password:
+        raise RuntimeError(
+            "Remote GUI requires AUDORA_GUI_USERNAME and AUDORA_GUI_PASSWORD to be set."
+        )
+
+
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=8050, debug=False)
+    host = os.getenv("AUDORA_GUI_HOST", "127.0.0.1")
+    port = int(os.getenv("AUDORA_GUI_PORT", "8050"))
+    debug = _env_flag("AUDORA_GUI_DEBUG", default=False)
+    _validate_gui_security_policy(host)
+    app.run(host=host, port=port, debug=debug)
