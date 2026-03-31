@@ -11,7 +11,7 @@ from typing import Any
 
 import aiohttp
 
-from core.utils import write_json
+from core.utils import resolve_path_within_base, write_json
 
 # Import our existing trending schema
 from integrations.trending_schema import TrendingSchema
@@ -754,13 +754,14 @@ class SocialMusicDiscoveryEngine:
 
         return recommendations
 
-    def save_discovery_report(self, report: dict[str, Any], filepath: str = None) -> str:
+    def save_discovery_report(self, report: dict[str, Any], filepath: str | None = None) -> str:
         """Save discovery report to file using centralized utility."""
         if filepath is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filepath = f"data/social_discovery_report_{timestamp}.json"
 
-        saved_path = write_json(filepath, report)
+        safe_path = resolve_path_within_base(filepath, "data", create_dirs=True)
+        saved_path = write_json(safe_path, report)
         return str(saved_path)
 
 
