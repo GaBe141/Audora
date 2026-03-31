@@ -315,9 +315,14 @@ class RedisCacheBackend(CacheBackend):
 
     def _is_pandas_dataframe(self, value: Any) -> bool:
         """Return True when value is a pandas DataFrame."""
-        return value.__class__.__name__ == "DataFrame" and value.__class__.__module__.startswith(
-            "pandas."
-        )
+        try:
+            import pandas as pd
+
+            return isinstance(value, pd.DataFrame)
+        except Exception:
+            return value.__class__.__name__ == "DataFrame" and value.__class__.__module__.startswith(
+                "pandas"
+            )
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
