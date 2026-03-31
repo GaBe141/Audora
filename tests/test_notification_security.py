@@ -2,6 +2,7 @@
 
 import pytest
 
+from core import notification_service
 from core.notification_service import EnhancedNotificationService
 
 
@@ -27,3 +28,27 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_rejects_embedded_url_credentials(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="embedded credentials"):
+            svc._validate_webhook_url("https://user:pass@example.com/webhook")
+
+    def test_rejects_dns_resolution_to_restricted_address(self, monkeypatch):
+        svc = EnhancedNotificationService()
+
+        def fake_getaddrinfo(*_args, **_kwargs):
+            return [
+                (
+                    2,
+                    1,
+                    6,
+                    "",
+                    ("127.0.0.1", 443),
+                )
+            ]
+
+        monkeypatch.setattr(notification_service.socket, "getaddrinfo", fake_getaddrinfo)
+
+        with pytest.raises(ValueError, match="private or restricted"):
+            svc._validate_webhook_url("https://example.com/webhook")
