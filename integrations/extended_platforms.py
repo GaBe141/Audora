@@ -8,7 +8,11 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
-from social_discovery_engine import Platform, SocialMusicMetrics, ViralStage
+try:
+    # Prefer package-relative import to avoid accidental module hijacking from CWD.
+    from .social_discovery_engine import Platform, SocialMusicMetrics, ViralStage
+except ImportError:  # pragma: no cover - fallback for direct script execution
+    from integrations.social_discovery_engine import Platform, SocialMusicMetrics, ViralStage
 
 
 class RedditMusicAPI:
