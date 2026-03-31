@@ -1,9 +1,18 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import io
+import json
+import pickle
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +127,78 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerializationSecurity:
+    """Security-focused tests for Redis serialization/deserialization behavior."""
+
+    @staticmethod
+    def _build_backend(*, allow_pickle: bool) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"  # noqa: SLF001
+        backend._allow_pickle = allow_pickle  # noqa: SLF001
+        return backend
+
+    @staticmethod
+    def _signed_envelope(version: int, fmt: str | None, payload: bytes, key: bytes) -> bytes:
+        sig = hmac.new(key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": version,
+            "alg": "HMAC-SHA256",
+            "sig": sig,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        if fmt is not None:
+            envelope["fmt"] = fmt
+        return json.dumps(envelope).encode("utf-8")
+
+    def test_serializes_json_compatible_values_without_pickle(self):
+        backend = self._build_backend(allow_pickle=False)
+        fmt, payload = backend._serialize_payload({"artist": "A", "score": 95.0})  # noqa: SLF001
+        assert fmt == "json"
+        assert payload == b'{"artist":"A","score":95.0}'
+
+    def test_serializes_dataframes_without_pickle(self):
+        backend = self._build_backend(allow_pickle=False)
+        value = pd.DataFrame([{"track_name": "Song", "score": 88.5}])
+
+        fmt, payload = backend._serialize_payload(value)  # noqa: SLF001
+
+        assert fmt == "pandas_dataframe_json"
+        restored = pd.read_json(io.StringIO(payload.decode("utf-8")), orient="split")
+        assert restored.to_dict("records") == value.to_dict("records")
+
+    def test_rejects_unsafe_nonserializable_values_when_pickle_disabled(self):
+        backend = self._build_backend(allow_pickle=False)
+        value = {1, 2, 3}  # not JSON serializable and not a dataframe
+
+        try:
+            backend._serialize_payload(value)  # noqa: SLF001
+            assert False, "Expected ValueError"
+        except ValueError as exc:
+            assert "AUDORA_CACHE_ALLOW_PICKLE=1" in str(exc)
+
+    def test_rejects_v1_pickled_payloads_by_default(self):
+        backend = self._build_backend(allow_pickle=False)
+        payload = pickle.dumps({"a": 1}, protocol=pickle.HIGHEST_PROTOCOL)
+        signed = self._signed_envelope(
+            version=1,
+            fmt=None,
+            payload=payload,
+            key=backend._signing_key,  # noqa: SLF001
+        )
+
+        assert backend._deserialize(signed) is None  # noqa: SLF001
+
+    def test_accepts_v2_pickled_payloads_only_when_enabled(self):
+        backend = self._build_backend(allow_pickle=True)
+        expected = {"track": "Song", "score": 91}
+        payload = pickle.dumps(expected, protocol=pickle.HIGHEST_PROTOCOL)
+        signed = self._signed_envelope(
+            version=2,
+            fmt="pickle",
+            payload=payload,
+            key=backend._signing_key,  # noqa: SLF001
+        )
+
+        assert backend._deserialize(signed) == expected  # noqa: SLF001
