@@ -4,6 +4,7 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
@@ -509,8 +510,9 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
+        # Use deterministic SHA-256 keying (built-in hash() is process-randomized).
+        key_material = f"{message.title}:{message.content[:100]}".encode("utf-8")
+        content_hash = hashlib.sha256(key_material).hexdigest()
         return f"{content_hash}:{message.priority.value}"
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
