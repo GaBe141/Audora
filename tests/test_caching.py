@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import io
 import json
 import pickle
 import time
@@ -164,7 +165,7 @@ class TestRedisCacheSerializationSecurity:
         fmt, payload = backend._serialize_payload(value)  # noqa: SLF001
 
         assert fmt == "pandas_dataframe_json"
-        restored = pd.read_json(payload.decode("utf-8"), orient="split")
+        restored = pd.read_json(io.StringIO(payload.decode("utf-8")), orient="split")
         assert restored.to_dict("records") == value.to_dict("records")
 
     def test_rejects_unsafe_nonserializable_values_when_pickle_disabled(self):
