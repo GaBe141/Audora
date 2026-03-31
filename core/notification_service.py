@@ -181,18 +181,46 @@ class EnhancedNotificationService:
 
         return default_config
 
-    def save_config(self, path: str = "config/notification_config.json") -> None:
+    def save_config(
+        self, path: str = "config/notification_config.json", *, include_secrets: bool = False
+    ) -> None:
         """Persist the current channel configuration to a JSON file.
 
         Args:
             path: File path to write the configuration to.
+            include_secrets: Whether to persist secret values to disk.
         """
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        if not include_secrets:
+            # Never persist secret values to disk unless explicitly requested.
+            for section, secret_keys in {
+                "email": ("password",),
+                "webhook": ("headers.Authorization",),
+                "sms": ("api_key", "api_secret"),
+            }.items():
+                section_data = to_save.get(section)
+                if not isinstance(section_data, dict):
+                    continue
+                for secret_key in secret_keys:
+                    if "." in secret_key:
+                        parent_key, child_key = secret_key.split(".", 1)
+                        parent_val = section_data.get(parent_key)
+                        if isinstance(parent_val, dict):
+                            parent_val.pop(child_key, None)
+                    else:
+                        section_data.pop(secret_key, None)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -204,12 +232,22 @@ class EnhancedNotificationService:
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
-        return os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
+        enabled = os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
             "1",
             "true",
             "yes",
             "on",
         }
+        if not enabled:
+            return False
+
+        env = os.getenv("AUDORA_ENV", "").strip().lower()
+        if env in {"prod", "production"}:
+            self.logger.warning(
+                "AUDORA_ALLOW_PRIVATE_WEBHOOKS is ignored in production environment"
+            )
+            return False
+        return True
 
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""

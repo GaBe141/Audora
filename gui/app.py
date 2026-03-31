@@ -602,8 +602,9 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
             svc.config["email"]["username"] = smtp_user
         if smtp_pass:
             svc.config["email"]["password"] = smtp_pass
-        svc.save_config()
-        return "Saved"
+        # Do not persist credentials from GUI input fields to disk.
+        svc.save_config(include_secrets=False)
+        return "Saved (credentials are session-only; configure env vars for persistence)"
     except Exception as e:
         return f"Error: {e}"
 

@@ -17,6 +17,47 @@ except ImportError:
     HAS_PANDAS = False
 
 
+def resolve_path_within_base(
+    requested_path: Path | str, base_dir: Path | str, *, create_dirs: bool = False
+) -> Path:
+    """
+    Resolve a path and ensure it stays inside a trusted base directory.
+
+    Args:
+        requested_path: User-supplied relative or absolute path
+        base_dir: Trusted base directory that the resolved path must remain inside
+        create_dirs: Whether to create parent directories for the resolved path
+
+    Returns:
+        Resolved absolute path inside base_dir
+
+    Raises:
+        ValueError: If resolved path escapes the base directory
+    """
+    base_path = Path(base_dir).resolve()
+    candidate = Path(requested_path)
+
+    if candidate.is_absolute():
+        resolved_path = candidate.resolve()
+    elif candidate.parts and candidate.parts[0] == base_path.name:
+        # Support paths that are already prefixed with base_dir (e.g. "data/report.json").
+        resolved_path = (Path.cwd() / candidate).resolve()
+    else:
+        resolved_path = (base_path / candidate).resolve()
+
+    try:
+        resolved_path.relative_to(base_path)
+    except ValueError as err:
+        raise ValueError(
+            f"Unsafe path '{requested_path}': resolved path escapes base directory '{base_path}'"
+        ) from err
+
+    if create_dirs:
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+
+    return resolved_path
+
+
 # JSON utilities
 def read_json(path: Path | str, default: Any = None) -> Any:
     """
@@ -54,6 +95,7 @@ def write_json(
     indent: int = 2,
     ensure_ascii: bool = False,
     create_dirs: bool = True,
+    safe_base_dir: Path | str | None = None,
 ) -> Path:
     """
     Write JSON file safely.
@@ -64,6 +106,7 @@ def write_json(
         indent: JSON indentation level
         ensure_ascii: Whether to escape non-ASCII characters
         create_dirs: Whether to create parent directories
+        safe_base_dir: Optional trusted base directory for path containment checks
 
     Returns:
         Path object of the written file
@@ -72,8 +115,10 @@ def write_json(
         Exception: If writing fails
     """
     path = Path(path)
+    if safe_base_dir is not None:
+        path = resolve_path_within_base(path, safe_base_dir, create_dirs=create_dirs)
     try:
-        if create_dirs:
+        if create_dirs and safe_base_dir is None:
             path.parent.mkdir(parents=True, exist_ok=True)
 
         with path.open("w", encoding="utf-8") as fh:
