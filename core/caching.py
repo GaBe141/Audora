@@ -7,6 +7,7 @@ fallback to in-memory caching when Redis is unavailable.
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -163,6 +164,7 @@ class RedisCacheBackend(CacheBackend):
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
+        self._allow_pickle = self._get_pickle_setting()
 
         # Test connection
         try:
@@ -186,17 +188,62 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _get_pickle_setting(self) -> bool:
+        """Whether insecure pickle serialization is explicitly enabled."""
+        return os.getenv("AUDORA_CACHE_ALLOW_PICKLE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _serialize_payload(self, value: Any) -> tuple[str, bytes]:
+        """Serialize value to a safe payload format."""
+        try:
+            payload = json.dumps(value, separators=(",", ":")).encode("utf-8")
+            return "json", payload
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            import pandas as pd  # type: ignore[import-untyped]
+        except Exception:
+            pd = None
+
+        if pd is not None and isinstance(value, pd.DataFrame):
+            payload = value.to_json(orient="split", date_format="iso").encode("utf-8")
+            return "pandas_dataframe_json", payload
+
+        if self._allow_pickle:
+            payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+            return "pickle", payload
+
+        raise ValueError(
+            "Value is not safely serializable. "
+            "Use JSON-compatible values, pandas DataFrames, or set AUDORA_CACHE_ALLOW_PICKLE=1."
+        )
+
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        fmt, payload = self._serialize_payload(value)
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "fmt": fmt,
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+    def _deserialize_legacy_pickle(self, envelope: dict[str, Any], payload: bytes) -> Any | None:
+        """Deserialize legacy v1 pickled payloads when explicitly allowed."""
+        if not self._allow_pickle:
+            logger.warning(
+                "Rejected legacy pickled cache entry because AUDORA_CACHE_ALLOW_PICKLE is not enabled"
+            )
+            return None
+        return pickle.loads(payload)
 
     def _deserialize(self, value: bytes) -> Any | None:
         """Deserialize cache value only after signature verification."""
@@ -204,7 +251,6 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -223,7 +269,36 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            version = envelope.get("v")
+            if version == 1:
+                return self._deserialize_legacy_pickle(envelope, payload)
+
+            if version != 2:
+                logger.warning("Rejected cache entry with unsupported envelope version: %s", version)
+                return None
+
+            fmt = envelope.get("fmt")
+            if fmt == "json":
+                return json.loads(payload.decode("utf-8"))
+
+            if fmt == "pandas_dataframe_json":
+                try:
+                    import pandas as pd  # type: ignore[import-untyped]
+                except Exception:
+                    logger.warning("Rejected pandas cache entry because pandas is unavailable")
+                    return None
+                return pd.read_json(io.StringIO(payload.decode("utf-8")), orient="split")
+
+            if fmt == "pickle":
+                if not self._allow_pickle:
+                    logger.warning(
+                        "Rejected pickled cache entry because AUDORA_CACHE_ALLOW_PICKLE is not enabled"
+                    )
+                    return None
+                return pickle.loads(payload)
+
+            logger.warning("Rejected cache entry with unsupported serialization format: %s", fmt)
+            return None
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -247,6 +322,8 @@ class RedisCacheBackend(CacheBackend):
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
+        except ValueError as e:
+            logger.warning("Skipped Redis cache set for key %s: %s", key, e)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 
