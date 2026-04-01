@@ -130,8 +130,9 @@ ignore_missing_imports = true
 
 [tool.bandit]
 exclude_dirs = ["tests", "scripts/demo_*", "notebooks", ".venv", "venv"]
-# Skip: B101=assert_used, B601=paramiko, B403=pickle_import, B301=pickle_loads, B324=hashlib_md5, B608=hardcoded_sql
-skips = ["B101", "B601", "B403", "B301", "B324", "B608"]
+# Keep only low-signal skip for assert usage. High-impact rules such as
+# pickle deserialization, weak hashes, and SQL construction remain enabled.
+skips = ["B101"]
 
 [tool.bandit.assert_used]
 skips = ["*/test_*.py", "*/tests/*.py"]
