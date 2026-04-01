@@ -1,8 +1,11 @@
 """Security tests for report file path handling."""
 
 from pathlib import Path
+import sys
 
 import pytest
+
+sys.path.insert(0, str((Path(__file__).resolve().parent.parent / "integrations").resolve()))
 
 from core.main_app import ComprehensiveMusicDiscoveryApp
 from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
