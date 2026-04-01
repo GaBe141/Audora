@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
 import time
+from datetime import datetime
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,31 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSerializationSecurity:
+    """Security-focused tests for RedisCacheBackend serialization."""
+
+    def test_round_trip_uses_safe_json_envelope(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        value = {"artist": "Test", "score": 91, "seen_at": datetime(2026, 4, 1, 12, 0, 0)}
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        assert restored == value
+        assert b"pickle" not in serialized.lower()
+
+    def test_rejects_tampered_payload_signature(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        payload = backend._serialize({"safe": "value"})
+        envelope = json.loads(payload.decode("utf-8"))
+        raw_payload = base64.b64decode(envelope["payload"].encode("ascii"), validate=True)
+        tampered_payload = raw_payload.replace(b"value", b"owned")
+        envelope["payload"] = base64.b64encode(tampered_payload).decode("ascii")
+        tampered = json.dumps(envelope).encode("utf-8")
+
+        assert backend._deserialize(tampered) is None
