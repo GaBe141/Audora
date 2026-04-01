@@ -346,10 +346,16 @@ def save_report(
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{timestamp_str}.json"
 
-    # Create full path
-    output_path = Path(output_dir)
+    # Create full path safely and block directory traversal.
+    output_path = Path(output_dir).resolve()
     output_path.mkdir(parents=True, exist_ok=True)
-    filepath = output_path / filename
+    filepath = (output_path / filename).resolve()
+    try:
+        filepath.relative_to(output_path)
+    except ValueError as exc:
+        raise ValueError(
+            f"Unsafe report filename '{filename}': must stay within '{output_path}'"
+        ) from exc
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:

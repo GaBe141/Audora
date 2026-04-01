@@ -27,3 +27,13 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_rejects_urls_with_userinfo(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="userinfo"):
+            svc._validate_webhook_url("https://user:pass@example.com/webhook")
+
+    def test_rejects_non_standard_ports(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="443"):
+            svc._validate_webhook_url("https://example.com:8443/webhook")

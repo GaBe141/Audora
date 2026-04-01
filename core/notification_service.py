@@ -233,6 +233,10 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL userinfo is not allowed")
+        if parsed.port not in (None, 443):
+            raise ValueError("Webhook URL must use default HTTPS port 443")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":

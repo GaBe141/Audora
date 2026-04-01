@@ -337,13 +337,24 @@ class ComprehensiveMusicDiscoveryApp:
         self, discovery_results: dict[str, Any], custom_filename: str | None = None
     ) -> str:
         """Save comprehensive discovery report."""
+        base_dir = Path("data").resolve()
+        base_dir.mkdir(parents=True, exist_ok=True)
         if custom_filename:
-            filename = custom_filename
+            candidate = Path(custom_filename)
+            if candidate.is_absolute():
+                filepath = candidate.resolve()
+            else:
+                filepath = (base_dir / candidate).resolve()
+            try:
+                filepath.relative_to(base_dir)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Unsafe report filename '{custom_filename}': must be inside {base_dir}"
+                ) from exc
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            filepath = (base_dir / f"comprehensive_discovery_report_{timestamp}.json").resolve()
 
-        filepath = Path(filename)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
         with open(filepath, "w", encoding="utf-8") as f:
