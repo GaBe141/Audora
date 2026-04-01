@@ -24,6 +24,8 @@ from urllib.parse import urlparse
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
 
+REDACTED_CONFIG_PLACEHOLDER = "[REDACTED]"
+
 
 class NotificationPriority(Enum):
     """Notification priority levels."""
@@ -193,6 +195,7 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = self._redact_sensitive_config_fields(to_save)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -201,6 +204,34 @@ class EnhancedNotificationService:
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _redact_sensitive_config_fields(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Return a copy with secret values removed before writing to disk."""
+        sanitized = json.loads(json.dumps(config))
+
+        # Email secrets
+        email_cfg = sanitized.get("email")
+        if isinstance(email_cfg, dict) and email_cfg.get("password"):
+            email_cfg["password"] = REDACTED_CONFIG_PLACEHOLDER
+
+        # Webhook secrets inside headers
+        webhook_cfg = sanitized.get("webhook")
+        if isinstance(webhook_cfg, dict):
+            headers = webhook_cfg.get("headers")
+            if isinstance(headers, dict):
+                for header_name in list(headers.keys()):
+                    if header_name.lower() in {"authorization", "x-api-key", "api-key"}:
+                        if headers.get(header_name):
+                            headers[header_name] = REDACTED_CONFIG_PLACEHOLDER
+
+        # SMS provider credentials
+        sms_cfg = sanitized.get("sms")
+        if isinstance(sms_cfg, dict):
+            for key in ("api_key", "api_secret"):
+                if sms_cfg.get(key):
+                    sms_cfg[key] = REDACTED_CONFIG_PLACEHOLDER
+
+        return sanitized
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
