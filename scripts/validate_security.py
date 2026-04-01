@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Security validation and configuration setup for Spotify Insights."""
+"""Security validation and configuration setup for Audora."""
 
 import sys
 from pathlib import Path
 
-# Add src to path for imports
-src_path = Path(__file__).resolve().parent / "src"
-sys.path.insert(0, str(src_path))
+# Add repository root to path for imports
+repo_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(repo_root))
 
 # Import after path modification
-from src.config import SecureConfig  # noqa: E402
+from core.config import SecureConfig  # noqa: E402
 
 
 def main():
     """Main security validation and setup routine."""
-    print("🔐 Spotify Insights - Security Configuration Validator")
+    print("🔐 Audora - Security Configuration Validator")
     print("=" * 60)
 
     # Initialize config manager
@@ -131,11 +131,11 @@ def main():
 
     if status["spotify"]["configured"]:
         print("✅ Ready to run Spotify analysis!")
-        print("   Try: python -m src.main")
+        print("   Try: python main.py")
 
         if status["lastfm"]["configured"]:
             print("✅ Ready for global trend comparison!")
-            print("   Try: python -m src.lastfm_main")
+            print("   Try: python main.py --demo all")
         else:
             print("💡 Optional: Configure Last.fm for global trend analysis")
     else:
