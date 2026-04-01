@@ -163,6 +163,7 @@ class RedisCacheBackend(CacheBackend):
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
+        self._max_payload_bytes = self._get_max_payload_bytes()
 
         # Test connection
         try:
@@ -186,9 +187,32 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _get_max_payload_bytes(self) -> int:
+        """Get maximum allowed serialized payload size in bytes."""
+        raw_value = os.getenv("AUDORA_CACHE_MAX_PAYLOAD_BYTES", "").strip()
+        default_limit = 5 * 1024 * 1024  # 5 MiB
+        if not raw_value:
+            return default_limit
+        try:
+            parsed = int(raw_value)
+            if parsed <= 0:
+                raise ValueError("must be greater than zero")
+            return parsed
+        except ValueError:
+            logger.warning(
+                "Invalid AUDORA_CACHE_MAX_PAYLOAD_BYTES=%r; using default %d bytes",
+                raw_value,
+                default_limit,
+            )
+            return default_limit
+
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
         payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        if len(payload) > self._max_payload_bytes:
+            raise ValueError(
+                f"Cache payload exceeds configured limit ({len(payload)} > {self._max_payload_bytes})"
+            )
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
@@ -201,6 +225,12 @@ class RedisCacheBackend(CacheBackend):
     def _deserialize(self, value: bytes) -> Any | None:
         """Deserialize cache value only after signature verification."""
         try:
+            # Guard against oversized envelopes before JSON parsing.
+            max_envelope_bytes = int(self._max_payload_bytes * 2.5) + 1024
+            if len(value) > max_envelope_bytes:
+                logger.warning("Rejected cache entry exceeding max envelope size")
+                return None
+
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
@@ -218,12 +248,15 @@ class RedisCacheBackend(CacheBackend):
                 return None
 
             payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            if len(payload) > self._max_payload_bytes:
+                logger.warning("Rejected cache entry exceeding max payload size")
+                return None
             expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return pickle.loads(payload)  # nosec B301 - integrity checked via HMAC above.
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -432,12 +465,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode("utf-8")).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode("utf-8")).hexdigest())
 
         return ":".join(key_parts)
 
