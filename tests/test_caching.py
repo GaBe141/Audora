@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +126,65 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSerialization:
+    """Security-focused tests for Redis serialization logic."""
+
+    @staticmethod
+    def _build_backend(max_payload: int = 1024 * 1024) -> RedisCacheBackend:
+        # Build an isolated backend instance without requiring a live Redis server.
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"  # noqa: SLF001
+        backend._max_payload_bytes = max_payload  # noqa: SLF001
+        return backend
+
+    def test_json_round_trip(self):
+        backend = self._build_backend()
+        original = {"track": "Song A", "score": 95, "tags": ["viral", "trending"]}
+        serialized = backend._serialize(original)  # noqa: SLF001
+        restored = backend._deserialize(serialized)  # noqa: SLF001
+        assert restored == original
+
+    def test_rejects_tampered_payload(self):
+        backend = self._build_backend()
+        serialized = backend._serialize({"safe": True})  # noqa: SLF001
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"] = base64.b64encode(b'{"safe":false}').decode("ascii")
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(tampered) is None  # noqa: SLF001
+
+    def test_rejects_unsupported_serializer(self):
+        backend = self._build_backend()
+        payload = b'{"a":1}'
+        serializer = "pickle"
+        signed_data = serializer.encode("utf-8") + b":" + payload
+        sig = hmac.new(backend._signing_key, signed_data, hashlib.sha256).hexdigest()  # noqa: SLF001
+        envelope = {
+            "v": 2,
+            "alg": "HMAC-SHA256",
+            "serializer": serializer,
+            "sig": sig,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        crafted = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(crafted) is None  # noqa: SLF001
+
+    def test_dataframe_round_trip(self):
+        backend = self._build_backend()
+        df = pd.DataFrame(
+            {"track_name": ["A", "B"], "score": [88.5, 91.2], "platform": ["spotify", "tiktok"]}
+        )
+        serialized = backend._serialize(df)  # noqa: SLF001
+        restored = backend._deserialize(serialized)  # noqa: SLF001
+
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored, df, check_dtype=False)
+
+    def test_enforces_payload_size_limit(self):
+        backend = self._build_backend(max_payload=32)
+        too_large = {"data": "x" * 256}
+        with pytest.raises(ValueError, match="size limit"):
+            backend._serialize(too_large)  # noqa: SLF001
