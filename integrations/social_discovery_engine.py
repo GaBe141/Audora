@@ -7,6 +7,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -400,6 +401,27 @@ class SocialMusicDiscoveryEngine:
         # Storage for cross-platform trends
         self.cross_platform_trends: dict[str, CrossPlatformTrend] = {}
 
+    def _resolve_report_path(self, filepath: str | None) -> Path:
+        """Resolve report path and confine writes to the data directory."""
+        data_dir = Path("data").resolve()
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        if filepath is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            target = data_dir / f"social_discovery_report_{timestamp}.json"
+        else:
+            candidate = Path(filepath)
+            target = candidate.resolve() if candidate.is_absolute() else (data_dir / candidate).resolve()
+
+        try:
+            target.relative_to(data_dir)
+        except ValueError as exc:
+            raise ValueError(
+                "Invalid report path. Reports must be saved under the data directory."
+            ) from exc
+
+        return target
+
     async def discover_emerging_music(
         self, region: str = "US"
     ) -> dict[str, list[SocialMusicMetrics]]:
@@ -754,13 +776,10 @@ class SocialMusicDiscoveryEngine:
 
         return recommendations
 
-    def save_discovery_report(self, report: dict[str, Any], filepath: str = None) -> str:
+    def save_discovery_report(self, report: dict[str, Any], filepath: str | None = None) -> str:
         """Save discovery report to file using centralized utility."""
-        if filepath is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = f"data/social_discovery_report_{timestamp}.json"
-
-        saved_path = write_json(filepath, report)
+        safe_path = self._resolve_report_path(filepath)
+        saved_path = write_json(safe_path, report)
         return str(saved_path)
 
 
