@@ -1,6 +1,9 @@
 """AudioDB API integration for rich artist profiles and comprehensive music metadata."""
 
+import os
+import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -245,28 +248,21 @@ class AudioDBAPI:
 def get_audiodb_client() -> AudioDBAPI:
     """Get AudioDB API client with secure configuration."""
     try:
-        # Try to load configuration if available
-        import os
-        import sys
-        from pathlib import Path
-
         # Add core directory to path to find config
         sys.path.append(str(Path(__file__).parent.parent / "core"))
         from config import SecureConfig
 
-        # Initialize config manager but don't store unused variable
-        SecureConfig()
-        # Try to get AudioDB config if available
-        api_key = os.getenv("AUDIODB_API_KEY", "123")  # Default to free key
+        config = SecureConfig()
+        audiodb_config = config.get_audiodb_config()
+        api_key = audiodb_config["api_key"] if audiodb_config else os.getenv("AUDIODB_API_KEY", "123")
         return AudioDBAPI(api_key)
     except ImportError:
         # Fallback for standalone execution
-        import os
-
-        api_key = os.getenv("AUDIODB_API_KEY", "123")  # Default to free key
+        api_key = os.getenv("AUDIODB_API_KEY", "123")
         return AudioDBAPI(api_key)
     except Exception:
-        return AudioDBAPI("123")  # Default to free key
+        # Fall back to environment/default free key without hardcoded duplication.
+        return AudioDBAPI(os.getenv("AUDIODB_API_KEY", "123"))
 
 
 class AudioDBIntegration:
