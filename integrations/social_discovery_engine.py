@@ -756,11 +756,25 @@ class SocialMusicDiscoveryEngine:
 
     def save_discovery_report(self, report: dict[str, Any], filepath: str = None) -> str:
         """Save discovery report to file using centralized utility."""
+        base_dir = Path("data").resolve()
+        base_dir.mkdir(parents=True, exist_ok=True)
         if filepath is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = f"data/social_discovery_report_{timestamp}.json"
+            target_path = (base_dir / f"social_discovery_report_{timestamp}.json").resolve()
+        else:
+            candidate = Path(filepath)
+            if candidate.is_absolute():
+                target_path = candidate.resolve()
+            else:
+                target_path = (base_dir / candidate).resolve()
+            try:
+                target_path.relative_to(base_dir)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Unsafe report filename '{filepath}': must be inside {base_dir}"
+                ) from exc
 
-        saved_path = write_json(filepath, report)
+        saved_path = write_json(target_path, report)
         return str(saved_path)
 
 

@@ -533,8 +533,24 @@ class TrendingSchema:
 
     def export_trending_snapshot(self, filepath: str | None = None) -> dict[str, Any]:
         """Export current trending analysis snapshot."""
+        base_dir = Path("data").resolve()
+        base_dir.mkdir(parents=True, exist_ok=True)
         if filepath is None:
-            filepath = f"data/trending_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            output_path = (
+                base_dir / f"trending_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            ).resolve()
+        else:
+            candidate = Path(filepath)
+            if candidate.is_absolute():
+                output_path = candidate.resolve()
+            else:
+                output_path = (base_dir / candidate).resolve()
+            try:
+                output_path.relative_to(base_dir)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Unsafe report filename '{filepath}': must be inside {base_dir}"
+                ) from exc
 
         snapshot: dict[str, Any] = {
             "timestamp": datetime.now().isoformat(),
@@ -580,7 +596,7 @@ class TrendingSchema:
         # Save to file using centralized utility
         from core.utils import write_json
 
-        write_json(filepath, snapshot)
+        write_json(output_path, snapshot)
         return snapshot
 
 
