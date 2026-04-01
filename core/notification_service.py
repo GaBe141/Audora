@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -162,7 +163,7 @@ class EnhancedNotificationService:
 
         if config_file and Path(config_file).exists():
             try:
-                with Path(config_file).open() as f:
+                with Path(config_file).open(encoding="utf-8") as f:
                     user_config = json.load(f)
                     # Deep merge configurations
                     self._deep_merge(default_config, user_config)
@@ -173,7 +174,7 @@ class EnhancedNotificationService:
         default_path = Path("config/notification_config.json")
         if default_path.exists() and not config_file:
             try:
-                with default_path.open() as f:
+                with default_path.open(encoding="utf-8") as f:
                     user_config = json.load(f)
                     self._deep_merge(default_config, user_config)
             except Exception as e:
@@ -194,7 +195,8 @@ class EnhancedNotificationService:
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         try:
-            with config_path.open("w") as f:
+            fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
                 os.chmod(config_path, 0o600)
@@ -262,6 +264,31 @@ class EnhancedNotificationService:
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    def _sanitize_webhook_headers(self, headers: Any) -> dict[str, str]:
+        """Return safe webhook headers with secret placeholders removed."""
+        if not isinstance(headers, dict):
+            return {"Content-Type": "application/json"}
+
+        sanitized: dict[str, str] = {"Content-Type": "application/json"}
+        for key, value in headers.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                continue
+            clean_key = key.strip()
+            clean_value = value.strip()
+            if not clean_key or not clean_value:
+                continue
+            sanitized[clean_key] = clean_value
+
+        auth_value = sanitized.get("Authorization")
+        if auth_value and auth_value.lower() in {"bearer", "bearer [redacted]"}:
+            sanitized.pop("Authorization", None)
+        elif auth_value and auth_value.lower().startswith("bearer "):
+            token = auth_value[7:].strip()
+            if not token:
+                sanitized.pop("Authorization", None)
+
+        return sanitized
 
     def _load_templates(self) -> dict[str, str]:
         """Load message templates."""
@@ -574,7 +601,9 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.ehlo()
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -650,7 +679,12 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +751,12 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -771,13 +810,17 @@ System status: {{ system_status }}
                 )
                 payload["formatted_content"] = template.render(**message.template_vars)
 
-            headers = webhook_config.get("headers", {"Content-Type": "application/json"})
+            headers = self._sanitize_webhook_headers(webhook_config.get("headers"))
             timeout = webhook_config.get("timeout", 30)
 
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
