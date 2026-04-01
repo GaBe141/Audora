@@ -4,6 +4,7 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
@@ -254,6 +255,50 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _get_allowed_attachment_roots(self) -> list[Path]:
+        """Return normalized attachment roots allowed for email attachments."""
+        configured_roots = os.getenv("AUDORA_ATTACHMENT_ROOTS", "").strip()
+        if configured_roots:
+            roots = [Path(part.strip()).expanduser() for part in configured_roots.split(",")]
+        else:
+            roots = [Path("data"), Path("reports"), Path("exports")]
+
+        normalized_roots: list[Path] = []
+        for root in roots:
+            try:
+                normalized_roots.append(root.resolve())
+            except OSError:
+                continue
+        return normalized_roots
+
+    def _validate_attachment_path(self, attachment_path: str) -> Path:
+        """Validate attachment path to prevent path traversal and file exfiltration."""
+        candidate = Path(attachment_path).expanduser()
+
+        if candidate.is_symlink():
+            raise ValueError("Symlink attachments are not allowed")
+
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (FileNotFoundError, RuntimeError, OSError) as e:
+            raise ValueError(f"Attachment path is invalid: {attachment_path}") from e
+
+        if not resolved.is_file():
+            raise ValueError("Attachment must be a regular file")
+
+        allowed_roots = self._get_allowed_attachment_roots()
+        if not any(resolved.is_relative_to(root) for root in allowed_roots):
+            raise ValueError(
+                f"Attachment path is outside allowed roots: {attachment_path}. "
+                f"Allowed roots: {[str(root) for root in allowed_roots]}"
+            )
+
+        max_bytes = int(os.getenv("AUDORA_MAX_ATTACHMENT_BYTES", str(5 * 1024 * 1024)))
+        if resolved.stat().st_size > max_bytes:
+            raise ValueError(f"Attachment exceeds maximum allowed size ({max_bytes} bytes)")
+
+        return resolved
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -509,9 +554,9 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
-        return f"{content_hash}:{message.priority.value}"
+        # Deterministic cryptographic digest avoids process-randomized hash instability.
+        digest = hashlib.sha256(f"{message.title}:{message.content[:100]}".encode("utf-8")).hexdigest()
+        return f"{digest}:{message.priority.value}"
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""
@@ -559,16 +604,21 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    try:
+                        safe_path = self._validate_attachment_path(attachment_path)
+                    except ValueError as e:
+                        self.logger.warning(f"Skipping unsafe attachment path '{attachment_path}': {e}")
+                        continue
+
+                    with safe_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {safe_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
