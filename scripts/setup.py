@@ -6,6 +6,7 @@ Installs dependencies, configures services, and validates the system.
 
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -40,6 +41,12 @@ ENHANCED_PACKAGES = [
     "black>=22.0.0",
     "flake8>=4.0.0",
 ]
+
+
+def _set_owner_only_permissions(path: Path) -> None:
+    """Apply restrictive permissions to potentially sensitive files."""
+    if os.name != "nt":
+        os.chmod(path, 0o600)
 
 
 class EnhancedMusicDiscoverySetup:
@@ -193,6 +200,7 @@ class EnhancedMusicDiscoverySetup:
             try:
                 with open(config_path, "w") as f:
                     json.dump(config_data, f, indent=2)
+                _set_owner_only_permissions(config_path)
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -524,6 +532,7 @@ ENABLE_NOTIFICATIONS=True
         try:
             with open(env_path, "w") as f:
                 f.write(env_template.strip())
+            _set_owner_only_permissions(env_path)
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True
