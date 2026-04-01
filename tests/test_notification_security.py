@@ -1,6 +1,7 @@
 """Security tests for notification webhook URL validation."""
 
 import asyncio
+from email.mime.multipart import MIMEMultipart
 
 import pytest
 
@@ -130,3 +131,107 @@ class TestWebhookRedirectProtection:
         result = asyncio.run(svc._send_webhook(message))
         assert result["success"] is True
         assert calls and calls[0]["allow_redirects"] is False
+
+
+class _FakeSMTP:
+    instances: list["_FakeSMTP"] = []
+
+    def __init__(self, host, port, timeout=None):
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.starttls_called = False
+        self.starttls_context = None
+        self.login_called = False
+        self.quit_called = False
+        self.ehlo_calls = 0
+        self.sent_messages = []
+        _FakeSMTP.instances.append(self)
+
+    def ehlo(self):
+        self.ehlo_calls += 1
+
+    def starttls(self, context=None):
+        self.starttls_called = True
+        self.starttls_context = context
+
+    def login(self, username, password):
+        self.login_called = True
+
+    def send_message(self, message):
+        assert isinstance(message, MIMEMultipart)
+        self.sent_messages.append(message)
+
+    def quit(self):
+        self.quit_called = True
+
+
+class TestSmtpTransportSecurity:
+    """Ensure SMTP notifications enforce secure transport."""
+
+    def test_email_auth_requires_tls(self, monkeypatch):
+        _FakeSMTP.instances.clear()
+        monkeypatch.setattr("core.notification_service.smtplib.SMTP", _FakeSMTP)
+        svc = EnhancedNotificationService()
+        svc.config["email"] = {
+            "smtp_server": "smtp.example.com",
+            "port": 587,
+            "username": "user",
+            "password": "pass",
+            "from_address": "bot@example.com",
+            "recipients": ["ops@example.com"],
+            "use_tls": False,
+        }
+        msg = NotificationMessage(
+            title="test",
+            content="secure transport check",
+            priority=NotificationPriority.LOW,
+            channels=[NotificationChannel.EMAIL],
+        )
+
+        result = asyncio.run(svc._send_email(msg))
+        assert result["success"] is False
+        assert "without TLS" in result["error"]
+        assert _FakeSMTP.instances
+        smtp_instance = _FakeSMTP.instances[0]
+        assert smtp_instance.starttls_called is False
+        assert smtp_instance.login_called is False
+
+    def test_email_starttls_uses_default_ssl_context(self, monkeypatch):
+        _FakeSMTP.instances.clear()
+        captured_contexts = []
+
+        def _fake_default_context():
+            marker = object()
+            captured_contexts.append(marker)
+            return marker
+
+        monkeypatch.setattr("core.notification_service.smtplib.SMTP", _FakeSMTP)
+        monkeypatch.setattr(
+            "core.notification_service.ssl.create_default_context", _fake_default_context
+        )
+        svc = EnhancedNotificationService()
+        svc.config["email"] = {
+            "smtp_server": "smtp.example.com",
+            "port": 587,
+            "username": "user",
+            "password": "pass",
+            "from_address": "bot@example.com",
+            "recipients": ["ops@example.com"],
+            "use_tls": True,
+        }
+        msg = NotificationMessage(
+            title="test",
+            content="tls context check",
+            priority=NotificationPriority.LOW,
+            channels=[NotificationChannel.EMAIL],
+        )
+
+        result = asyncio.run(svc._send_email(msg))
+        assert result["success"] is True
+        assert _FakeSMTP.instances
+        smtp_instance = _FakeSMTP.instances[0]
+        assert smtp_instance.starttls_called is True
+        assert smtp_instance.starttls_context is captured_contexts[0]
+        assert smtp_instance.ehlo_calls == 2
+        assert smtp_instance.login_called is True
