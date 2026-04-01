@@ -333,17 +333,33 @@ class ComprehensiveMusicDiscoveryApp:
 
         return analytics
 
+    @staticmethod
+    def _resolve_report_path(filename: str) -> Path:
+        """Resolve report paths safely under the project data directory."""
+        data_dir = (Path(__file__).resolve().parent.parent / "data").resolve()
+        candidate = (data_dir / filename).resolve()
+
+        if not candidate.suffix:
+            candidate = candidate.with_suffix(".json")
+        elif candidate.suffix.lower() != ".json":
+            raise ValueError("Report file must use a .json extension")
+
+        if data_dir != candidate and data_dir not in candidate.parents:
+            raise ValueError("Report path must stay within the data directory")
+
+        return candidate
+
     def save_discovery_report(
         self, discovery_results: dict[str, Any], custom_filename: str | None = None
     ) -> str:
-        """Save comprehensive discovery report."""
+        """Save comprehensive discovery report to a safe location."""
         if custom_filename:
             filename = custom_filename
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            filename = f"comprehensive_discovery_report_{timestamp}.json"
 
-        filepath = Path(filename)
+        filepath = self._resolve_report_path(filename)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
         with open(filepath, "w", encoding="utf-8") as f:
