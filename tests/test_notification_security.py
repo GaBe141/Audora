@@ -18,6 +18,11 @@ class TestWebhookUrlValidation:
         with pytest.raises(ValueError, match="Localhost"):
             svc._validate_webhook_url("https://localhost/webhook")
 
+    def test_rejects_urls_with_embedded_credentials(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="embedded credentials"):
+            svc._validate_webhook_url("https://user:pass@example.com/webhook")
+
     def test_rejects_private_ip_targets_by_default(self):
         svc = EnhancedNotificationService()
         with pytest.raises(ValueError, match="private or restricted"):
