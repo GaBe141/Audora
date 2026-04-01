@@ -193,6 +193,8 @@ class EnhancedMusicDiscoverySetup:
             try:
                 with open(config_path, "w") as f:
                     json.dump(config_data, f, indent=2)
+                if sys.platform != "win32":
+                    config_path.chmod(0o600)
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -524,6 +526,8 @@ ENABLE_NOTIFICATIONS=True
         try:
             with open(env_path, "w") as f:
                 f.write(env_template.strip())
+            if sys.platform != "win32":
+                env_path.chmod(0o600)
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True
