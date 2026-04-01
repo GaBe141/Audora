@@ -7,16 +7,23 @@ fallback to in-memory caching when Redis is unavailable.
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
+
+try:
+    import pandas as pd
+
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
 
 # Try to import Redis, fall back to local cache if unavailable
 try:
@@ -188,7 +195,8 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        normalized = self._normalize_value(value)
+        payload = json.dumps(normalized, separators=(",", ":"), sort_keys=True).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
@@ -223,10 +231,96 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            parsed_payload = json.loads(payload.decode("utf-8"))
+            return self._restore_value(parsed_payload)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
+
+    def _normalize_value(self, value: Any) -> Any:
+        """Convert Python objects into safe JSON-serializable values."""
+        if value is None or isinstance(value, bool | int | float | str):
+            return value
+
+        if isinstance(value, bytes):
+            return {
+                "__audora_type__": "bytes",
+                "data": base64.b64encode(value).decode("ascii"),
+            }
+
+        if isinstance(value, dict):
+            normalized: dict[str, Any] = {}
+            for key, item in value.items():
+                normalized[str(key)] = self._normalize_value(item)
+            return normalized
+
+        if isinstance(value, list):
+            return [self._normalize_value(item) for item in value]
+
+        if isinstance(value, tuple):
+            return {
+                "__audora_type__": "tuple",
+                "data": [self._normalize_value(item) for item in value],
+            }
+
+        if isinstance(value, set):
+            normalized_items = [self._normalize_value(item) for item in value]
+            return {
+                "__audora_type__": "set",
+                "data": sorted(
+                    normalized_items, key=lambda item: json.dumps(item, sort_keys=True, default=str)
+                ),
+            }
+
+        if HAS_PANDAS and isinstance(value, pd.DataFrame):
+            return {
+                "__audora_type__": "dataframe",
+                "orient": "split",
+                "data": value.to_json(orient="split", date_format="iso"),
+            }
+
+        raise TypeError(f"Unsupported cache value type for Redis backend: {type(value).__name__}")
+
+    def _restore_value(self, value: Any) -> Any:
+        """Restore Python objects from normalized JSON payloads."""
+        if isinstance(value, list):
+            return [self._restore_value(item) for item in value]
+
+        if isinstance(value, dict):
+            marker = value.get("__audora_type__")
+            if marker is None:
+                return {key: self._restore_value(item) for key, item in value.items()}
+
+            if marker == "bytes":
+                raw = value.get("data")
+                if not isinstance(raw, str):
+                    raise ValueError("Invalid bytes payload in cache entry")
+                return base64.b64decode(raw.encode("ascii"), validate=True)
+
+            if marker == "tuple":
+                data = value.get("data")
+                if not isinstance(data, list):
+                    raise ValueError("Invalid tuple payload in cache entry")
+                return tuple(self._restore_value(item) for item in data)
+
+            if marker == "set":
+                data = value.get("data")
+                if not isinstance(data, list):
+                    raise ValueError("Invalid set payload in cache entry")
+                return set(self._restore_value(item) for item in data)
+
+            if marker == "dataframe":
+                if not HAS_PANDAS:
+                    raise ValueError("Pandas is required to restore cached dataframe payloads")
+                data = value.get("data")
+                orient = value.get("orient", "split")
+                if not isinstance(data, str):
+                    raise ValueError("Invalid dataframe payload in cache entry")
+                return pd.read_json(io.StringIO(data), orient=orient)
+
+            raise ValueError(f"Unsupported typed cache payload: {marker}")
+
+        return value
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
@@ -247,6 +341,8 @@ class RedisCacheBackend(CacheBackend):
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
+        except TypeError as e:
+            logger.warning(f"Skipping Redis cache set for unsupported value type ({key}): {e}")
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 
@@ -432,12 +528,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
