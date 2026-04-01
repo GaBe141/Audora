@@ -193,6 +193,7 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = self._sanitize_config_for_persistence(to_save)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -201,6 +202,35 @@ class EnhancedNotificationService:
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _sanitize_config_for_persistence(self, value: Any) -> Any:
+        """Remove sensitive secrets before writing configuration to disk."""
+        if isinstance(value, dict):
+            sanitized: dict[str, Any] = {}
+            for key, nested_value in value.items():
+                if self._is_sensitive_config_key(key):
+                    sanitized[key] = ""
+                else:
+                    sanitized[key] = self._sanitize_config_for_persistence(nested_value)
+            return sanitized
+        if isinstance(value, list):
+            return [self._sanitize_config_for_persistence(item) for item in value]
+        return value
+
+    def _is_sensitive_config_key(self, key: str) -> bool:
+        """Return True when a config key likely stores credentials."""
+        key_lower = key.lower()
+        sensitive_fragments = (
+            "password",
+            "secret",
+            "token",
+            "api_key",
+            "authorization",
+            "access_token",
+            "refresh_token",
+            "bearer",
+        )
+        return any(fragment in key_lower for fragment in sensitive_fragments)
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
