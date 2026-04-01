@@ -45,3 +45,12 @@ class TestNotificationConfigSanitization:
         assert "super-secret-password" not in saved_data
         assert "top-secret-token" not in saved_data
         assert "sms-secret" not in saved_data
+
+
+class TestWebhookHostValidation:
+    """Verify SSRF bypass-resistant hostname checks."""
+
+    def test_rejects_numeric_localhost_hostnames(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="private or restricted"):
+            svc._validate_webhook_url("https://127.0.0.1.nip.io/webhook")
