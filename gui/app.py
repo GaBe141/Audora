@@ -588,12 +588,17 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
     try:
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
+        def _normalize_webhook(raw: str | None) -> str | None:
+            if not raw:
+                return None
+            normalized = svc._validate_webhook_url(raw, allow_private=svc._allow_private_webhooks())
+            return normalized
         if slack_url:
-            svc.config["slack"]["webhook_url"] = slack_url
+            svc.config["slack"]["webhook_url"] = _normalize_webhook(slack_url)
         if discord_url:
-            svc.config["discord"]["webhook_url"] = discord_url
+            svc.config["discord"]["webhook_url"] = _normalize_webhook(discord_url)
         if webhook_url:
-            svc.config["webhook"]["url"] = webhook_url
+            svc.config["webhook"]["url"] = _normalize_webhook(webhook_url)
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
         if smtp_port:
