@@ -10,10 +10,10 @@ import hmac
 import json
 import logging
 import os
-import pickle
-import time
 from collections.abc import Callable
+from datetime import date, datetime, time as dtime
 from functools import wraps
+import time
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -178,7 +178,7 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
+        # Fallback to process-local random key to prevent accepting forged cache payloads.
         # This keeps the cache safe by default, with only a reduced cross-process hit rate.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
@@ -187,8 +187,12 @@ class RedisCacheBackend(CacheBackend):
         return os.urandom(32)
 
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value with integrity protection.
+
+        Uses a constrained JSON serializer to avoid unsafe object deserialization.
+        """
+        safe_value = self._to_safe_json_value(value)
+        payload = json.dumps(safe_value, separators=(",", ":")).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
@@ -223,10 +227,94 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            decoded_payload = json.loads(payload.decode("utf-8"))
+            return self._from_safe_json_value(decoded_payload)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
+
+    def _to_safe_json_value(self, value: Any) -> Any:
+        """Convert Python values to a constrained JSON-safe structure."""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, bytes):
+            return {"__type__": "bytes", "value": base64.b64encode(value).decode("ascii")}
+        if isinstance(value, datetime):
+            return {"__type__": "datetime", "value": value.isoformat()}
+        if isinstance(value, date):
+            return {"__type__": "date", "value": value.isoformat()}
+        if isinstance(value, dtime):
+            return {"__type__": "time", "value": value.isoformat()}
+        if isinstance(value, list):
+            return [self._to_safe_json_value(item) for item in value]
+        if isinstance(value, tuple):
+            return {"__type__": "tuple", "value": [self._to_safe_json_value(item) for item in value]}
+        if isinstance(value, set):
+            return {
+                "__type__": "set",
+                "value": [self._to_safe_json_value(item) for item in sorted(value, key=str)],
+            }
+        if isinstance(value, dict):
+            return {
+                "__type__": "dict",
+                "value": [
+                    [self._to_safe_json_value(k), self._to_safe_json_value(v)] for k, v in value.items()
+                ],
+            }
+
+        # Optional support for pandas.DataFrame without importing pandas at module import time.
+        if value.__class__.__name__ == "DataFrame" and value.__class__.__module__.startswith("pandas"):
+            return {
+                "__type__": "pandas.DataFrame",
+                "records": value.to_dict(orient="records"),
+                "columns": [str(col) for col in value.columns],
+            }
+
+        raise TypeError(
+            f"Value of type {type(value).__name__} is not supported for Redis cache serialization"
+        )
+
+    def _from_safe_json_value(self, value: Any) -> Any:
+        """Restore Python values from constrained JSON-safe structure."""
+        if isinstance(value, list):
+            return [self._from_safe_json_value(item) for item in value]
+        if not isinstance(value, dict) or "__type__" not in value:
+            return value
+
+        value_type = value.get("__type__")
+        raw = value.get("value")
+
+        if value_type == "bytes" and isinstance(raw, str):
+            return base64.b64decode(raw.encode("ascii"), validate=True)
+        if value_type == "datetime" and isinstance(raw, str):
+            return datetime.fromisoformat(raw)
+        if value_type == "date" and isinstance(raw, str):
+            return date.fromisoformat(raw)
+        if value_type == "time" and isinstance(raw, str):
+            return dtime.fromisoformat(raw)
+        if value_type == "tuple" and isinstance(raw, list):
+            return tuple(self._from_safe_json_value(item) for item in raw)
+        if value_type == "set" and isinstance(raw, list):
+            return set(self._from_safe_json_value(item) for item in raw)
+        if value_type == "dict" and isinstance(raw, list):
+            restored: dict[Any, Any] = {}
+            for item in raw:
+                if not isinstance(item, list | tuple) or len(item) != 2:
+                    raise ValueError("Invalid serialized dict item in cache payload")
+                k = self._from_safe_json_value(item[0])
+                v = self._from_safe_json_value(item[1])
+                restored[k] = v
+            return restored
+        if value_type == "pandas.DataFrame":
+            records = value.get("records")
+            columns = value.get("columns")
+            if not isinstance(records, list) or not isinstance(columns, list):
+                raise ValueError("Invalid serialized pandas.DataFrame payload")
+            import pandas as pd
+
+            return pd.DataFrame.from_records(records, columns=columns)
+
+        raise ValueError(f"Unknown serialized cache type marker: {value_type}")
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
@@ -337,7 +425,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be serializable by the active backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +520,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
