@@ -255,6 +255,36 @@ class EnhancedNotificationService:
 
         return url
 
+    async def _assert_no_redirect_to_restricted_network(
+        self, url: str, timeout: int, *, allow_private: bool
+    ) -> None:
+        """Block webhook redirects to private/restricted destinations."""
+        # Perform a controlled redirect chain check before sending any payload.
+        # This mitigates SSRF via initial public URL redirecting to internal targets.
+        max_redirects = 3
+        current_url = url
+        timeout_cfg = aiohttp.ClientTimeout(total=timeout)
+
+        async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
+            for _ in range(max_redirects):
+                async with session.get(
+                    current_url,
+                    allow_redirects=False,
+                    ssl=True,
+                    headers={"User-Agent": "Audora-Webhook-Validator/1.0"},
+                ) as response:
+                    if response.status in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise ValueError("Webhook redirect response missing Location header")
+
+                        next_url = str(response.url.join(location))
+                        self._validate_webhook_url(next_url, allow_private=allow_private)
+                        current_url = next_url
+                        continue
+                    return
+        raise ValueError("Webhook URL redirect chain exceeded maximum allowed hops")
+
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
         for key, value in update.items():
@@ -752,9 +782,8 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
-            url = self._validate_webhook_url(
-                url, allow_private=self._allow_private_webhooks()
-            )
+            allow_private = self._allow_private_webhooks()
+            url = self._validate_webhook_url(url, allow_private=allow_private)
             # Prepare payload
             payload = {
                 "title": message.title,
@@ -774,21 +803,45 @@ System status: {{ system_status }}
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
             timeout = webhook_config.get("timeout", 30)
 
-            async with (
-                aiohttp.ClientSession() as session,
-                session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
-                ) as response,
-            ):
-                if 200 <= response.status < 300:
-                    self.logger.info(f"Webhook notification sent successfully: {response.status}")
-                    return {"success": True, "status_code": response.status}
-                else:
-                    error_text = await response.text()
-                    self.logger.error(
-                        f"Webhook notification failed: {response.status} - {error_text}"
-                    )
-                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            # Validate redirect destinations before transmitting payload.
+            if not allow_private:
+                await self._assert_no_redirect_to_restricted_network(
+                    url, timeout, allow_private=allow_private
+                )
+
+            timeout_cfg = aiohttp.ClientTimeout(total=timeout)
+            async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
+                # Manually follow redirects so each hop can be validated.
+                max_redirects = 3
+                current_url = url
+                for _ in range(max_redirects + 1):
+                    self._validate_webhook_url(current_url, allow_private=allow_private)
+                    async with session.post(
+                        current_url,
+                        json=payload,
+                        headers=headers,
+                        allow_redirects=False,
+                        ssl=True,
+                    ) as response:
+                        if response.status in {301, 302, 303, 307, 308}:
+                            location = response.headers.get("Location")
+                            if not location:
+                                raise ValueError("Webhook redirect response missing Location header")
+                            current_url = str(response.url.join(location))
+                            continue
+                        if 200 <= response.status < 300:
+                            self.logger.info(
+                                f"Webhook notification sent successfully: {response.status}"
+                            )
+                            return {"success": True, "status_code": response.status}
+
+                        error_text = await response.text()
+                        self.logger.error(
+                            f"Webhook notification failed: {response.status} - {error_text}"
+                        )
+                        return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+
+                raise ValueError("Webhook redirect chain exceeded maximum allowed hops")
 
         except Exception as e:
             self.logger.error(f"Failed to send webhook notification: {e}")
