@@ -86,6 +86,37 @@ def write_json(
         raise
 
 
+def build_safe_output_path(
+    filename: str | None,
+    *,
+    base_dir: Path | str,
+    default_filename: str,
+) -> Path:
+    """Build a safe output path anchored to a base directory.
+
+    This prevents path traversal and absolute-path writes when a filename is
+    provided from user-controlled input.
+    """
+    base_path = Path(base_dir).resolve()
+    base_path.mkdir(parents=True, exist_ok=True)
+
+    if filename is None:
+        candidate = (base_path / default_filename).resolve()
+    else:
+        provided = Path(filename)
+        if provided.is_absolute():
+            raise ValueError("Absolute output paths are not allowed")
+        candidate = (base_path / provided).resolve()
+
+    try:
+        candidate.relative_to(base_path)
+    except ValueError as exc:
+        raise ValueError("Output path escapes the allowed base directory") from exc
+
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    return candidate
+
+
 def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> Path:  # pd.DataFrame
     """
     Save DataFrame to CSV with consistent settings.
@@ -344,12 +375,13 @@ def save_report(
     # Auto-generate filename if not provided
     if filename is None:
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{prefix}_{timestamp_str}.json"
+        default_filename = f"{prefix}_{timestamp_str}.json"
+    else:
+        default_filename = f"{prefix}.json"
 
-    # Create full path
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    filepath = output_path / filename
+    filepath = build_safe_output_path(
+        filename, base_dir=Path(output_dir), default_filename=default_filename
+    )
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:

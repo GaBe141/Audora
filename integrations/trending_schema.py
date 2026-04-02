@@ -11,6 +11,8 @@ from typing import Any
 
 import numpy as np
 
+from core.utils import build_safe_output_path, write_json
+
 warnings.filterwarnings("ignore")
 
 
@@ -534,7 +536,9 @@ class TrendingSchema:
     def export_trending_snapshot(self, filepath: str | None = None) -> dict[str, Any]:
         """Export current trending analysis snapshot."""
         if filepath is None:
-            filepath = f"data/trending_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            default_filename = f"trending_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        else:
+            default_filename = "trending_snapshot.json"
 
         snapshot: dict[str, Any] = {
             "timestamp": datetime.now().isoformat(),
@@ -577,10 +581,8 @@ class TrendingSchema:
         emerging_trends = self.get_emerging_trends()
         snapshot["emerging_trends"] = [item.to_dict() for item in emerging_trends]
 
-        # Save to file using centralized utility
-        from core.utils import write_json
-
-        write_json(filepath, snapshot)
+        safe_path = build_safe_output_path(filepath, base_dir="data", default_filename=default_filename)
+        write_json(safe_path, snapshot)
         return snapshot
 
 
