@@ -648,9 +648,15 @@ System status: {{ system_status }}
                 if fields:
                     slack_message["attachments"][0]["fields"] = fields
 
+            timeout_seconds = int(slack_config.get("timeout", 10))
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -715,9 +721,15 @@ System status: {{ system_status }}
                 if fields:
                     discord_message["embeds"][0]["fields"] = fields
 
+            timeout_seconds = int(discord_config.get("timeout", 10))
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +789,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
