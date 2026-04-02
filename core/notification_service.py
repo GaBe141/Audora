@@ -87,6 +87,7 @@ class EnhancedNotificationService:
 
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
+        self.project_root = Path(__file__).resolve().parent.parent
         self.config = self._load_config(config_file)
         self.sent_notifications: dict[str, Any] = {}
         self.notification_history: list[dict[str, Any]] = []
@@ -262,6 +263,84 @@ class EnhancedNotificationService:
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    @staticmethod
+    def _is_relative_to(path: Path, root: Path) -> bool:
+        """Return True when path is contained within root."""
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+    def _get_allowed_attachment_roots(self) -> list[Path]:
+        """Get absolute directories allowed for email attachments."""
+        configured = os.getenv("AUDORA_NOTIFICATION_ALLOWED_ATTACHMENT_DIRS", "data,exports")
+        roots: list[Path] = []
+        for raw_path in configured.split(","):
+            cleaned = raw_path.strip()
+            if not cleaned:
+                continue
+            root = Path(cleaned)
+            if not root.is_absolute():
+                root = self.project_root / root
+            roots.append(root.resolve(strict=False))
+        return roots
+
+    def _get_max_attachment_bytes(self) -> int:
+        """Get attachment size limit for notification emails."""
+        raw_value = os.getenv("AUDORA_MAX_ATTACHMENT_BYTES", "5242880")
+        try:
+            parsed = int(raw_value)
+            return parsed if parsed > 0 else 5242880
+        except ValueError:
+            self.logger.warning(
+                "Invalid AUDORA_MAX_ATTACHMENT_BYTES value %r, using default 5242880",
+                raw_value,
+            )
+            return 5242880
+
+    def _resolve_safe_attachment_path(self, attachment_path: str) -> Path | None:
+        """Return attachment path only when it passes safety checks."""
+        candidate = Path(attachment_path)
+        if not candidate.exists():
+            self.logger.warning("Skipping missing attachment path: %s", attachment_path)
+            return None
+
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as e:
+            self.logger.warning("Skipping unreadable attachment path %s: %s", attachment_path, e)
+            return None
+
+        if not resolved.is_file():
+            self.logger.warning("Skipping non-file attachment path: %s", resolved)
+            return None
+
+        allowed_roots = self._get_allowed_attachment_roots()
+        if not any(self._is_relative_to(resolved, root) for root in allowed_roots):
+            self.logger.warning(
+                "Rejected attachment outside allowed directories: %s (allowed: %s)",
+                resolved,
+                ", ".join(str(root) for root in allowed_roots),
+            )
+            return None
+
+        max_size = self._get_max_attachment_bytes()
+        try:
+            if resolved.stat().st_size > max_size:
+                self.logger.warning(
+                    "Rejected attachment exceeding size limit: %s (%s bytes > %s bytes)",
+                    resolved,
+                    resolved.stat().st_size,
+                    max_size,
+                )
+                return None
+        except OSError as e:
+            self.logger.warning("Skipping attachment due to stat error %s: %s", resolved, e)
+            return None
+
+        return resolved
 
     def _load_templates(self) -> dict[str, str]:
         """Load message templates."""
@@ -559,16 +638,19 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    safe_attachment_path = self._resolve_safe_attachment_path(attachment_path)
+                    if safe_attachment_path is None:
+                        continue
+
+                    with safe_attachment_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {safe_attachment_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
