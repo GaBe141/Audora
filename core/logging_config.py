@@ -6,6 +6,7 @@ file and console output, improving observability and debugging capabilities.
 
 import json
 import logging
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,32 @@ class JSONFormatter(logging.Formatter):
     This formatter outputs logs in JSON format which is easier to parse,
     search, and analyze using log aggregation tools.
     """
+
+    SENSITIVE_KEY_PATTERN = re.compile(
+        r"(pass(word)?|secret|token|api[_-]?key|authorization|cookie|session)",
+        re.IGNORECASE,
+    )
+    REDACTED = "[REDACTED]"
+
+    def _sanitize_value(self, value: Any) -> Any:
+        """Recursively sanitize structured values before writing logs."""
+        if isinstance(value, dict):
+            sanitized: dict[Any, Any] = {}
+            for key, nested_value in value.items():
+                key_str = str(key)
+                if self.SENSITIVE_KEY_PATTERN.search(key_str):
+                    sanitized[key] = self.REDACTED
+                else:
+                    sanitized[key] = self._sanitize_value(nested_value)
+            return sanitized
+
+        if isinstance(value, list):
+            return [self._sanitize_value(item) for item in value]
+
+        if isinstance(value, tuple):
+            return tuple(self._sanitize_value(item) for item in value)
+
+        return value
 
     def format(self, record: logging.LogRecord) -> str:
         """Format a log record as JSON.
@@ -50,7 +77,7 @@ class JSONFormatter(logging.Formatter):
 
         # Add custom fields from 'extra' parameter
         if hasattr(record, "extra_fields"):
-            log_data.update(record.extra_fields)
+            log_data.update(self._sanitize_value(record.extra_fields))
 
         # Add any other custom attributes
         for key, value in record.__dict__.items():
@@ -79,7 +106,10 @@ class JSONFormatter(logging.Formatter):
                 "extra_fields",
             ]:
                 try:
-                    log_data[key] = value
+                    if self.SENSITIVE_KEY_PATTERN.search(key):
+                        log_data[key] = self.REDACTED
+                    else:
+                        log_data[key] = self._sanitize_value(value)
                 except (TypeError, ValueError):
                     log_data[key] = str(value)
 
