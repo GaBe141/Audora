@@ -118,3 +118,8 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_building_is_deterministic(self, mock_cache):
+        key1 = mock_cache._build_cache_key("prefix", ("abc", 123), {"x": True, "y": "z"})
+        key2 = mock_cache._build_cache_key("prefix", ("abc", 123), {"y": "z", "x": True})
+        assert key1 == key2
