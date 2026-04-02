@@ -13,7 +13,8 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+# Enforce TLS for all Last.fm traffic to prevent MITM interception of API keys and payloads.
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
 class LastFmAPI:
