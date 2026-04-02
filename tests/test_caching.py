@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,51 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSecurity:
+    """Security tests for Redis cache serialization/deserialization behavior."""
+
+    @staticmethod
+    def _make_backend(signing_key: bytes = b"test-signing-key") -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = signing_key  # type: ignore[attr-defined]
+        return backend
+
+    def test_json_serialization_round_trip(self):
+        backend = self._make_backend()
+        encoded = backend._serialize({"safe": True, "count": 3})
+        decoded = backend._deserialize(encoded)
+        assert decoded == {"safe": True, "count": 3}
+
+    def test_rejects_pickled_payload_by_default(self, monkeypatch):
+        monkeypatch.delenv("AUDORA_CACHE_ALLOW_PICKLE", raising=False)
+        backend = self._make_backend()
+
+        payload = pickle.dumps({"danger": "payload"})
+        signature = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        encoded = json.dumps(envelope).encode("utf-8")
+
+        assert backend._deserialize(encoded) is None
+
+    def test_allows_pickled_payload_when_explicitly_enabled(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_ALLOW_PICKLE", "true")
+        backend = self._make_backend()
+
+        payload = pickle.dumps({"legacy": "payload"})
+        signature = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        encoded = json.dumps(envelope).encode("utf-8")
+
+        assert backend._deserialize(encoded) == {"legacy": "payload"}

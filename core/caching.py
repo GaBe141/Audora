@@ -188,15 +188,39 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        try:
+            payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            encoding = "json"
+        except (TypeError, ValueError) as exc:
+            if not self._allow_pickle_cache():
+                raise ValueError(
+                    "Redis cache only accepts JSON-serializable values unless "
+                    "AUDORA_CACHE_ALLOW_PICKLE is explicitly enabled."
+                ) from exc
+            logger.warning(
+                "AUDORA_CACHE_ALLOW_PICKLE is enabled; using pickle serialization for cache entry."
+            )
+            payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+            encoding = "pickle"
+
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "enc": encoding,
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+    def _allow_pickle_cache(self) -> bool:
+        """Whether pickle cache payloads are explicitly allowed."""
+        return os.getenv("AUDORA_CACHE_ALLOW_PICKLE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     def _deserialize(self, value: bytes) -> Any | None:
         """Deserialize cache value only after signature verification."""
@@ -204,12 +228,15 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
             ):
                 logger.warning("Rejected cache entry with invalid serialization envelope")
+                return None
+            version = envelope.get("v")
+            if version not in {1, 2}:
+                logger.warning("Rejected cache entry with unsupported serialization version")
                 return None
 
             payload_b64 = envelope["payload"]
@@ -223,7 +250,23 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            # Version 1 entries were pickled and had no explicit encoding field.
+            encoding = envelope.get("enc", "pickle" if version == 1 else None)
+            if encoding == "json":
+                return json.loads(payload.decode("utf-8"))
+            if encoding == "pickle":
+                if not self._allow_pickle_cache():
+                    logger.warning(
+                        "Rejected pickled cache entry because AUDORA_CACHE_ALLOW_PICKLE is disabled"
+                    )
+                    return None
+                logger.warning(
+                    "Deserializing pickled cache entry because AUDORA_CACHE_ALLOW_PICKLE is enabled"
+                )
+                return pickle.loads(payload)
+
+            logger.warning("Rejected cache entry with unsupported encoding")
+            return None
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -247,6 +290,8 @@ class RedisCacheBackend(CacheBackend):
                 self._client.setex(key, ttl, serialized)
             else:
                 self._client.set(key, serialized)
+        except ValueError as e:
+            logger.warning(f"Skipping Redis cache set for key {key}: {e}")
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 
@@ -432,12 +477,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
