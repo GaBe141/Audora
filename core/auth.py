@@ -10,6 +10,16 @@ from spotipy.oauth2 import SpotifyOAuth
 from .config import get_config
 
 
+def _resolve_spotify_cache_path() -> Path:
+    """Return a private filesystem path for Spotify OAuth tokens."""
+    xdg_cache_home = os.getenv("XDG_CACHE_HOME")
+    if xdg_cache_home:
+        base_dir = Path(xdg_cache_home).expanduser()
+    else:
+        base_dir = Path.home() / ".cache"
+    return base_dir / "audora" / "spotify_oauth.cache"
+
+
 def get_client() -> spotipy.Spotify:
     """Create an authenticated Spotipy client using secure configuration.
 
@@ -23,7 +33,8 @@ def get_client() -> spotipy.Spotify:
     """
     config_manager = get_config()
     spotify_config = config_manager.get_spotify_config()
-    cache_path = Path(".cache")
+    cache_path = _resolve_spotify_cache_path()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
     if not cache_path.exists():
         cache_path.touch(mode=0o600, exist_ok=True)
     elif os.name != "nt":
