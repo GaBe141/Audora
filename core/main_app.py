@@ -22,6 +22,8 @@ class ComprehensiveMusicDiscoveryApp:
         """Initialize the comprehensive music discovery application."""
         print("🎵 Initializing Comprehensive Music Discovery System")
         print("=" * 60)
+        self.project_root = Path(__file__).resolve().parent.parent
+        self.reports_dir = self.project_root / "data"
 
         # Initialize API manager
         self.api_manager = SocialAPIManager(config_file)
@@ -338,15 +340,21 @@ class ComprehensiveMusicDiscoveryApp:
     ) -> str:
         """Save comprehensive discovery report."""
         if custom_filename:
-            filename = custom_filename
+            requested = Path(custom_filename)
+            if requested.is_absolute():
+                raise ValueError("Custom filename must be a relative path inside data/")
+            filepath = (self.reports_dir / requested).resolve()
+            try:
+                filepath.relative_to(self.reports_dir.resolve())
+            except ValueError as exc:
+                raise ValueError("Custom filename must stay within data/") from exc
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            filepath = self.reports_dir / f"comprehensive_discovery_report_{timestamp}.json"
 
-        filepath = Path(filename)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        with filepath.open("w", encoding="utf-8") as f:
             json.dump(discovery_results, f, indent=2, default=str, ensure_ascii=False)
 
         return str(filepath)

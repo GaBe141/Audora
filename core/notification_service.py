@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import ssl
 import socket
 import smtplib
 from dataclasses import dataclass
@@ -131,6 +132,8 @@ class EnhancedNotificationService:
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
                 "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
                 "use_tls": True,
+                "require_starttls": True,
+                "timeout_seconds": int(os.getenv("SMTP_TIMEOUT_SECONDS", "15")),
             },
             "slack": {
                 "webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
@@ -571,16 +574,37 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            timeout_seconds = float(email_config.get("timeout_seconds", 15))
+            use_tls = bool(email_config.get("use_tls", True))
+            require_starttls = bool(email_config.get("require_starttls", True))
+            username = email_config.get("username")
+            password = email_config.get("password")
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+            with smtplib.SMTP(
+                email_config["smtp_server"],
+                email_config.get("port", 587),
+                timeout=timeout_seconds,
+            ) as server:
+                server.ehlo()
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
+                if use_tls:
+                    if not server.has_extn("starttls"):
+                        return {
+                            "success": False,
+                            "error": "SMTP server does not support STARTTLS",
+                        }
+                    server.starttls(context=ssl.create_default_context())
+                    server.ehlo()
+                elif username and password and require_starttls:
+                    return {
+                        "success": False,
+                        "error": "Refusing SMTP authentication without TLS",
+                    }
 
-            server.send_message(msg)
-            server.quit()
+                if username and password:
+                    server.login(username, password)
+
+                server.send_message(msg)
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"
