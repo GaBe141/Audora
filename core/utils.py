@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Re-export for convenience
 try:
@@ -54,6 +55,7 @@ def write_json(
     indent: int = 2,
     ensure_ascii: bool = False,
     create_dirs: bool = True,
+    base_dir: Path | str | None = None,
 ) -> Path:
     """
     Write JSON file safely.
@@ -64,6 +66,8 @@ def write_json(
         indent: JSON indentation level
         ensure_ascii: Whether to escape non-ASCII characters
         create_dirs: Whether to create parent directories
+        base_dir: Optional base directory. If provided, the final path must
+            resolve within this directory.
 
     Returns:
         Path object of the written file
@@ -71,7 +75,9 @@ def write_json(
     Raises:
         Exception: If writing fails
     """
-    path = Path(path)
+    path = (
+        resolve_path_within_base(path, base_dir=base_dir) if base_dir is not None else Path(path)
+    )
     try:
         if create_dirs:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -84,6 +90,27 @@ def write_json(
     except Exception as e:
         logger.error(f"Failed to write JSON to {path}: {e}")
         raise
+
+
+def resolve_path_within_base(path: Path | str, base_dir: Path | str) -> Path:
+    """Resolve a path and ensure it stays within a trusted base directory."""
+    base_path = Path(base_dir).resolve()
+    raw_path = Path(path)
+
+    if raw_path.is_absolute():
+        resolved = raw_path.resolve()
+    else:
+        # Keep compatibility with existing callers that pass paths like "data/file.json".
+        root_relative = (PROJECT_ROOT / raw_path).resolve()
+        if root_relative.is_relative_to(base_path):
+            resolved = root_relative
+        else:
+            resolved = (base_path / raw_path).resolve()
+
+    if not resolved.is_relative_to(base_path):
+        raise ValueError(f"Unsafe path outside base directory '{base_path}': {raw_path}")
+
+    return resolved
 
 
 def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> Path:  # pd.DataFrame

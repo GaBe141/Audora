@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,42 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerializationSecurity:
+    """Security-focused tests for Redis cache serialization format handling."""
+
+    def test_rejects_signed_pickle_when_pickle_disabled(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        backend._allow_pickle = False
+
+        payload = b"\x80\x04N."  # Pickle for None
+        envelope = {
+            "v": 2,
+            "alg": "HMAC-SHA256",
+            "fmt": "pickle",
+            "sig": hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest(),
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        raw = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(raw) is None
+
+    def test_deserializes_signed_json_entry(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        backend._allow_pickle = False
+
+        obj = {"artist": "x", "score": 42, "tags": ["a", "b"]}
+        payload = json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        envelope = {
+            "v": 2,
+            "alg": "HMAC-SHA256",
+            "fmt": "json",
+            "sig": hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest(),
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        raw = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(raw) == obj
