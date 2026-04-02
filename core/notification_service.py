@@ -87,6 +87,8 @@ class EnhancedNotificationService:
 
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
+        self.project_root = Path(__file__).resolve().parent.parent
+        self.max_attachment_bytes = self._get_max_attachment_bytes()
         self.config = self._load_config(config_file)
         self.sent_notifications: dict[str, Any] = {}
         self.notification_history: list[dict[str, Any]] = []
@@ -211,6 +213,43 @@ class EnhancedNotificationService:
             "on",
         }
 
+    def _get_max_attachment_bytes(self) -> int:
+        """Get max attachment size from environment with safe fallback."""
+        configured = os.getenv("AUDORA_MAX_ATTACHMENT_BYTES", "10485760").strip()
+        try:
+            value = int(configured)
+            if value <= 0:
+                raise ValueError("must be positive")
+            return value
+        except (TypeError, ValueError):
+            self.logger.warning(
+                "Invalid AUDORA_MAX_ATTACHMENT_BYTES=%r, using default 10485760 bytes",
+                configured,
+            )
+            return 10 * 1024 * 1024
+
+    def _resolve_attachment_path(self, attachment_path: str) -> Path:
+        """Resolve and validate attachment paths to prevent local file exfiltration."""
+        candidate = Path(attachment_path)
+        if not candidate.is_absolute():
+            candidate = self.project_root / candidate
+
+        resolved = candidate.resolve(strict=True)
+        try:
+            resolved.relative_to(self.project_root)
+        except ValueError as e:
+            raise ValueError("Attachment path must stay within the project directory") from e
+
+        if not resolved.is_file():
+            raise ValueError("Attachment path must reference a regular file")
+
+        if resolved.stat().st_size > self.max_attachment_bytes:
+            raise ValueError(
+                f"Attachment exceeds max size ({self.max_attachment_bytes} bytes): {resolved.name}"
+            )
+
+        return resolved
+
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
         try:
@@ -233,6 +272,8 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
@@ -559,16 +600,25 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    try:
+                        safe_path = self._resolve_attachment_path(attachment_path)
+                    except (OSError, ValueError) as e:
+                        self.logger.warning(
+                            "Skipping unsafe attachment path %r: %s",
+                            attachment_path,
+                            e,
+                        )
+                        continue
+
+                    with safe_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename={safe_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
@@ -650,7 +700,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +767,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +827,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
