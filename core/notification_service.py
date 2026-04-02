@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -210,6 +211,22 @@ class EnhancedNotificationService:
             "yes",
             "on",
         }
+
+    def _allow_insecure_smtp(self) -> bool:
+        """Whether insecure SMTP transport is explicitly allowed."""
+        return os.getenv("AUDORA_ALLOW_INSECURE_SMTP", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _sanitize_email_header(self, value: str, header_name: str) -> str:
+        """Prevent header injection via CR/LF in email headers."""
+        cleaned = str(value).strip()
+        if "\r" in cleaned or "\n" in cleaned:
+            raise ValueError(f"Invalid {header_name}: header injection detected")
+        return cleaned
 
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
@@ -527,14 +544,20 @@ System status: {{ system_status }}
         """Send notification via email."""
         email_config = self.config.get("email", {})
 
-        if not email_config.get("smtp_server") or not email_config.get("recipients"):
+        recipients_raw = email_config.get("recipients", [])
+        recipients = [str(r).strip() for r in recipients_raw if str(r).strip()]
+        if not email_config.get("smtp_server") or not recipients:
             return {"success": False, "error": "Email not configured"}
 
         try:
             msg = MIMEMultipart("alternative")
-            msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
-            msg["Subject"] = message.title
+            msg["From"] = self._sanitize_email_header(
+                email_config.get("from_address", "music-discovery@example.com"), "From"
+            )
+            msg["To"] = ", ".join(
+                self._sanitize_email_header(recipient, "To") for recipient in recipients
+            )
+            msg["Subject"] = self._sanitize_email_header(message.title, "Subject")
 
             # Set priority
             if message.priority in [NotificationPriority.HIGH, NotificationPriority.CRITICAL]:
@@ -571,10 +594,24 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            server = smtplib.SMTP(
+                email_config["smtp_server"], email_config.get("port", 587), timeout=30
+            )
+            server.ehlo()
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                # Use certificate-verifying TLS context to prevent MITM interception.
+                tls_context = ssl.create_default_context()
+                server.starttls(context=tls_context)
+                server.ehlo()
+            elif not self._allow_insecure_smtp():
+                server.quit()
+                return {
+                    "success": False,
+                    "error": "Insecure SMTP without TLS is disabled",
+                }
+            else:
+                self.logger.warning("Using insecure SMTP without TLS due to override")
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -583,9 +620,9 @@ System status: {{ system_status }}
             server.quit()
 
             self.logger.info(
-                f"Email notification sent to {len(email_config['recipients'])} recipients"
+                f"Email notification sent to {len(recipients)} recipients"
             )
-            return {"success": True, "recipients": len(email_config["recipients"])}
+            return {"success": True, "recipients": len(recipients)}
 
         except Exception as e:
             self.logger.error(f"Failed to send email notification: {e}")
