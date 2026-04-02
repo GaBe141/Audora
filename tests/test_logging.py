@@ -68,6 +68,57 @@ class TestJSONFormatter:
         assert data["exception"]["type"] == "ValueError"
         assert "test error" in (data["exception"].get("message") or "")
 
+    def test_format_redacts_sensitive_extra_fields(self):
+        formatter = JSONFormatter()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=1,
+            msg="Sensitive payload",
+            args=(),
+            exc_info=None,
+        )
+        record.funcName = "f"
+        record.module = "m"
+        record.thread = 0
+        record.threadName = "Main"
+        record.getMessage = lambda: "Sensitive payload"
+        record.extra_fields = {
+            "api_key": "super-secret-key",
+            "nested": {"token": "abc123", "safe_field": "ok"},
+        }
+
+        output = formatter.format(record)
+        data = json.loads(output)
+        assert data["api_key"] == "[REDACTED]"
+        assert data["nested"]["token"] == "[REDACTED]"
+        assert data["nested"]["safe_field"] == "ok"
+
+    def test_format_redacts_sensitive_record_attributes(self):
+        formatter = JSONFormatter()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=1,
+            msg="Message",
+            args=(),
+            exc_info=None,
+        )
+        record.funcName = "f"
+        record.module = "m"
+        record.thread = 0
+        record.threadName = "Main"
+        record.getMessage = lambda: "Message"
+        record.authorization = "Bearer very-secret"
+        record.session_token = "secret-token"
+
+        output = formatter.format(record)
+        data = json.loads(output)
+        assert data["authorization"] == "[REDACTED]"
+        assert data["session_token"] == "[REDACTED]"
+
 
 class TestColoredConsoleFormatter:
     """Tests for ColoredConsoleFormatter - at least message and level appear."""
