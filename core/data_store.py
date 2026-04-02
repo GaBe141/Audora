@@ -73,6 +73,54 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    _EXPORT_BASE_QUERIES = {
+        "trends": "SELECT * FROM trends ORDER BY created_at DESC",
+        "trend_history": "SELECT * FROM trend_history ORDER BY created_at DESC",
+        "viral_predictions": "SELECT * FROM viral_predictions ORDER BY created_at DESC",
+        "cross_platform_correlations": (
+            "SELECT * FROM cross_platform_correlations ORDER BY created_at DESC"
+        ),
+        "artists": "SELECT * FROM artists ORDER BY created_at DESC",
+        "tracks": "SELECT * FROM tracks ORDER BY created_at DESC",
+    }
+    _EXPORT_DAYS_QUERIES = {
+        "trends": (
+            "SELECT * FROM trends "
+            "WHERE datetime(created_at) >= datetime('now', ?) "
+            "ORDER BY created_at DESC"
+        ),
+        "trend_history": (
+            "SELECT * FROM trend_history "
+            "WHERE datetime(created_at) >= datetime('now', ?) "
+            "ORDER BY created_at DESC"
+        ),
+        "viral_predictions": (
+            "SELECT * FROM viral_predictions "
+            "WHERE datetime(created_at) >= datetime('now', ?) "
+            "ORDER BY created_at DESC"
+        ),
+        "cross_platform_correlations": (
+            "SELECT * FROM cross_platform_correlations "
+            "WHERE datetime(created_at) >= datetime('now', ?) "
+            "ORDER BY created_at DESC"
+        ),
+        "artists": (
+            "SELECT * FROM artists "
+            "WHERE datetime(created_at) >= datetime('now', ?) "
+            "ORDER BY created_at DESC"
+        ),
+        "tracks": (
+            "SELECT * FROM tracks "
+            "WHERE datetime(created_at) >= datetime('now', ?) "
+            "ORDER BY created_at DESC"
+        ),
+    }
+    _QUALITY_TABLE_COUNT_QUERIES = {
+        "trends": "SELECT COUNT(*) FROM trends",
+        "trend_history": "SELECT COUNT(*) FROM trend_history",
+        "viral_predictions": "SELECT COUNT(*) FROM viral_predictions",
+        "cross_platform_correlations": "SELECT COUNT(*) FROM cross_platform_correlations",
+    }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
@@ -932,30 +980,16 @@ class EnhancedMusicDataStore:
 
         Note: Table name is validated against whitelist to prevent SQL injection.
         """
-        # Whitelist valid table names to prevent SQL injection
-        valid_tables = {
-            "trends",
-            "trend_history",
-            "viral_predictions",
-            "cross_platform_correlations",
-            "artists",
-            "tracks",
-        }
+        valid_tables = set(self._EXPORT_BASE_QUERIES)
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
         with self.get_connection() as conn:
             if days:
-                # Use parameterized query for days parameter
-                query = f"""
-                SELECT * FROM {table}
-                WHERE datetime(created_at) >= datetime('now', ?)
-                ORDER BY created_at DESC
-                """
+                query = self._EXPORT_DAYS_QUERIES[table]
                 df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
             else:
-                # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
+                query = self._EXPORT_BASE_QUERIES[table]
                 df = pd.read_sql_query(query, conn)
 
             # Ensure directory exists
@@ -973,12 +1007,8 @@ class EnhancedMusicDataStore:
 
             # Table row counts with validated table names
             table_stats = {}
-            # Whitelist of valid tables to prevent SQL injection
-            tables = ["trends", "trend_history", "viral_predictions", "cross_platform_correlations"]
-
-            for table in tables:
-                # Table names are from whitelist, safe to use
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+            for table, count_query in self._QUALITY_TABLE_COUNT_QUERIES.items():
+                cursor.execute(count_query)
                 table_stats[table] = cursor.fetchone()[0]
 
             # Data quality checks
