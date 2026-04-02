@@ -11,7 +11,7 @@ from typing import Any
 
 import aiohttp
 
-from core.utils import write_json
+from core.utils import build_safe_output_path, write_json
 
 # Import our existing trending schema
 from integrations.trending_schema import TrendingSchema
@@ -758,9 +758,12 @@ class SocialMusicDiscoveryEngine:
         """Save discovery report to file using centralized utility."""
         if filepath is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = f"data/social_discovery_report_{timestamp}.json"
+            default_filename = f"social_discovery_report_{timestamp}.json"
+        else:
+            default_filename = "social_discovery_report.json"
 
-        saved_path = write_json(filepath, report)
+        safe_path = build_safe_output_path(filepath, base_dir="data", default_filename=default_filename)
+        saved_path = write_json(safe_path, report)
         return str(saved_path)
 
 
