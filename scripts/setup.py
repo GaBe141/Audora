@@ -193,6 +193,7 @@ class EnhancedMusicDiscoverySetup:
             try:
                 with open(config_path, "w") as f:
                     json.dump(config_data, f, indent=2)
+                self._set_restrictive_permissions(config_path)
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -524,12 +525,24 @@ ENABLE_NOTIFICATIONS=True
         try:
             with open(env_path, "w") as f:
                 f.write(env_template.strip())
+            self._set_restrictive_permissions(env_path)
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True
         except Exception as e:
             self.logger.error(f"  Failed to create .env file: {e}")
             return False
+
+    def _set_restrictive_permissions(self, file_path: Path) -> None:
+        """Set restrictive file permissions for secret-bearing files."""
+        if platform.system().lower().startswith("win"):
+            return
+        try:
+            file_path.chmod(0o600)
+        except Exception as e:
+            self.logger.warning(
+                f"  Could not set restrictive permissions on {file_path}: {e}"
+            )
 
     def validate_installation(self) -> bool:
         """Validate the installation."""
