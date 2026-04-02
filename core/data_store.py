@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import resolve_path_within_base
 
 
 @dataclass
@@ -958,13 +959,14 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            data_dir = Path(__file__).resolve().parent.parent / "data"
+            safe_path = resolve_path_within_base(filepath, base_dir=data_dir)
+            safe_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(safe_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {safe_path}")
 
-        return filepath
+        return str(safe_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
