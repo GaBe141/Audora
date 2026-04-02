@@ -6,6 +6,7 @@ Installs dependencies, configures services, and validates the system.
 
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -191,8 +192,10 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
+                with open(config_path, "w", encoding="utf-8") as f:
                     json.dump(config_data, f, indent=2)
+                if os.name != "nt":
+                    os.chmod(config_path, 0o600)
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -473,8 +476,10 @@ System Status: {{ system_status }}
         for template_name, template_content in templates.items():
             template_path = self.templates_dir / template_name
             try:
-                with open(template_path, "w") as f:
+                with open(template_path, "w", encoding="utf-8") as f:
                     f.write(template_content.strip())
+                if os.name != "nt":
+                    os.chmod(template_path, 0o600)
                 self.logger.info(f"  Created template: {template_name}")
             except Exception as e:
                 self.logger.error(f"  Failed to create template {template_name}: {e}")
@@ -522,8 +527,10 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
+            with open(env_path, "w", encoding="utf-8") as f:
                 f.write(env_template.strip())
+            if os.name != "nt":
+                os.chmod(env_path, 0o600)
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True
