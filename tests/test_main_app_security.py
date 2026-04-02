@@ -1,8 +1,13 @@
 """Security-focused tests for report path handling in main_app."""
 
+import sys
 from pathlib import Path
 
 import pytest
+
+INTEGRATIONS_DIR = Path(__file__).resolve().parent.parent / "integrations"
+if str(INTEGRATIONS_DIR) not in sys.path:
+    sys.path.insert(0, str(INTEGRATIONS_DIR))
 
 from core.main_app import ComprehensiveMusicDiscoveryApp
 
