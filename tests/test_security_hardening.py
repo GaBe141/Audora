@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from core.main_app import ComprehensiveMusicDiscoveryApp
 from core.utils import DEFAULT_DATA_DIR, resolve_data_output_path
 from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
 
@@ -21,18 +20,17 @@ class TestPathSafety:
         assert result.is_absolute()
         assert result.is_relative_to(DEFAULT_DATA_DIR)
 
-    def test_main_app_rejects_unsafe_custom_filename(self):
-        app = ComprehensiveMusicDiscoveryApp()
+    def test_resolve_data_output_path_rejects_absolute_outside_data_dir(self):
         with pytest.raises(ValueError, match="outside data directory"):
-            app.save_discovery_report({"ok": True}, custom_filename="../../etc/passwd")
+            resolve_data_output_path("/etc/passwd")
 
     def test_social_engine_rejects_unsafe_filepath(self):
         engine = SocialMusicDiscoveryEngine(config={"mock_mode": "true"})
         with pytest.raises(ValueError, match="outside data directory"):
             engine.save_discovery_report({"ok": True}, filepath="../../etc/passwd")
 
-    def test_main_app_writes_under_data_dir(self):
-        app = ComprehensiveMusicDiscoveryApp()
-        output = Path(app.save_discovery_report({"ok": True}, custom_filename="reports/test.json"))
+    def test_social_engine_writes_under_data_dir(self):
+        engine = SocialMusicDiscoveryEngine(config={"mock_mode": "true"})
+        output = Path(engine.save_discovery_report({"ok": True}, filepath="reports/test.json"))
         assert output.is_relative_to(DEFAULT_DATA_DIR)
 
