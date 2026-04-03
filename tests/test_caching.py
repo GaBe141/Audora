@@ -2,8 +2,11 @@
 
 import time
 
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,42 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused serialization behavior for Redis backend."""
+
+    def test_rejects_legacy_pickle_envelope(self, monkeypatch):
+        monkeypatch.setattr("core.caching.REDIS_AVAILABLE", True)
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        # Simulate the old v1 envelope format that carried pickle bytes.
+        legacy_payload = b"this-would-have-been-pickle"
+        legacy_sig = __import__("hmac").new(
+            backend._signing_key, legacy_payload, __import__("hashlib").sha256
+        ).hexdigest()
+        legacy_entry = (
+            __import__("json")
+            .dumps(
+                {
+                    "v": 1,
+                    "alg": "HMAC-SHA256",
+                    "sig": legacy_sig,
+                    "payload": __import__("base64")
+                    .b64encode(legacy_payload)
+                    .decode("ascii"),
+                }
+            )
+            .encode("utf-8")
+        )
+
+        assert backend._deserialize(legacy_entry) is None
+
+    def test_unsupported_value_type_raises(self, monkeypatch):
+        monkeypatch.setattr("core.caching.REDIS_AVAILABLE", True)
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        with pytest.raises(TypeError, match="not JSON-serializable"):
+            backend._serialize({"bad": {1, 2, 3}})

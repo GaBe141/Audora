@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import resolve_data_output_path
 
 
 @dataclass
@@ -698,7 +699,12 @@ class EnhancedMusicDataStore:
                 df["metadata"] = df["metadata"].apply(lambda x: json.loads(x) if x else {})
 
             # Cache for 5 minutes
-            self._cache.set(cache_key, df, ttl=300)
+            try:
+                self._cache.set(cache_key, df, ttl=300)
+            except TypeError as exc:
+                self.logger.warning(
+                    f"Skipping cache for bulk tracks query due to serialization constraints: {exc}"
+                )
             self.logger.debug(f"Loaded {len(df)} tracks in bulk query")
 
             return df
@@ -769,7 +775,12 @@ class EnhancedMusicDataStore:
             }
 
             # Cache for 10 minutes
-            self._cache.set(cache_key, result, ttl=600)
+            try:
+                self._cache.set(cache_key, result, ttl=600)
+            except TypeError as exc:
+                self.logger.warning(
+                    f"Skipping cache for trending summary due to serialization constraints: {exc}"
+                )
             self.logger.debug("Cached trending summary")
 
             return result
@@ -958,13 +969,13 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            safe_path = resolve_data_output_path(filepath)
+            safe_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(safe_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {safe_path}")
 
-        return filepath
+        return str(safe_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
