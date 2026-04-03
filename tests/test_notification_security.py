@@ -1,8 +1,13 @@
-"""Security tests for notification webhook URL validation."""
+"""Security tests for notification webhook URL validation and key generation."""
 
 import pytest
 
-from core.notification_service import EnhancedNotificationService
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
 
 
 class TestWebhookUrlValidation:
@@ -27,3 +32,25 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+
+class TestMessageKeyGeneration:
+    """Validate message deduplication key behavior."""
+
+    def test_message_key_is_deterministic_and_hex(self):
+        svc = EnhancedNotificationService()
+        message = NotificationMessage(
+            title="Critical Alert",
+            content="A" * 150,  # key generation only uses first 100 chars
+            priority=NotificationPriority.CRITICAL,
+            channels=[NotificationChannel.CONSOLE],
+        )
+
+        first = svc._generate_message_key(message)
+        second = svc._generate_message_key(message)
+        assert first == second
+
+        digest, priority = first.split(":", 1)
+        assert len(digest) == 64
+        assert all(c in "0123456789abcdef" for c in digest)
+        assert priority == NotificationPriority.CRITICAL.value
