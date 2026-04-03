@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.utils import resolve_path_within_base
 from integrations.api_config import SocialAPIManager
 from integrations.extended_platforms import ExtendedSocialDiscoveryEngine
 from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
@@ -35,6 +36,7 @@ class ComprehensiveMusicDiscoveryApp:
         self.last_discovery_run: datetime | None = None
         self.discovery_cache: dict[str, Any] = {}
         self.analytics_data: list[Any] = []
+        self.report_base_dir = Path("data").resolve()
 
         self._initialize_engines()
 
@@ -343,13 +345,13 @@ class ComprehensiveMusicDiscoveryApp:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"data/comprehensive_discovery_report_{timestamp}.json"
 
-        filepath = Path(filename)
+        filepath = resolve_path_within_base(filename, self.report_base_dir)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        with filepath.open("w", encoding="utf-8") as f:
             json.dump(discovery_results, f, indent=2, default=str, ensure_ascii=False)
 
-        return str(filepath)
+        return str(filepath.relative_to(Path.cwd()))
 
     async def run_continuous_monitoring(
         self, interval_hours: int = 4, regions: list[str] | None = None
