@@ -7,10 +7,10 @@ fallback to in-memory caching when Redis is unavailable.
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -187,11 +187,16 @@ class RedisCacheBackend(CacheBackend):
         return os.urandom(32)
 
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value with integrity protection.
+
+        Only JSON-safe values and pandas DataFrames are supported in Redis cache
+        to avoid unsafe object deserialization.
+        """
+        serialized_payload = self._serialize_payload(value)
+        payload = serialized_payload.encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
@@ -204,7 +209,7 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -223,10 +228,53 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return self._deserialize_payload(payload.decode("utf-8"))
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
+
+    def _serialize_payload(self, value: Any) -> str:
+        """Serialize supported values to a JSON payload string."""
+        # Delay pandas import to avoid hard dependency for non-dataframe usage.
+        try:
+            import pandas as pd
+        except Exception:  # pragma: no cover - optional dependency guard
+            pd = None
+
+        if pd is not None and isinstance(value, pd.DataFrame):
+            payload: dict[str, Any] = {
+                "t": "dataframe",
+                "v": value.to_json(orient="split", date_format="iso"),
+            }
+        else:
+            try:
+                json.dumps(value)
+            except TypeError as exc:
+                raise TypeError(
+                    "Redis cache only supports JSON-serializable values and pandas DataFrames"
+                ) from exc
+            payload = {"t": "json", "v": value}
+
+        return json.dumps(payload, separators=(",", ":"))
+
+    def _deserialize_payload(self, payload: str) -> Any:
+        """Deserialize payload encoded by _serialize_payload."""
+        decoded = json.loads(payload)
+        if not isinstance(decoded, dict) or "t" not in decoded:
+            raise ValueError("Invalid cache payload format")
+
+        payload_type = decoded["t"]
+        if payload_type == "json":
+            return decoded.get("v")
+        if payload_type == "dataframe":
+            import pandas as pd
+
+            dataframe_payload = decoded.get("v")
+            if not isinstance(dataframe_payload, str):
+                raise ValueError("Invalid dataframe cache payload")
+            return pd.read_json(io.StringIO(dataframe_payload), orient="split")
+
+        raise ValueError(f"Unsupported cache payload type: {payload_type}")
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
@@ -337,7 +385,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (JSON-serializable or pandas DataFrame for Redis backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
