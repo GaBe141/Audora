@@ -65,6 +65,20 @@ class TestGetTracksWithArtistsBulk:
         df = data_store.get_tracks_with_artists_bulk([])
         assert df.empty
 
+    def test_get_tracks_with_artists_bulk_cache_key_is_stable(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        pairs = [(t.track_name, t.artist) for t in sample_trends]
+
+        first = data_store.get_tracks_with_artists_bulk(pairs)
+        second = data_store.get_tracks_with_artists_bulk(list(reversed(pairs)))
+
+        assert not first.empty
+        assert not second.empty
+        # Same logical query should return identical rows regardless of pair order.
+        assert first.sort_values(["track_id"]).reset_index(drop=True).equals(
+            second.sort_values(["track_id"]).reset_index(drop=True)
+        )
+
 
 class TestGetTrendingSummaryCached:
     """Test get_trending_summary_cached returns same result on second call (cache hit)."""
