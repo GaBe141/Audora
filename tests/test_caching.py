@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import os
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +126,60 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerializationSecurity:
+    """Security-focused tests for RedisCacheBackend serialization behavior."""
+
+    def test_rejects_pickle_payload_without_opt_in(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "test-signing-key")
+        monkeypatch.delenv("AUDORA_CACHE_ALLOW_PICKLE", raising=False)
+
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        payload = __import__("pickle").dumps({"sensitive": "value"})
+        envelope = {
+            "v": 2,
+            "alg": "HMAC-SHA256",
+            "fmt": "pickle",
+            "sig": hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest(),
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        serialized = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(serialized) is None
+
+    def test_json_payload_roundtrip_by_default(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "test-signing-key")
+        monkeypatch.delenv("AUDORA_CACHE_ALLOW_PICKLE", raising=False)
+
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        value = {"track": "Example", "score": 99, "flags": [1, 2, 3]}
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+        assert restored == value
+
+    def test_non_json_serialize_requires_pickle_opt_in(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "test-signing-key")
+        monkeypatch.delenv("AUDORA_CACHE_ALLOW_PICKLE", raising=False)
+
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        with pytest.raises(ValueError, match="AUDORA_CACHE_ALLOW_PICKLE=true"):
+            backend._serialize({"values": {1, 2, 3}})
+
+    def test_pickle_allowed_when_opted_in(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "test-signing-key")
+        monkeypatch.setenv("AUDORA_CACHE_ALLOW_PICKLE", "true")
+
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        value = {"values": {1, 2, 3}}
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+        assert restored == value
