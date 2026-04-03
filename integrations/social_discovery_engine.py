@@ -4,6 +4,7 @@ Integrates TikTok, YouTube, Instagram, Twitter, and other platforms to track Gen
 """
 
 import asyncio
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
@@ -11,7 +12,7 @@ from typing import Any
 
 import aiohttp
 
-from core.utils import write_json
+from core.utils import resolve_path_within_base, write_json
 
 # Import our existing trending schema
 from integrations.trending_schema import TrendingSchema
@@ -760,7 +761,8 @@ class SocialMusicDiscoveryEngine:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filepath = f"data/social_discovery_report_{timestamp}.json"
 
-        saved_path = write_json(filepath, report)
+        target_path = resolve_path_within_base(filepath, "data")
+        saved_path = write_json(target_path, report)
         return str(saved_path)
 
 

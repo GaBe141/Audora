@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import resolve_path_within_base
 
 
 @dataclass
@@ -73,10 +74,12 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    _SAFE_EXPORT_BASE_DIR = Path("data") / "exports"
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
         self.backup_dir = Path(backup_dir)
+        self.export_base_dir = self._SAFE_EXPORT_BASE_DIR.resolve()
         self.backup_dir.mkdir(exist_ok=True)
         self.logger = logging.getLogger(__name__)
 
@@ -944,6 +947,8 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        safe_output_path = resolve_path_within_base(filepath, self.export_base_dir)
+
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -959,12 +964,14 @@ class EnhancedMusicDataStore:
                 df = pd.read_sql_query(query, conn)
 
             # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            safe_output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(safe_output_path, index=False)
+            self.logger.info(
+                f"Exported {len(df)} rows from {table} to {safe_output_path}"
+            )
 
-        return filepath
+        return str(safe_output_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""

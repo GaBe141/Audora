@@ -18,6 +18,48 @@ except ImportError:
 
 
 # JSON utilities
+def resolve_path_within_base(path: Path | str, base_dir: Path | str) -> Path:
+    """
+    Resolve a user-provided path and ensure it stays within a trusted base directory.
+
+    Relative paths are accepted in two forms:
+    - Explicit base-relative path (e.g. "data/report.json")
+    - Shorthand relative path (e.g. "report.json"), which is resolved under base_dir
+
+    Args:
+        path: User-provided file path
+        base_dir: Allowed base directory
+
+    Returns:
+        Resolved absolute path within base_dir
+
+    Raises:
+        ValueError: If resolved path is outside of base_dir
+    """
+    base = Path(base_dir).resolve()
+    candidate = Path(path).expanduser()
+
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+    else:
+        # Preserve existing behavior for callers that already pass "data/..."
+        candidate_from_cwd = candidate.resolve()
+        try:
+            candidate_from_cwd.relative_to(base)
+            resolved = candidate_from_cwd
+        except ValueError:
+            resolved = (base / candidate).resolve()
+
+    try:
+        resolved.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(
+            f"Refusing to write outside of allowed base directory '{base}': {resolved}"
+        ) from exc
+
+    return resolved
+
+
 def read_json(path: Path | str, default: Any = None) -> Any:
     """
     Read JSON file safely.
@@ -54,6 +96,7 @@ def write_json(
     indent: int = 2,
     ensure_ascii: bool = False,
     create_dirs: bool = True,
+    allowed_base_dir: Path | str | None = None,
 ) -> Path:
     """
     Write JSON file safely.
@@ -64,6 +107,7 @@ def write_json(
         indent: JSON indentation level
         ensure_ascii: Whether to escape non-ASCII characters
         create_dirs: Whether to create parent directories
+        allowed_base_dir: Optional base directory; rejects paths outside this directory
 
     Returns:
         Path object of the written file
@@ -71,7 +115,10 @@ def write_json(
     Raises:
         Exception: If writing fails
     """
-    path = Path(path)
+    if allowed_base_dir is not None:
+        path = resolve_path_within_base(path, allowed_base_dir)
+    else:
+        path = Path(path)
     try:
         if create_dirs:
             path.parent.mkdir(parents=True, exist_ok=True)
