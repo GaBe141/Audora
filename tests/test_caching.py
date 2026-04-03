@@ -1,9 +1,16 @@
-"""Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
+"""Tests for core caching (LocalCacheBackend, CacheManager, Redis serialization)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+from unittest.mock import MagicMock, patch
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +125,84 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSerialization:
+    """Security-focused tests for Redis cache serialization/deserialization."""
+
+    def _make_backend(self, allow_pickle: str = ""):
+        fake_client = MagicMock()
+        fake_client.ping.return_value = True
+        fake_pool = MagicMock()
+
+        with (
+            patch("core.caching.ConnectionPool", return_value=fake_pool),
+            patch("core.caching.redis.Redis", return_value=fake_client),
+            patch.dict(
+                "os.environ",
+                {
+                    "AUDORA_CACHE_SIGNING_KEY": "test-signing-key",
+                    "AUDORA_CACHE_ALLOW_PICKLE": allow_pickle,
+                },
+                clear=False,
+            ),
+        ):
+            backend = RedisCacheBackend()
+        return backend
+
+    def test_json_serialization_roundtrip_by_default(self):
+        backend = self._make_backend()
+        value = {"track": "abc", "score": 88.5, "tags": ["pop", "viral"]}
+        serialized = backend._serialize(value)
+        assert backend._deserialize(serialized) == value
+
+    def test_non_json_value_rejected_when_pickle_disabled(self):
+        backend = self._make_backend()
+        value = {"invalid": {1, 2, 3}}  # set is not JSON serializable
+        try:
+            backend._serialize(value)
+            assert False, "Expected ValueError for non-JSON value when pickle is disabled"
+        except ValueError as exc:
+            assert "AUDORA_CACHE_ALLOW_PICKLE" in str(exc)
+
+    def test_pickle_allowed_only_when_opted_in(self):
+        backend = self._make_backend(allow_pickle="true")
+        value = {"invalid": {1, 2, 3}}  # requires pickle fallback
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+        assert restored["invalid"] == {1, 2, 3}
+
+    def test_rejects_pickle_payload_when_pickle_disabled(self):
+        backend = self._make_backend()
+        payload = pickle.dumps({"danger": "data"}, protocol=pickle.HIGHEST_PROTOCOL)
+        signature = hmac.new(
+            b"test-signing-key",
+            payload,
+            hashlib.sha256,
+        ).hexdigest()
+        envelope = {
+            "v": 2,
+            "fmt": "pickle",
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        encoded = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(encoded) is None
+
+    def test_rejects_legacy_v1_pickle_when_pickle_disabled(self):
+        backend = self._make_backend()
+        payload = pickle.dumps({"legacy": True}, protocol=pickle.HIGHEST_PROTOCOL)
+        signature = hmac.new(
+            b"test-signing-key",
+            payload,
+            hashlib.sha256,
+        ).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        encoded = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(encoded) is None
