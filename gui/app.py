@@ -4,7 +4,9 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
+import hmac
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -199,6 +201,26 @@ _settings_tab = dbc.Tab(
     tab_id="tab-settings",
     children=[
         html.H5("Notification Channels", className="mt-3 mb-3"),
+        dbc.Alert(
+            "Sensitive actions require an admin token. "
+            "Set AUDORA_GUI_ADMIN_TOKEN in the environment.",
+            color="warning",
+            className="py-2",
+        ),
+        dbc.Row(
+            [
+                dbc.Col(html.Label("Admin Token", className="small text-muted pt-2"), width=2),
+                dbc.Col(
+                    dbc.Input(
+                        id="input-admin-token",
+                        placeholder="Required to save/test settings",
+                        type="password",
+                    ),
+                    width=7,
+                ),
+            ],
+            className="mb-3 align-items-center",
+        ),
         _channel_row("Slack Webhook", "input-slack-url", "slack"),
         _channel_row("Discord Webhook", "input-discord-url", "discord"),
         _channel_row("Custom Webhook", "input-webhook-url", "webhook"),
@@ -369,6 +391,17 @@ def _get_data_store():
     from core.data_store import EnhancedMusicDataStore
     db_path = PROJECT_ROOT / "data" / "enhanced_music_trends.db"
     return EnhancedMusicDataStore(str(db_path))
+
+
+def _require_admin_token(provided_token: str | None) -> None:
+    """Gate sensitive GUI actions behind an operator-provided admin token."""
+    expected_token = os.getenv("AUDORA_GUI_ADMIN_TOKEN", "").strip()
+    if not expected_token:
+        raise PermissionError(
+            "Admin actions are disabled. Set AUDORA_GUI_ADMIN_TOKEN to enable settings changes."
+        )
+    if not provided_token or not hmac.compare_digest(str(provided_token), expected_token):
+        raise PermissionError("Invalid admin token.")
 
 
 # ---------------------------------------------------------------------------
@@ -582,10 +615,22 @@ def export_csv(_n, table_data):
     State("input-smtp-port", "value"),
     State("input-smtp-user", "value"),
     State("input-smtp-pass", "value"),
+    State("input-admin-token", "value"),
     prevent_initial_call=True,
 )
-def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+def save_settings(
+    _n,
+    slack_url,
+    discord_url,
+    webhook_url,
+    smtp_host,
+    smtp_port,
+    smtp_user,
+    smtp_pass,
+    admin_token,
+):
     try:
+        _require_admin_token(admin_token)
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
@@ -600,9 +645,9 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
             svc.config["email"]["port"] = int(smtp_port)
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
-        if smtp_pass:
-            svc.config["email"]["password"] = smtp_pass
         svc.save_config()
+        if smtp_pass:
+            return "Saved (SMTP password is not stored; set SMTP_PASSWORD env var)."
         return "Saved"
     except Exception as e:
         return f"Error: {e}"
@@ -615,12 +660,14 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         Output(f"test-status-{channel_key}", "children"),
         Input(f"btn-test-{channel_key}", "n_clicks"),
         State(url_input_id, "value"),
+        State("input-admin-token", "value"),
         prevent_initial_call=True,
     )
-    def _cb(_n, url):
+    def _cb(_n, url, admin_token):
         if not url:
             return "No URL"
         try:
+            _require_admin_token(admin_token)
             import asyncio
             from core.notification_service import (
                 EnhancedNotificationService,
