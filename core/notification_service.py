@@ -794,12 +794,13 @@ System status: {{ system_status }}
                 payload["formatted_content"] = template.render(**message.template_vars)
 
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
-            timeout = webhook_config.get("timeout", 30)
+            timeout = float(webhook_config.get("timeout", 30))
+            sanitized_headers = {k: v for k, v in headers.items() if isinstance(v, str) and v}
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url, json=payload, headers=sanitized_headers
                 ) as response,
             ):
                 if 200 <= response.status < 300:
