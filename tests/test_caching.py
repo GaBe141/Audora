@@ -81,6 +81,17 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_build_cache_key_uses_sha256_digests(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ("alpha", 123), {"zeta": "omega"})
+        parts = key.split(":")
+        assert parts[0] == "prefix"
+        # positional args digest
+        assert len(parts[1]) == 64
+        assert all(c in "0123456789abcdef" for c in parts[1])
+        # kwargs digest
+        assert len(parts[2]) == 64
+        assert all(c in "0123456789abcdef" for c in parts[2])
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
