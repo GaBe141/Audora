@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DATA_DIR = (PROJECT_ROOT / "data").resolve()
 
 # Re-export for convenience
 try:
@@ -18,6 +20,32 @@ except ImportError:
 
 
 # JSON utilities
+def resolve_data_output_path(path: Path | str, data_dir: Path | str = DEFAULT_DATA_DIR) -> Path:
+    """Resolve a report/output path and enforce that it stays under data_dir.
+
+    Relative paths are resolved under ``data_dir`` by default.
+    Absolute paths are allowed only when they remain inside ``data_dir``.
+    """
+    safe_data_dir = Path(data_dir).resolve()
+    candidate = Path(path)
+
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+    else:
+        # Keep report outputs in the project data directory by default.
+        if candidate.parts and candidate.parts[0] == safe_data_dir.name:
+            resolved = (PROJECT_ROOT / candidate).resolve()
+        else:
+            resolved = (safe_data_dir / candidate).resolve()
+
+    try:
+        resolved.relative_to(safe_data_dir)
+    except ValueError as exc:
+        raise ValueError(f"Refusing to write outside data directory: {resolved}") from exc
+
+    return resolved
+
+
 def read_json(path: Path | str, default: Any = None) -> Any:
     """
     Read JSON file safely.
