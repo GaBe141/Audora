@@ -17,6 +17,7 @@ from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
+_TRUTHY_VALUES = {"1", "true", "yes", "on"}
 
 # Try to import Redis, fall back to local cache if unavailable
 try:
@@ -186,13 +187,30 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _allow_pickle(self) -> bool:
+        """Return True when pickle serialization is explicitly enabled."""
+        raw_value = os.getenv("AUDORA_CACHE_ALLOW_PICKLE", "").strip().lower()
+        return raw_value in _TRUTHY_VALUES
+
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload_format = "json"
+        try:
+            payload = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        except (TypeError, ValueError):
+            if not self._allow_pickle():
+                raise ValueError(
+                    "Refusing to cache non-JSON-serializable value: "
+                    "set AUDORA_CACHE_ALLOW_PICKLE=true to enable pickle serialization."
+                )
+            payload_format = "pickle"
+            payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "fmt": payload_format,
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
@@ -202,14 +220,22 @@ class RedisCacheBackend(CacheBackend):
         """Deserialize cache value only after signature verification."""
         try:
             envelope = json.loads(value.decode("utf-8"))
-            if (
-                not isinstance(envelope, dict)
-                or envelope.get("v") != 1
-                or envelope.get("alg") != "HMAC-SHA256"
-                or "sig" not in envelope
-                or "payload" not in envelope
-            ):
+            if not isinstance(envelope, dict) or envelope.get("alg") != "HMAC-SHA256":
                 logger.warning("Rejected cache entry with invalid serialization envelope")
+                return None
+
+            version = envelope.get("v")
+            if version not in {1, 2}:
+                logger.warning("Rejected cache entry with unsupported serialization version")
+                return None
+
+            payload_format = "pickle" if version == 1 else envelope.get("fmt")
+            if payload_format not in {"json", "pickle"}:
+                logger.warning("Rejected cache entry with unknown payload format")
+                return None
+
+            if "sig" not in envelope or "payload" not in envelope:
+                logger.warning("Rejected cache entry missing signature fields")
                 return None
 
             payload_b64 = envelope["payload"]
@@ -223,6 +249,14 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
+            if payload_format == "json":
+                return json.loads(payload.decode("utf-8"))
+
+            if not self._allow_pickle():
+                logger.warning(
+                    "Rejected pickle cache entry because AUDORA_CACHE_ALLOW_PICKLE is not enabled"
+                )
+                return None
             return pickle.loads(payload)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
@@ -432,12 +466,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
