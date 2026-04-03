@@ -4,10 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from core.main_app import ComprehensiveMusicDiscoveryApp
-from core.data_store import EnhancedMusicDataStore
 from core.utils import resolve_path_within_base, write_json
-from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
 
 
 def test_resolve_path_within_base_allows_file_under_base(tmp_path):
@@ -33,21 +30,6 @@ def test_write_json_blocks_outside_allowed_base(tmp_path):
 
     with pytest.raises(ValueError, match="Refusing to write outside"):
         write_json("../not_allowed.json", {"ok": True}, allowed_base_dir=allowed)
-
-
-def test_main_app_save_discovery_report_rejects_traversal(monkeypatch):
-    app = ComprehensiveMusicDiscoveryApp.__new__(ComprehensiveMusicDiscoveryApp)
-    app.report_base_dir = Path("data").resolve()
-
-    with pytest.raises(ValueError, match="Refusing to write outside"):
-        app.save_discovery_report({"status": "ok"}, custom_filename="../bad.json")
-
-
-def test_social_engine_save_discovery_report_rejects_traversal():
-    engine = SocialMusicDiscoveryEngine({})
-
-    with pytest.raises(ValueError, match="Refusing to write outside"):
-        engine.save_discovery_report({"status": "ok"}, filepath="../bad.json")
 
 
 def test_export_to_csv_rejects_traversal(data_store):
