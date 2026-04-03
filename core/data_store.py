@@ -73,6 +73,16 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    _ALLOWED_TABLES = frozenset(
+        {
+            "trends",
+            "trend_history",
+            "viral_predictions",
+            "cross_platform_correlations",
+            "artists",
+            "tracks",
+        }
+    )
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
@@ -95,6 +105,15 @@ class EnhancedMusicDataStore:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=10000")
             conn.execute("PRAGMA temp_store=memory")
+
+    def _validate_table_name(self, table: str) -> str:
+        """Validate table names used in dynamic SQL fragments."""
+        normalized = table.strip()
+        if normalized not in self._ALLOWED_TABLES:
+            raise ValueError(
+                f"Invalid table name: {table}. Must be one of {sorted(self._ALLOWED_TABLES)}"
+            )
+        return normalized
 
     def _get_pooled_connection(self) -> sqlite3.Connection:
         """Get a connection from the pool or create a new one."""
@@ -932,37 +951,27 @@ class EnhancedMusicDataStore:
 
         Note: Table name is validated against whitelist to prevent SQL injection.
         """
-        # Whitelist valid table names to prevent SQL injection
-        valid_tables = {
-            "trends",
-            "trend_history",
-            "viral_predictions",
-            "cross_platform_correlations",
-            "artists",
-            "tracks",
-        }
-        if table not in valid_tables:
-            raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
+        validated_table = self._validate_table_name(table)
 
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
                 query = f"""
-                SELECT * FROM {table}
+                SELECT * FROM {validated_table}
                 WHERE datetime(created_at) >= datetime('now', ?)
                 ORDER BY created_at DESC
                 """
                 df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
             else:
                 # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
+                query = f"SELECT * FROM {validated_table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
             # Ensure directory exists
             Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
 
             df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            self.logger.info(f"Exported {len(df)} rows from {validated_table} to {filepath}")
 
         return filepath
 
@@ -978,7 +987,8 @@ class EnhancedMusicDataStore:
 
             for table in tables:
                 # Table names are from whitelist, safe to use
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                validated_table = self._validate_table_name(table)
+                cursor.execute(f"SELECT COUNT(*) FROM {validated_table}")
                 table_stats[table] = cursor.fetchone()[0]
 
             # Data quality checks
