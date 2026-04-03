@@ -1,5 +1,7 @@
 """Security tests for notification webhook URL validation."""
 
+from unittest.mock import patch
+
 import pytest
 
 from core.notification_service import EnhancedNotificationService
@@ -27,3 +29,19 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_rejects_urls_with_embedded_credentials(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="embedded credentials"):
+            svc._validate_webhook_url("https://user:pass@example.com/webhook")
+
+    def test_rejects_invalid_port(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="invalid port"):
+            svc._validate_webhook_url("https://example.com:70000/webhook")
+
+    @patch("socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 443))])
+    def test_allows_valid_public_https_url(self, _mock_getaddrinfo):
+        svc = EnhancedNotificationService()
+        url = "https://example.com/webhook"
+        assert svc._validate_webhook_url(url) == url
