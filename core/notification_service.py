@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -193,6 +194,7 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = self._remove_sensitive_fields(to_save)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -201,6 +203,32 @@ class EnhancedNotificationService:
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _remove_sensitive_fields(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Drop secrets before persisting config to disk."""
+        # Deep-copy via JSON to avoid mutating runtime config state.
+        # This config structure is JSON-compatible by design.
+        sanitized = json.loads(json.dumps(config))
+
+        email_cfg = sanitized.get("email")
+        if isinstance(email_cfg, dict):
+            email_cfg.pop("password", None)
+
+        sms_cfg = sanitized.get("sms")
+        if isinstance(sms_cfg, dict):
+            sms_cfg.pop("api_key", None)
+            sms_cfg.pop("api_secret", None)
+
+        webhook_cfg = sanitized.get("webhook")
+        if isinstance(webhook_cfg, dict):
+            headers = webhook_cfg.get("headers")
+            if isinstance(headers, dict):
+                for key in list(headers.keys()):
+                    lowered = key.lower()
+                    if lowered in {"authorization", "x-api-key", "x-auth-token"}:
+                        headers.pop(key, None)
+
+        return sanitized
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
@@ -574,7 +602,7 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])

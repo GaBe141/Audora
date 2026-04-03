@@ -2,8 +2,12 @@
 
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,38 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for Redis cache serialization helpers."""
+
+    @staticmethod
+    def _build_backend_for_tests() -> RedisCacheBackend:
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key-32-bytes-minimum!"
+        return backend
+
+    def test_serialize_deserialize_json_payload(self):
+        backend = self._build_backend_for_tests()
+        value = {"ok": True, "count": 3, "items": ["a", "b"]}
+
+        encoded = backend._serialize(value)
+        decoded = backend._deserialize(encoded)
+
+        assert decoded == value
+
+    def test_serialize_deserialize_dataframe_payload(self):
+        backend = self._build_backend_for_tests()
+        value = pd.DataFrame({"artist": ["A", "B"], "score": [91.5, 82.0]})
+
+        encoded = backend._serialize(value)
+        decoded = backend._deserialize(encoded)
+
+        assert isinstance(decoded, pd.DataFrame)
+        pd.testing.assert_frame_equal(decoded, value)
+
+    def test_rejects_unsupported_payload_types(self):
+        backend = self._build_backend_for_tests()
+
+        with pytest.raises(TypeError, match="JSON-serializable"):
+            backend._serialize({"unsafe": {1, 2, 3}})

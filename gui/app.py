@@ -4,7 +4,10 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
+import hmac
+import ipaddress
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +16,7 @@ import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -23,6 +27,61 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Audora",
 )
+
+
+def _is_loopback_client(remote_addr: str | None) -> bool:
+    """Return True when the request comes from loopback interfaces."""
+    if not remote_addr:
+        return False
+    try:
+        # Strip optional IPv6 zone index (e.g., "::1%lo0").
+        parsed = ipaddress.ip_address(remote_addr.split("%", 1)[0])
+        return parsed.is_loopback
+    except ValueError:
+        return remote_addr == "localhost"
+
+
+def _allow_remote_gui_access() -> bool:
+    """Whether remote clients may access the GUI."""
+    return os.getenv("AUDORA_GUI_ALLOW_REMOTE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _extract_gui_token() -> str:
+    """Extract the access token from supported request locations."""
+    auth_header = request.headers.get("Authorization", "").strip()
+    if auth_header.lower().startswith("bearer "):
+        return auth_header[7:].strip()
+
+    header_token = request.headers.get("X-Audora-Token", "").strip()
+    if header_token:
+        return header_token
+
+    return request.args.get("audora_token", "").strip()
+
+
+@app.server.before_request
+def enforce_gui_access_controls():
+    """Deny remote access by default unless explicitly authorized."""
+    if _is_loopback_client(request.remote_addr):
+        return None
+
+    if not _allow_remote_gui_access():
+        return ("Forbidden: remote GUI access is disabled", 403)
+
+    expected_token = os.getenv("AUDORA_GUI_ACCESS_TOKEN", "").strip()
+    if not expected_token:
+        return ("Forbidden: configure AUDORA_GUI_ACCESS_TOKEN for remote access", 403)
+
+    provided_token = _extract_gui_token()
+    if not provided_token or not hmac.compare_digest(provided_token, expected_token):
+        return ("Forbidden: invalid GUI access token", 403)
+
+    return None
 
 # ---------------------------------------------------------------------------
 # Layout helpers
@@ -541,7 +600,7 @@ def search_history(_n, platform, min_score, days, artist_filter):
 
     # Optional artist filter (client-side simple substring)
     if artist_filter:
-        mask = df["artist"].str.contains(artist_filter, case=False, na=False)
+        mask = df["artist"].str.contains(artist_filter, case=False, na=False, regex=False)
         df = df[mask]
 
     # Round score
