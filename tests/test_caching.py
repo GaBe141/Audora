@@ -1,9 +1,13 @@
-"""Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
+"""Tests for core caching (LocalCacheBackend, Redis serialization, CacheManager)."""
 
+import json
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,36 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisEnvelopeSerialization:
+    """Security-focused tests for Redis signed JSON envelopes."""
+
+    @staticmethod
+    def _backend_with_key(signing_key: bytes = b"test-signing-key") -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = signing_key
+        return backend
+
+    def test_signed_json_round_trip(self):
+        backend = self._backend_with_key()
+        value = {"artist": "Example", "scores": [1, 2, 3], "meta": {"region": "US"}}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_rejects_tampered_payload(self):
+        backend = self._backend_with_key()
+        serialized = backend._serialize({"safe": True})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"] = '{"safe":false}'
+        tampered = json.dumps(envelope).encode("utf-8")
+
+        assert backend._deserialize(tampered) is None
+
+    def test_rejects_non_json_serializable_values(self):
+        backend = self._backend_with_key()
+
+        with pytest.raises(ValueError, match="JSON-serializable"):
+            backend._serialize({"bad": {1, 2, 3}})
