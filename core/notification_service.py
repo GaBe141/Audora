@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -129,26 +130,30 @@ class EnhancedNotificationService:
                 "username": os.getenv("SMTP_USERNAME", ""),
                 "password": os.getenv("SMTP_PASSWORD", ""),
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
-                "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
+                "recipients": [
+                    value.strip()
+                    for value in os.getenv("EMAIL_RECIPIENTS", "").split(",")
+                    if value.strip()
+                ],
                 "use_tls": True,
+                "timeout_seconds": 15,
             },
             "slack": {
                 "webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
                 "channel": os.getenv("SLACK_CHANNEL", "#music-trends"),
                 "username": os.getenv("SLACK_USERNAME", "Music Discovery Bot"),
                 "icon_emoji": ":musical_note:",
+                "timeout_seconds": 10,
             },
             "discord": {
                 "webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),
                 "username": os.getenv("DISCORD_USERNAME", "Music Discovery"),
                 "avatar_url": "",
+                "timeout_seconds": 10,
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
-                },
+                "headers": self._build_webhook_headers(),
                 "timeout": 30,
             },
             "sms": {
@@ -156,7 +161,11 @@ class EnhancedNotificationService:
                 "api_key": os.getenv("SMS_API_KEY", ""),
                 "api_secret": os.getenv("SMS_API_SECRET", ""),
                 "from_number": os.getenv("SMS_FROM_NUMBER", ""),
-                "recipients": os.getenv("SMS_RECIPIENTS", "").split(","),
+                "recipients": [
+                    value.strip()
+                    for value in os.getenv("SMS_RECIPIENTS", "").split(",")
+                    if value.strip()
+                ],
             },
         }
 
@@ -180,6 +189,14 @@ class EnhancedNotificationService:
                 self.logger.warning(f"Could not load {default_path}: {e}")
 
         return default_config
+
+    def _build_webhook_headers(self) -> dict[str, str]:
+        """Build webhook headers without sending empty auth values."""
+        token = os.getenv("WEBHOOK_TOKEN", "").strip()
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
 
     def save_config(self, path: str = "config/notification_config.json") -> None:
         """Persist the current channel configuration to a JSON file.
@@ -570,17 +587,20 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
-            # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            # Send email over verified TLS with an explicit network timeout.
+            smtp_timeout = float(email_config.get("timeout_seconds", 15))
+            with smtplib.SMTP(
+                email_config["smtp_server"], email_config.get("port", 587), timeout=smtp_timeout
+            ) as server:
+                if email_config.get("use_tls", True):
+                    server.ehlo()
+                    server.starttls(context=ssl.create_default_context())
+                    server.ehlo()
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
-
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"
@@ -648,8 +668,9 @@ System status: {{ system_status }}
                 if fields:
                     slack_message["attachments"][0]["fields"] = fields
 
+            timeout = aiohttp.ClientTimeout(total=float(slack_config.get("timeout_seconds", 10)))
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(timeout=timeout) as session,
                 session.post(webhook_url, json=slack_message) as response,
             ):
                 if response.status == 200:
@@ -715,8 +736,9 @@ System status: {{ system_status }}
                 if fields:
                     discord_message["embeds"][0]["fields"] = fields
 
+            timeout = aiohttp.ClientTimeout(total=float(discord_config.get("timeout_seconds", 10)))
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(timeout=timeout) as session,
                 session.post(webhook_url, json=discord_message) as response,
             ):
                 if response.status in [200, 204]:
@@ -772,12 +794,13 @@ System status: {{ system_status }}
                 payload["formatted_content"] = template.render(**message.template_vars)
 
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
-            timeout = webhook_config.get("timeout", 30)
+            timeout = float(webhook_config.get("timeout", 30))
+            sanitized_headers = {k: v for k, v in headers.items() if isinstance(v, str) and v}
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url, json=payload, headers=sanitized_headers
                 ) as response,
             ):
                 if 200 <= response.status < 300:
