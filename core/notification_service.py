@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import ssl
 import socket
 import smtplib
 from dataclasses import dataclass
@@ -233,15 +234,22 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
             raise ValueError("Localhost webhook URLs are not allowed")
 
+        try:
+            port = parsed.port or 443
+        except ValueError as e:
+            raise ValueError("Webhook URL contains an invalid port") from e
+
         resolved_ips = set()
         try:
             # Validate all resolved addresses to avoid DNS-based bypass.
-            for info in socket.getaddrinfo(hostname, parsed.port or 443, proto=socket.IPPROTO_TCP):
+            for info in socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP):
                 resolved_ips.add(info[4][0])
         except socket.gaierror as e:
             raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
@@ -254,6 +262,15 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _build_http_timeout(
+        self, configured_timeout: Any, default_timeout: float = 30.0
+    ) -> aiohttp.ClientTimeout:
+        """Build a bounded aiohttp timeout from configuration."""
+        timeout_value = default_timeout
+        if isinstance(configured_timeout, (int, float)) and configured_timeout > 0:
+            timeout_value = min(float(configured_timeout), 300.0)
+        return aiohttp.ClientTimeout(total=timeout_value)
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -570,17 +587,30 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
-            # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            # Send email with certificate-validated TLS to prevent MITM.
+            smtp_host = email_config["smtp_server"]
+            smtp_port = int(email_config.get("port", 587))
+            use_tls = bool(email_config.get("use_tls", True))
+            username = email_config.get("username")
+            password = email_config.get("password")
+            if username and password and not use_tls:
+                return {
+                    "success": False,
+                    "error": "Refusing SMTP auth without TLS (set use_tls=true)",
+                }
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
+                server.ehlo()
+                if use_tls:
+                    if not server.has_extn("starttls"):
+                        return {"success": False, "error": "SMTP server does not support STARTTLS"}
+                    server.starttls(context=ssl.create_default_context())
+                    server.ehlo()
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
+                if username and password:
+                    server.login(username, password)
 
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"
@@ -648,9 +678,10 @@ System status: {{ system_status }}
                 if fields:
                     slack_message["attachments"][0]["fields"] = fields
 
+            timeout = self._build_http_timeout(self.config.get("webhook", {}).get("timeout", 30))
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -715,9 +746,10 @@ System status: {{ system_status }}
                 if fields:
                     discord_message["embeds"][0]["fields"] = fields
 
+            timeout = self._build_http_timeout(self.config.get("webhook", {}).get("timeout", 30))
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -772,12 +804,12 @@ System status: {{ system_status }}
                 payload["formatted_content"] = template.render(**message.template_vars)
 
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
-            timeout = webhook_config.get("timeout", 30)
+            timeout = self._build_http_timeout(webhook_config.get("timeout", 30))
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(timeout=timeout) as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url, json=payload, headers=headers, allow_redirects=False
                 ) as response,
             ):
                 if 200 <= response.status < 300:
