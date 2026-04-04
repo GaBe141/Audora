@@ -18,7 +18,7 @@ class _DummyResponse:
         self.url = URL(current_url)
         self.headers = {}
         if location is not None:
-            self.headers["Location"] = location
+            self.headers["Location"] = URL(location)
 
 
 class TestWebhookUrlValidation:
