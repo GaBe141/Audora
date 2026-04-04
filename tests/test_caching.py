@@ -1,8 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import os
 import time
 
+import pytest
+
 from core.caching import (
+    RedisCacheBackend,
     LocalCacheBackend,
 )
 
@@ -118,3 +122,32 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for Redis cache serializer/deserializer."""
+
+    def test_rejects_signature_tampering(self):
+        os.environ["AUDORA_CACHE_SIGNING_KEY"] = "test-signing-key"
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = backend._get_signing_key()
+
+        serialized = backend._serialize({"k": "v"})
+        tampered = serialized.replace(b"\"v\"", b"\"x\"", 1)
+        assert backend._deserialize(tampered) is None
+
+    def test_round_trip_dataframe_without_pickle(self):
+        pd = pytest.importorskip("pandas")
+
+        os.environ["AUDORA_CACHE_SIGNING_KEY"] = "test-signing-key"
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = backend._get_signing_key()
+
+        df = pd.DataFrame(
+            [{"track_name": "Song A", "score": 95.2}, {"track_name": "Song B", "score": 88.0}]
+        )
+        serialized = backend._serialize(df)
+        restored = backend._deserialize(serialized)
+        assert restored is not None
+        assert isinstance(restored, pd.DataFrame)
+        assert restored.equals(df)
