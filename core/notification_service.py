@@ -211,6 +211,33 @@ class EnhancedNotificationService:
             "on",
         }
 
+    def _http_timeout(self, configured_timeout: Any, default: int = 30) -> aiohttp.ClientTimeout:
+        """Build a bounded HTTP timeout to avoid hanging outbound requests."""
+        try:
+            timeout_seconds = int(configured_timeout)
+        except (TypeError, ValueError):
+            timeout_seconds = default
+
+        # Keep timeout within a safe operational range.
+        timeout_seconds = max(1, min(timeout_seconds, 120))
+        return aiohttp.ClientTimeout(total=timeout_seconds)
+
+    def _sanitize_webhook_headers(self, headers: Any) -> dict[str, str]:
+        """Sanitize custom headers to reduce header injection risks."""
+        if not isinstance(headers, dict):
+            return {"Content-Type": "application/json"}
+
+        safe_headers: dict[str, str] = {}
+        for key, value in headers.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                continue
+            if any(c in key for c in ("\r", "\n")) or any(c in value for c in ("\r", "\n")):
+                continue
+            safe_headers[key] = value
+
+        safe_headers.setdefault("Content-Type", "application/json")
+        return safe_headers
+
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
         try:
@@ -601,6 +628,7 @@ System status: {{ system_status }}
 
         try:
             webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            timeout = self._http_timeout(slack_config.get("timeout", 30))
             # Create Slack message format
             color_map = {
                 NotificationPriority.LOW: "good",
@@ -650,7 +678,13 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                # Disallow redirects so validated public URL cannot redirect into private networks.
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    timeout=timeout,
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -676,6 +710,7 @@ System status: {{ system_status }}
 
         try:
             webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            timeout = self._http_timeout(discord_config.get("timeout", 30))
             # Format content for Discord
             content = message.content
             if message.template_vars:
@@ -717,7 +752,13 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                # Disallow redirects so validated public URL cannot redirect into private networks.
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    timeout=timeout,
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -771,13 +812,20 @@ System status: {{ system_status }}
                 )
                 payload["formatted_content"] = template.render(**message.template_vars)
 
-            headers = webhook_config.get("headers", {"Content-Type": "application/json"})
-            timeout = webhook_config.get("timeout", 30)
+            headers = self._sanitize_webhook_headers(
+                webhook_config.get("headers", {"Content-Type": "application/json"})
+            )
+            timeout = self._http_timeout(webhook_config.get("timeout", 30))
 
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=timeout,
+                    # Disallow redirects so validated public URL cannot redirect into private networks.
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
