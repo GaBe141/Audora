@@ -27,3 +27,24 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_http_timeout_is_bounded(self):
+        svc = EnhancedNotificationService()
+        timeout = svc._http_timeout(9999)
+        assert timeout.total == 120
+
+        timeout = svc._http_timeout(-10)
+        assert timeout.total == 1
+
+    def test_header_sanitization_blocks_crlf(self):
+        svc = EnhancedNotificationService()
+        headers = {
+            "X-Good": "ok",
+            "X-Bad": "evil\r\nInjected: yes",
+            "Bad\r\nKey": "value",
+        }
+        sanitized = svc._sanitize_webhook_headers(headers)
+        assert sanitized["X-Good"] == "ok"
+        assert "X-Bad" not in sanitized
+        assert "Bad\r\nKey" not in sanitized
+        assert sanitized["Content-Type"] == "application/json"
