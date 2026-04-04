@@ -193,6 +193,8 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        if not self._allow_plaintext_credential_storage():
+            self._strip_sensitive_config_values(to_save)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -201,6 +203,47 @@ class EnhancedNotificationService:
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _allow_plaintext_credential_storage(self) -> bool:
+        """Whether sensitive credentials may be persisted to config files."""
+        return os.getenv("AUDORA_ALLOW_PLAINTEXT_CREDENTIAL_STORAGE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _strip_sensitive_config_values(self, config: dict[str, Any]) -> None:
+        """Redact secret-like values before writing JSON config to disk."""
+        sensitive_fields = {
+            "password",
+            "api_key",
+            "api_secret",
+            "secret",
+            "secret_key",
+            "access_token",
+            "refresh_token",
+            "token",
+            "authorization",
+        }
+
+        for key, value in list(config.items()):
+            key_lower = str(key).lower()
+            if isinstance(value, dict):
+                self._strip_sensitive_config_values(value)
+                if key_lower == "headers":
+                    for header_key in list(value.keys()):
+                        if str(header_key).lower() in {"authorization", "x-api-key"}:
+                            value[header_key] = ""
+                continue
+
+            if not isinstance(value, str):
+                continue
+
+            if key_lower in sensitive_fields or key_lower.endswith("_token") or key_lower.endswith(
+                "_secret"
+            ):
+                config[key] = ""
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
@@ -531,6 +574,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Email not configured"}
 
         try:
+            safe_attachments = self._filter_safe_attachment_paths(message.attachments)
             msg = MIMEMultipart("alternative")
             msg["From"] = email_config.get("from_address", "music-discovery@example.com")
             msg["To"] = ", ".join(email_config["recipients"])
@@ -557,16 +601,16 @@ System status: {{ system_status }}
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
             # Add attachments
-            if message.attachments:
-                for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
+            if safe_attachments:
+                for attachment_path in safe_attachments:
+                    if attachment_path.exists():
+                        with attachment_path.open("rb") as f:
                             attachment = MIMEBase("application", "octet-stream")
                             attachment.set_payload(f.read())
                             encoders.encode_base64(attachment)
                             attachment.add_header(
                                 "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
+                                f"attachment; filename= {attachment_path.name}",
                             )
                             msg.attach(attachment)
 
@@ -590,6 +634,38 @@ System status: {{ system_status }}
         except Exception as e:
             self.logger.error(f"Failed to send email notification: {e}")
             return {"success": False, "error": str(e)}
+
+    def _filter_safe_attachment_paths(self, attachments: list[str] | None) -> list[Path]:
+        """Allow attachments only from approved local directories."""
+        if not attachments:
+            return []
+
+        project_root = Path(__file__).resolve().parent.parent
+        allowed_roots = [
+            (project_root / "data").resolve(),
+            (project_root / "reports").resolve(),
+        ]
+
+        safe_paths: list[Path] = []
+        for raw_path in attachments:
+            try:
+                candidate = Path(raw_path).expanduser()
+                if not candidate.is_absolute():
+                    candidate = project_root / candidate
+                resolved = candidate.resolve()
+            except Exception:
+                self.logger.warning(f"Skipping invalid attachment path: {raw_path}")
+                continue
+
+            if not any(root == resolved or root in resolved.parents for root in allowed_roots):
+                self.logger.warning(
+                    f"Skipping attachment outside allowed directories: {resolved}"
+                )
+                continue
+
+            safe_paths.append(resolved)
+
+        return safe_paths
 
     async def _send_slack(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification to Slack."""
