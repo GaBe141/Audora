@@ -1,6 +1,7 @@
 """Security tests for notification webhook URL validation."""
 
 import asyncio
+import ssl
 
 import pytest
 
@@ -168,3 +169,49 @@ class TestWebhookUrlValidation:
         result = asyncio.run(svc._send_webhook(message))
         assert result["success"] is True
         assert captured["kwargs"]["allow_redirects"] is False
+
+    def test_email_uses_verified_tls_context_for_starttls(self, monkeypatch):
+        captured: dict[str, object] = {}
+
+        class _FakeSmtp:
+            def __init__(self, host, port):
+                captured["host"] = host
+                captured["port"] = port
+
+            def starttls(self, *, context):
+                captured["context"] = context
+
+            def login(self, username, password):
+                captured["login"] = (username, password)
+
+            def send_message(self, _message):
+                captured["sent"] = True
+
+            def quit(self):
+                captured["quit"] = True
+
+        monkeypatch.setattr("core.notification_service.smtplib.SMTP", _FakeSmtp)
+
+        svc = EnhancedNotificationService()
+        svc.config["email"] = {
+            "smtp_server": "smtp.example.com",
+            "port": 587,
+            "username": "user",
+            "password": "pass",
+            "from_address": "noreply@example.com",
+            "recipients": ["alice@example.com"],
+            "use_tls": True,
+        }
+
+        message = NotificationMessage(
+            title="Security test",
+            content="Verify TLS context",
+            priority=NotificationPriority.LOW,
+            channels=[NotificationChannel.EMAIL],
+        )
+
+        result = asyncio.run(svc._send_email(message))
+        assert result["success"] is True
+        assert isinstance(captured["context"], ssl.SSLContext)
+        assert captured["context"].verify_mode == ssl.CERT_REQUIRED
+        assert captured["context"].check_hostname is True
