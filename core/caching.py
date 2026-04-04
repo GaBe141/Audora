@@ -133,6 +133,8 @@ class LocalCacheBackend(CacheBackend):
 class RedisCacheBackend(CacheBackend):
     """Redis cache backend with connection pooling."""
 
+    _MAX_SERIALIZED_BYTES = 5 * 1024 * 1024
+
     def __init__(
         self,
         host: str = "localhost",
@@ -189,6 +191,10 @@ class RedisCacheBackend(CacheBackend):
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
         payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        if len(payload) > self._MAX_SERIALIZED_BYTES:
+            raise ValueError(
+                f"Serialized cache payload exceeds max size ({self._MAX_SERIALIZED_BYTES} bytes)"
+            )
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
@@ -216,14 +222,21 @@ class RedisCacheBackend(CacheBackend):
             if not isinstance(payload_b64, str):
                 logger.warning("Rejected cache entry with non-string payload")
                 return None
+            if len(payload_b64) > (self._MAX_SERIALIZED_BYTES * 2):
+                logger.warning("Rejected oversized cache entry")
+                return None
 
             payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            if len(payload) > self._MAX_SERIALIZED_BYTES:
+                logger.warning("Rejected cache payload exceeding max size")
+                return None
             expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            # Safe in this context: payload integrity is HMAC-verified with an app secret.
+            return pickle.loads(payload)  # nosec B301
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -432,12 +445,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode("utf-8")).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode("utf-8")).hexdigest())
 
         return ":".join(key_parts)
 
