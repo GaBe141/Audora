@@ -38,6 +38,31 @@ class ComprehensiveMusicDiscoveryApp:
 
         self._initialize_engines()
 
+    @staticmethod
+    def _resolve_report_path(custom_filename: str | None = None) -> Path:
+        """Resolve report path safely under the local data directory."""
+        data_root = Path("data").resolve()
+        reports_root = (data_root / "reports").resolve()
+        reports_root.mkdir(parents=True, exist_ok=True)
+
+        if custom_filename:
+            candidate = Path(custom_filename).expanduser()
+            if candidate.is_absolute():
+                resolved = candidate.resolve()
+            else:
+                resolved = (reports_root / candidate).resolve()
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            resolved = (reports_root / f"comprehensive_discovery_report_{timestamp}.json").resolve()
+
+        # Ensure user-supplied paths cannot escape data/reports.
+        try:
+            resolved.relative_to(reports_root)
+        except ValueError as exc:
+            raise ValueError("Report path must stay within data/reports") from exc
+
+        return resolved
+
     def _initialize_engines(self):
         """Initialize discovery engines based on available API credentials."""
         print("\n🔧 Initializing Discovery Engines...")
@@ -337,13 +362,7 @@ class ComprehensiveMusicDiscoveryApp:
         self, discovery_results: dict[str, Any], custom_filename: str | None = None
     ) -> str:
         """Save comprehensive discovery report."""
-        if custom_filename:
-            filename = custom_filename
-        else:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
-
-        filepath = Path(filename)
+        filepath = self._resolve_report_path(custom_filename)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
         with open(filepath, "w", encoding="utf-8") as f:
