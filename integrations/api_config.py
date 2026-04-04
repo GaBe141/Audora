@@ -57,6 +57,9 @@ class SocialAPIManager:
         else:
             self._create_default_configs()
         self._apply_environment_credentials()
+        for config in self.configs.values():
+            if not (config.api_key or config.access_token):
+                config.enabled = False
 
     def _allow_plaintext_credential_storage(self) -> bool:
         """Return True when explicitly configured to persist credentials on disk."""
@@ -182,7 +185,7 @@ class SocialAPIManager:
                 "requests_per_minute": config.requests_per_minute,
                 "requests_per_hour": config.requests_per_hour,
                 "requests_per_day": config.requests_per_day,
-                "enabled": config.enabled,
+                "enabled": config.enabled if persist_credentials else False,
                 "last_error": config.last_error,
                 "error_count": config.error_count,
             }
