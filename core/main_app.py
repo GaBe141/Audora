@@ -338,18 +338,41 @@ class ComprehensiveMusicDiscoveryApp:
     ) -> str:
         """Save comprehensive discovery report."""
         if custom_filename:
-            filename = custom_filename
+            filepath = self._resolve_safe_report_path(custom_filename)
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            filepath = Path(f"data/comprehensive_discovery_report_{timestamp}.json")
 
-        filepath = Path(filename)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(discovery_results, f, indent=2, default=str, ensure_ascii=False)
 
         return str(filepath)
+
+    def _resolve_safe_report_path(self, custom_filename: str) -> Path:
+        """Resolve custom report path and restrict writes to project data/report directories."""
+        candidate = Path(custom_filename)
+        if not candidate.suffix:
+            candidate = candidate.with_suffix(".json")
+
+        project_root = Path.cwd().resolve()
+        allowed_roots = [
+            (project_root / "data").resolve(),
+            (project_root / "reports").resolve(),
+        ]
+
+        if not candidate.is_absolute():
+            candidate = (project_root / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+
+        if not any(root == candidate or root in candidate.parents for root in allowed_roots):
+            raise ValueError(
+                "Custom report path must be under ./data or ./reports to prevent unsafe file writes"
+            )
+
+        return candidate
 
     async def run_continuous_monitoring(
         self, interval_hours: int = 4, regions: list[str] | None = None

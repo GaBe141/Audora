@@ -56,6 +56,50 @@ class SocialAPIManager:
                 self.configs[platform] = APIConfig(platform=platform, **config_data)
         else:
             self._create_default_configs()
+        self._apply_environment_credentials()
+
+    def _allow_plaintext_credential_storage(self) -> bool:
+        """Return True when explicitly configured to persist credentials on disk."""
+        return os.getenv("AUDORA_ALLOW_PLAINTEXT_CREDENTIAL_STORAGE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _apply_environment_credentials(self) -> None:
+        """Overlay credentials from environment variables for safer secret handling."""
+        env_mapping = {
+            "tiktok": ("TIKTOK_API_KEY", "TIKTOK_SECRET_KEY", "", ""),
+            "youtube": ("YOUTUBE_API_KEY", "", "", ""),
+            "twitter": ("", "", "TWITTER_BEARER_TOKEN", ""),
+            "instagram": ("", "", "INSTAGRAM_ACCESS_TOKEN", ""),
+            "reddit": ("REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET", "", ""),
+            "tumblr": ("TUMBLR_CONSUMER_KEY", "TUMBLR_CONSUMER_SECRET", "", ""),
+        }
+        for platform, vars_tuple in env_mapping.items():
+            config = self.configs.get(platform)
+            if not config:
+                continue
+
+            api_key_var, secret_key_var, access_token_var, refresh_token_var = vars_tuple
+            env_api_key = os.getenv(api_key_var, "").strip() if api_key_var else ""
+            env_secret_key = os.getenv(secret_key_var, "").strip() if secret_key_var else ""
+            env_access_token = os.getenv(access_token_var, "").strip() if access_token_var else ""
+            env_refresh_token = (
+                os.getenv(refresh_token_var, "").strip() if refresh_token_var else ""
+            )
+
+            if env_api_key:
+                config.api_key = env_api_key
+            if env_secret_key:
+                config.secret_key = env_secret_key
+            if env_access_token:
+                config.access_token = env_access_token
+            if env_refresh_token:
+                config.refresh_token = env_refresh_token
+            if env_api_key or env_access_token:
+                config.enabled = True
 
     def _create_default_configs(self):
         """Create default configuration template."""
@@ -116,13 +160,25 @@ class SocialAPIManager:
 
     def save_configs(self):
         """Save configurations to file using centralized utility."""
+        persist_credentials = self._allow_plaintext_credential_storage()
+        if not persist_credentials:
+            credential_count = sum(
+                bool(c.api_key or c.secret_key or c.access_token or c.refresh_token)
+                for c in self.configs.values()
+            )
+            if credential_count:
+                print(
+                    "⚠️ Credential persistence is disabled by default. "
+                    "Set AUDORA_ALLOW_PLAINTEXT_CREDENTIAL_STORAGE=true to opt in."
+                )
+
         config_data = {}
         for platform, config in self.configs.items():
             config_data[platform] = {
-                "api_key": config.api_key,
-                "secret_key": config.secret_key,
-                "access_token": config.access_token,
-                "refresh_token": config.refresh_token,
+                "api_key": config.api_key if persist_credentials else "",
+                "secret_key": config.secret_key if persist_credentials else "",
+                "access_token": config.access_token if persist_credentials else "",
+                "refresh_token": config.refresh_token if persist_credentials else "",
                 "requests_per_minute": config.requests_per_minute,
                 "requests_per_hour": config.requests_per_hour,
                 "requests_per_day": config.requests_per_day,
