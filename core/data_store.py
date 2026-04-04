@@ -927,6 +927,22 @@ class EnhancedMusicDataStore:
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
 
+    def _resolve_safe_output_path(self, filepath: str) -> Path:
+        """Resolve output path and block absolute/path traversal writes."""
+        requested = Path(filepath)
+        if requested.is_absolute():
+            raise ValueError("Absolute output paths are not allowed")
+
+        project_root = Path.cwd().resolve()
+        resolved = (project_root / requested).resolve()
+        try:
+            resolved.relative_to(project_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"Output path escapes project directory: {filepath}"
+            ) from exc
+        return resolved
+
     def export_to_csv(self, table: str, filepath: str, days: int | None = None) -> str:
         """Export table data to CSV.
 
@@ -958,13 +974,13 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            output_path = self._resolve_safe_output_path(filepath)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(output_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {output_path}")
 
-        return filepath
+        return str(output_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
