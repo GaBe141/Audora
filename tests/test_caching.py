@@ -60,6 +60,20 @@ class TestLocalCacheBackend:
         assert present == 2
 
 
+class TestCacheKeyHashing:
+    """Regression tests for cache key hashing algorithm choices."""
+
+    def test_cache_key_uses_sha256_not_md5(self, mock_cache):
+        # Long argument makes digest boundaries obvious in key string.
+        key = mock_cache._build_cache_key("fn", ("x" * 200,), {"k": "v" * 100})
+        parts = key.split(":")
+        # prefix + arg hash + kwargs hash
+        assert len(parts) == 3
+        # sha256 hex digest length
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+
+
 class TestCacheManager:
     """Tests for CacheManager with injected LocalCacheBackend."""
 
