@@ -4,6 +4,7 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
@@ -254,6 +255,25 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _resolve_safe_redirect_url(
+        self, response: aiohttp.ClientResponse, original_url: str, *, allow_private: bool
+    ) -> str:
+        """Resolve a redirect URL and enforce webhook URL safety policies."""
+        redirect_target = response.headers.get("Location")
+        if not redirect_target:
+            raise ValueError("Redirect response missing Location header")
+
+        resolved_redirect = str(response.url.join(redirect_target))
+        self._validate_webhook_url(resolved_redirect, allow_private=allow_private)
+
+        original_host = urlparse(original_url).hostname
+        redirect_host = urlparse(resolved_redirect).hostname
+        if original_host and redirect_host and original_host.lower() != redirect_host.lower():
+            # Prevent forwarding requests across hosts where auth-bearing headers could leak.
+            raise ValueError("Redirect across hosts is blocked by webhook URL policy")
+
+        return resolved_redirect
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -509,9 +529,10 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
-        return f"{content_hash}:{message.priority.value}"
+        # Use deterministic digest instead of Python's randomized hash().
+        key_material = f"{message.title}:{message.content[:100]}:{message.priority.value}"
+        content_hash = hashlib.sha256(key_material.encode("utf-8")).hexdigest()
+        return content_hash
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""
@@ -648,19 +669,35 @@ System status: {{ system_status }}
                 if fields:
                     slack_message["attachments"][0]["fields"] = fields
 
-            async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
-            ):
-                if response.status == 200:
-                    self.logger.info("Slack notification sent successfully")
-                    return {"success": True, "status_code": response.status}
-                else:
-                    error_text = await response.text()
-                    self.logger.error(
-                        f"Slack notification failed: {response.status} - {error_text}"
-                    )
-                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            async with aiohttp.ClientSession() as session:
+                request_url = webhook_url
+                for _ in range(5):
+                    async with session.post(
+                        request_url,
+                        json=slack_message,
+                        headers=None,
+                        allow_redirects=False,
+                    ) as response:
+                        if response.status in {301, 302, 303, 307, 308}:
+                            try:
+                                request_url = self._resolve_safe_redirect_url(
+                                    response, request_url, allow_private=False
+                                )
+                            except ValueError as e:
+                                return {"success": False, "error": str(e)}
+                            continue
+
+                        if response.status == 200:
+                            self.logger.info("Slack notification sent successfully")
+                            return {"success": True, "status_code": response.status}
+
+                        error_text = await response.text()
+                        self.logger.error(
+                            f"Slack notification failed: {response.status} - {error_text}"
+                        )
+                        return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+
+                return {"success": False, "error": "Too many redirects while sending Slack webhook"}
 
         except Exception as e:
             self.logger.error(f"Failed to send Slack notification: {e}")
@@ -715,19 +752,35 @@ System status: {{ system_status }}
                 if fields:
                     discord_message["embeds"][0]["fields"] = fields
 
-            async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
-            ):
-                if response.status in [200, 204]:
-                    self.logger.info("Discord notification sent successfully")
-                    return {"success": True, "status_code": response.status}
-                else:
-                    error_text = await response.text()
-                    self.logger.error(
-                        f"Discord notification failed: {response.status} - {error_text}"
-                    )
-                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            async with aiohttp.ClientSession() as session:
+                request_url = webhook_url
+                for _ in range(5):
+                    async with session.post(
+                        request_url,
+                        json=discord_message,
+                        headers=None,
+                        allow_redirects=False,
+                    ) as response:
+                        if response.status in {301, 302, 303, 307, 308}:
+                            try:
+                                request_url = self._resolve_safe_redirect_url(
+                                    response, request_url, allow_private=False
+                                )
+                            except ValueError as e:
+                                return {"success": False, "error": str(e)}
+                            continue
+
+                        if response.status in [200, 204]:
+                            self.logger.info("Discord notification sent successfully")
+                            return {"success": True, "status_code": response.status}
+
+                        error_text = await response.text()
+                        self.logger.error(
+                            f"Discord notification failed: {response.status} - {error_text}"
+                        )
+                        return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+
+                return {"success": False, "error": "Too many redirects while sending Discord webhook"}
 
         except Exception as e:
             self.logger.error(f"Failed to send Discord notification: {e}")
@@ -774,21 +827,39 @@ System status: {{ system_status }}
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
             timeout = webhook_config.get("timeout", 30)
 
-            async with (
-                aiohttp.ClientSession() as session,
-                session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
-                ) as response,
-            ):
-                if 200 <= response.status < 300:
-                    self.logger.info(f"Webhook notification sent successfully: {response.status}")
-                    return {"success": True, "status_code": response.status}
-                else:
-                    error_text = await response.text()
-                    self.logger.error(
-                        f"Webhook notification failed: {response.status} - {error_text}"
-                    )
-                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            async with aiohttp.ClientSession() as session:
+                request_url = url
+                request_headers = dict(headers)
+                for _ in range(5):
+                    async with session.post(
+                        request_url,
+                        json=payload,
+                        headers=request_headers,
+                        timeout=aiohttp.ClientTimeout(total=timeout),
+                        allow_redirects=False,
+                    ) as response:
+                        if response.status in {301, 302, 303, 307, 308}:
+                            try:
+                                request_url = self._resolve_safe_redirect_url(
+                                    response,
+                                    request_url,
+                                    allow_private=self._allow_private_webhooks(),
+                                )
+                            except ValueError as e:
+                                return {"success": False, "error": str(e)}
+                            continue
+
+                        if 200 <= response.status < 300:
+                            self.logger.info(f"Webhook notification sent successfully: {response.status}")
+                            return {"success": True, "status_code": response.status}
+
+                        error_text = await response.text()
+                        self.logger.error(
+                            f"Webhook notification failed: {response.status} - {error_text}"
+                        )
+                        return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+
+                return {"success": False, "error": "Too many redirects while sending webhook"}
 
         except Exception as e:
             self.logger.error(f"Failed to send webhook notification: {e}")
