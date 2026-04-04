@@ -4,12 +4,14 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -115,6 +117,8 @@ class EnhancedNotificationService:
 
     def _load_config(self, config_file: str | None) -> dict[str, Any]:
         """Load notification configuration."""
+        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        max_attachment_size_mb = int(os.getenv("MAX_EMAIL_ATTACHMENT_MB", "10"))
         default_config = {
             "enabled": True,
             "default_channels": ["console"],
@@ -125,12 +129,13 @@ class EnhancedNotificationService:
             "retry_delay_seconds": 30,
             "email": {
                 "smtp_server": os.getenv("SMTP_SERVER", ""),
-                "port": int(os.getenv("SMTP_PORT", "587")),
+                "port": smtp_port,
                 "username": os.getenv("SMTP_USERNAME", ""),
                 "password": os.getenv("SMTP_PASSWORD", ""),
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
                 "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
                 "use_tls": True,
+                "max_attachment_size_mb": max_attachment_size_mb,
             },
             "slack": {
                 "webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
@@ -180,6 +185,81 @@ class EnhancedNotificationService:
                 self.logger.warning(f"Could not load {default_path}: {e}")
 
         return default_config
+
+    def _contains_header_injection_chars(self, value: str) -> bool:
+        """Return True if value contains CRLF characters."""
+        return "\r" in value or "\n" in value
+
+    def _sanitize_email_recipients(self, recipients: list[str]) -> list[str]:
+        """Remove empty/invalid recipients and block header injection."""
+        sanitized: list[str] = []
+        for recipient in recipients:
+            candidate = str(recipient).strip()
+            if not candidate:
+                continue
+            if self._contains_header_injection_chars(candidate):
+                self.logger.warning("Ignoring email recipient containing invalid characters")
+                continue
+            sanitized.append(candidate)
+        return sanitized
+
+    def _get_allowed_attachment_roots(self) -> list[Path]:
+        """Resolve configured attachment roots to reduce file exfiltration risk."""
+        configured_roots = os.getenv("AUDORA_NOTIFICATION_ATTACHMENT_DIRS", "").strip()
+        if configured_roots:
+            roots = [
+                Path(root.strip()).expanduser()
+                for root in configured_roots.split(",")
+                if root.strip()
+            ]
+        else:
+            project_root = Path(__file__).resolve().parent.parent
+            roots = [
+                project_root / "exports",
+                project_root / "data",
+                project_root / "reports",
+            ]
+
+        resolved_roots: list[Path] = []
+        for root in roots:
+            try:
+                resolved_roots.append(root.resolve(strict=False))
+            except OSError:
+                continue
+        return resolved_roots
+
+    def _validate_attachment_path(self, attachment_path: str) -> Path | None:
+        """Validate attachment path against allowed roots and size limit."""
+        try:
+            candidate = Path(attachment_path).expanduser()
+            if not candidate.is_absolute():
+                project_root = Path(__file__).resolve().parent.parent
+                candidate = project_root / candidate
+            resolved_path = candidate.resolve(strict=False)
+        except OSError:
+            self.logger.warning("Skipping attachment with invalid path: %s", attachment_path)
+            return None
+
+        allowed_roots = self._get_allowed_attachment_roots()
+        if not any(
+            resolved_path == root or resolved_path.is_relative_to(root) for root in allowed_roots
+        ):
+            self.logger.warning("Skipping attachment outside allowed directories: %s", resolved_path)
+            return None
+
+        if not resolved_path.exists() or not resolved_path.is_file():
+            self.logger.warning("Skipping missing attachment file: %s", resolved_path)
+            return None
+
+        max_size_mb = int(self.config.get("email", {}).get("max_attachment_size_mb", 10))
+        max_size_bytes = max(max_size_mb, 1) * 1024 * 1024
+        if resolved_path.stat().st_size > max_size_bytes:
+            self.logger.warning(
+                "Skipping attachment larger than %s MB: %s", max_size_mb, resolved_path
+            )
+            return None
+
+        return resolved_path
 
     def save_config(self, path: str = "config/notification_config.json") -> None:
         """Persist the current channel configuration to a JSON file.
@@ -509,8 +589,8 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
+        digest_input = f"{message.title}:{message.content[:200]}:{message.priority.value}"
+        content_hash = hashlib.sha256(digest_input.encode("utf-8")).hexdigest()[:24]
         return f"{content_hash}:{message.priority.value}"
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
@@ -527,13 +607,20 @@ System status: {{ system_status }}
         """Send notification via email."""
         email_config = self.config.get("email", {})
 
-        if not email_config.get("smtp_server") or not email_config.get("recipients"):
+        recipients = self._sanitize_email_recipients(email_config.get("recipients", []))
+        from_address = str(
+            email_config.get("from_address", "music-discovery@example.com")
+        ).strip()
+        if self._contains_header_injection_chars(from_address):
+            return {"success": False, "error": "Invalid from address configuration"}
+
+        if not email_config.get("smtp_server") or not recipients:
             return {"success": False, "error": "Email not configured"}
 
         try:
             msg = MIMEMultipart("alternative")
-            msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
+            msg["From"] = from_address
+            msg["To"] = ", ".join(recipients)
             msg["Subject"] = message.title
 
             # Set priority
@@ -559,22 +646,26 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    validated_path = self._validate_attachment_path(attachment_path)
+                    if validated_path is None:
+                        continue
+
+                    with validated_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {validated_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                tls_context = ssl.create_default_context()
+                server.starttls(context=tls_context)
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -583,9 +674,9 @@ System status: {{ system_status }}
             server.quit()
 
             self.logger.info(
-                f"Email notification sent to {len(email_config['recipients'])} recipients"
+                f"Email notification sent to {len(recipients)} recipients"
             )
-            return {"success": True, "recipients": len(email_config["recipients"])}
+            return {"success": True, "recipients": len(recipients)}
 
         except Exception as e:
             self.logger.error(f"Failed to send email notification: {e}")
