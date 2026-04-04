@@ -133,3 +133,78 @@ class TestOutboundWebhookSecurity:
         assert result["success"] is True
         assert calls, "Expected outbound Discord request"
         assert calls[0]["kwargs"]["allow_redirects"] is False
+
+
+class _MockSMTP:
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self.starttls_called = False
+        self.starttls_context = None
+        self.login_called = False
+        self.sent_message = False
+        self.quit_called = False
+
+    def starttls(self, context=None):
+        self.starttls_called = True
+        self.starttls_context = context
+
+    def login(self, username: str, password: str):
+        self.login_called = True
+
+    def send_message(self, _msg):
+        self.sent_message = True
+
+    def quit(self):
+        self.quit_called = True
+
+
+class TestEmailTransportSecurity:
+    """Ensure SMTP notifications use verified TLS context."""
+
+    def test_send_email_uses_verified_tls_context(self, monkeypatch):
+        svc = EnhancedNotificationService()
+        svc.config["email"] = {
+            "smtp_server": "smtp.example.com",
+            "port": 587,
+            "username": "user",
+            "password": "pass",
+            "from_address": "from@example.com",
+            "recipients": ["to@example.com"],
+            "use_tls": True,
+        }
+
+        created_contexts: list[object] = []
+        mock_context = object()
+
+        def fake_create_default_context():
+            created_contexts.append(mock_context)
+            return mock_context
+
+        smtp_instances: list[_MockSMTP] = []
+
+        def fake_smtp(host: str, port: int):
+            smtp = _MockSMTP(host, port)
+            smtp_instances.append(smtp)
+            return smtp
+
+        monkeypatch.setattr("core.notification_service.ssl.create_default_context", fake_create_default_context)
+        monkeypatch.setattr("core.notification_service.smtplib.SMTP", fake_smtp)
+
+        msg = NotificationMessage(
+            title="Email test",
+            content="Secure email body",
+            priority=NotificationPriority.LOW,
+            channels=[NotificationChannel.EMAIL],
+        )
+        result = asyncio.run(svc._send_email(msg))
+
+        assert result["success"] is True
+        assert len(created_contexts) == 1
+        assert smtp_instances, "Expected SMTP client to be created"
+        smtp = smtp_instances[0]
+        assert smtp.starttls_called is True
+        assert smtp.starttls_context is mock_context
+        assert smtp.login_called is True
+        assert smtp.sent_message is True
+        assert smtp.quit_called is True
