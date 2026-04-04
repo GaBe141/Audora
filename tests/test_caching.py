@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,35 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for Redis serialization envelope."""
+
+    def test_serialize_json_value_without_pickle(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-key"
+
+        raw = backend._serialize({"k": "v", "n": 1})
+        envelope = json.loads(raw.decode("utf-8"))
+        assert envelope["v"] == 1
+        assert envelope["alg"] == "HMAC-SHA256"
+        assert "payload" in envelope
+
+    def test_set_logs_and_skips_unsupported_types(self):
+        class _DummyClient:
+            def __init__(self):
+                self.calls = 0
+
+            def set(self, *_args, **_kwargs):
+                self.calls += 1
+
+            def setex(self, *_args, **_kwargs):
+                self.calls += 1
+
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-key"
+        backend._client = _DummyClient()
+
+        backend.set("bad", object(), ttl=60)
+        assert backend._client.calls == 0
