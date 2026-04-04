@@ -356,7 +356,7 @@ class ComprehensiveMusicDiscoveryApp:
         if not candidate.suffix:
             candidate = candidate.with_suffix(".json")
 
-        project_root = Path.cwd().resolve()
+        project_root = Path(__file__).resolve().parent.parent
         allowed_roots = [
             (project_root / "data").resolve(),
             (project_root / "reports").resolve(),

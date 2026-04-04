@@ -640,7 +640,7 @@ System status: {{ system_status }}
         if not attachments:
             return []
 
-        project_root = Path.cwd().resolve()
+        project_root = Path(__file__).resolve().parent.parent
         allowed_roots = [
             (project_root / "data").resolve(),
             (project_root / "reports").resolve(),
@@ -649,7 +649,10 @@ System status: {{ system_status }}
         safe_paths: list[Path] = []
         for raw_path in attachments:
             try:
-                resolved = Path(raw_path).expanduser().resolve()
+                candidate = Path(raw_path).expanduser()
+                if not candidate.is_absolute():
+                    candidate = project_root / candidate
+                resolved = candidate.resolve()
             except Exception:
                 self.logger.warning(f"Skipping invalid attachment path: {raw_path}")
                 continue
