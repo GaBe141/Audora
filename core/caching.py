@@ -163,6 +163,8 @@ class RedisCacheBackend(CacheBackend):
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
+        self._allow_pickle = self._is_pickle_enabled()
+        self._max_payload_bytes = self._get_max_payload_bytes()
 
         # Test connection
         try:
@@ -171,6 +173,38 @@ class RedisCacheBackend(CacheBackend):
         except redis.ConnectionError as e:
             logger.error(f"Failed to connect to Redis: {e}")
             raise
+
+    def _is_pickle_enabled(self) -> bool:
+        """Return whether unsafe pickle cache serialization is allowed."""
+        raw = os.getenv("AUDORA_CACHE_ALLOW_PICKLE", "").strip().lower()
+        enabled = raw in {"1", "true", "yes", "on"}
+        if enabled:
+            logger.warning(
+                "AUDORA_CACHE_ALLOW_PICKLE is enabled. "
+                "Only use this for trusted, isolated deployments."
+            )
+        return enabled
+
+    def _get_max_payload_bytes(self) -> int:
+        """Return max accepted signed payload size for cache deserialization."""
+        raw = os.getenv("AUDORA_CACHE_MAX_PAYLOAD_BYTES", "").strip()
+        if not raw:
+            return 1_000_000  # 1 MB default safety limit
+        try:
+            parsed = int(raw)
+        except ValueError:
+            logger.warning(
+                "Invalid AUDORA_CACHE_MAX_PAYLOAD_BYTES=%r; using default 1000000",
+                raw,
+            )
+            return 1_000_000
+        if parsed <= 0:
+            logger.warning(
+                "Non-positive AUDORA_CACHE_MAX_PAYLOAD_BYTES=%r; using default 1000000",
+                raw,
+            )
+            return 1_000_000
+        return parsed
 
     def _get_signing_key(self) -> bytes:
         """Get cache signing key used to verify serialized payload integrity."""
@@ -188,11 +222,28 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        fmt = "json"
+        try:
+            payload = json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            if not self._allow_pickle:
+                raise ValueError(
+                    "Cache value is not JSON-serializable and pickle is disabled. "
+                    "Set AUDORA_CACHE_ALLOW_PICKLE=true only in trusted environments."
+                )
+            fmt = "pickle"
+            payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
             "alg": "HMAC-SHA256",
+            "fmt": fmt,
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
@@ -212,17 +263,38 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid serialization envelope")
                 return None
 
+            fmt = envelope.get("fmt", "pickle")  # legacy entries used pickle format
+            if fmt not in {"json", "pickle"}:
+                logger.warning("Rejected cache entry with unsupported format: %r", fmt)
+                return None
+
             payload_b64 = envelope["payload"]
             if not isinstance(payload_b64, str):
                 logger.warning("Rejected cache entry with non-string payload")
                 return None
 
             payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            if len(payload) > self._max_payload_bytes:
+                logger.warning(
+                    "Rejected cache entry exceeding max payload size (%s > %s bytes)",
+                    len(payload),
+                    self._max_payload_bytes,
+                )
+                return None
+
             expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
+            if fmt == "json":
+                return json.loads(payload.decode("utf-8"))
+
+            if not self._allow_pickle:
+                logger.warning(
+                    "Rejected pickle-formatted cache entry because pickle support is disabled"
+                )
+                return None
             return pickle.loads(payload)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
@@ -432,12 +504,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
