@@ -930,33 +930,78 @@ class EnhancedMusicDataStore:
     def export_to_csv(self, table: str, filepath: str, days: int | None = None) -> str:
         """Export table data to CSV.
 
-        Note: Table name is validated against whitelist to prevent SQL injection.
+        Note: Table selection is resolved through a fixed query map to
+        avoid dynamic SQL construction.
         """
-        # Whitelist valid table names to prevent SQL injection
-        valid_tables = {
-            "trends",
-            "trend_history",
-            "viral_predictions",
-            "cross_platform_correlations",
-            "artists",
-            "tracks",
+        # Explicit query mapping avoids SQL injection via table names.
+        # Keep this list synchronized with the schema in _initialize_database.
+        query_map: dict[str, dict[str, str]] = {
+            "trends": {
+                "all": "SELECT * FROM trends ORDER BY created_at DESC",
+                "days": (
+                    "SELECT * FROM trends "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                ),
+            },
+            "trend_history": {
+                "all": "SELECT * FROM trend_history ORDER BY created_at DESC",
+                "days": (
+                    "SELECT * FROM trend_history "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                ),
+            },
+            "viral_predictions": {
+                "all": "SELECT * FROM viral_predictions ORDER BY created_at DESC",
+                "days": (
+                    "SELECT * FROM viral_predictions "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                ),
+            },
+            "cross_platform_correlations": {
+                "all": "SELECT * FROM cross_platform_correlations ORDER BY created_at DESC",
+                "days": (
+                    "SELECT * FROM cross_platform_correlations "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                ),
+            },
+            "platform_metrics": {
+                "all": "SELECT * FROM platform_metrics ORDER BY created_at DESC",
+                "days": (
+                    "SELECT * FROM platform_metrics "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                ),
+            },
+            "alert_rules": {
+                "all": "SELECT * FROM alert_rules ORDER BY created_at DESC",
+                "days": (
+                    "SELECT * FROM alert_rules "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                ),
+            },
+            "data_quality_logs": {
+                "all": "SELECT * FROM data_quality_logs ORDER BY created_at DESC",
+                "days": (
+                    "SELECT * FROM data_quality_logs "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                ),
+            },
         }
-        if table not in valid_tables:
+        if table not in query_map:
+            valid_tables = sorted(query_map.keys())
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
         with self.get_connection() as conn:
             if days:
-                # Use parameterized query for days parameter
-                query = f"""
-                SELECT * FROM {table}
-                WHERE datetime(created_at) >= datetime('now', ?)
-                ORDER BY created_at DESC
-                """
-                df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
+                df = pd.read_sql_query(query_map[table]["days"], conn, params=[f"-{days} days"])
             else:
-                # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
-                df = pd.read_sql_query(query, conn)
+                df = pd.read_sql_query(query_map[table]["all"], conn)
 
             # Ensure directory exists
             Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
@@ -971,14 +1016,16 @@ class EnhancedMusicDataStore:
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
-            # Table row counts with validated table names
+            # Table row counts from a fixed query map (no dynamic SQL).
+            count_queries = {
+                "trends": "SELECT COUNT(*) FROM trends",
+                "trend_history": "SELECT COUNT(*) FROM trend_history",
+                "viral_predictions": "SELECT COUNT(*) FROM viral_predictions",
+                "cross_platform_correlations": "SELECT COUNT(*) FROM cross_platform_correlations",
+            }
             table_stats = {}
-            # Whitelist of valid tables to prevent SQL injection
-            tables = ["trends", "trend_history", "viral_predictions", "cross_platform_correlations"]
-
-            for table in tables:
-                # Table names are from whitelist, safe to use
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+            for table, query in count_queries.items():
+                cursor.execute(query)
                 table_stats[table] = cursor.fetchone()[0]
 
             # Data quality checks
