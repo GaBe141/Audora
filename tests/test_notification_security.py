@@ -30,6 +30,11 @@ class TestWebhookUrlValidation:
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
 
+    def test_rejects_embedded_credentials(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="embedded credentials"):
+            svc._validate_webhook_url("https://user:pass@example.com/webhook")
+
 
 class TestNotificationConfigSanitization:
     """Validate secrets are not persisted to notification config."""
