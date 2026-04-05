@@ -188,11 +188,7 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload_json = json.dumps(
-            value,
-            separators=(",", ":"),
-            default=self._json_default_serializer,
-        )
+        payload_json = json.dumps(self._prepare_json_value(value), separators=(",", ":"))
         payload = payload_json.encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
@@ -204,14 +200,22 @@ class RedisCacheBackend(CacheBackend):
         }
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
-    def _json_default_serializer(self, value: Any) -> Any:
-        """Serialize a strict, allowlisted set of non-JSON-native types."""
+    def _prepare_json_value(self, value: Any) -> Any:
+        """Convert cache values into a strictly allowlisted JSON-safe representation."""
         marker_key = "__audora_type__"
 
+        if isinstance(value, dict):
+            prepared: dict[Any, Any] = {}
+            for key, item in value.items():
+                prepared_key = key if isinstance(key, str) else str(key)
+                prepared[prepared_key] = self._prepare_json_value(item)
+            return prepared
+        if isinstance(value, list):
+            return [self._prepare_json_value(item) for item in value]
         if isinstance(value, tuple):
-            return {marker_key: "tuple", "items": list(value)}
+            return {marker_key: "tuple", "items": [self._prepare_json_value(item) for item in value]}
         if isinstance(value, set):
-            return {marker_key: "set", "items": list(value)}
+            return {marker_key: "set", "items": [self._prepare_json_value(item) for item in value]}
         if isinstance(value, datetime):
             return {marker_key: "datetime", "value": value.isoformat()}
         if isinstance(value, date):
@@ -229,6 +233,9 @@ class RedisCacheBackend(CacheBackend):
                 }
         except Exception:
             pass
+
+        if value is None or isinstance(value, str | int | float | bool):
+            return value
 
         raise TypeError(f"Unsupported type for secure cache serialization: {type(value).__name__}")
 

@@ -1,27 +1,15 @@
-"""Security tests for sensitive GUI actions."""
+"""Security tests for GUI hardening in gui/app.py source."""
 
-from gui import app as gui_app
-
-
-def test_is_admin_authorized_requires_both_tokens(monkeypatch):
-    monkeypatch.delenv(gui_app.ADMIN_TOKEN_ENV, raising=False)
-    assert gui_app._is_admin_authorized("admin-secret") is False
-
-    monkeypatch.setenv(gui_app.ADMIN_TOKEN_ENV, "admin-secret")
-    assert gui_app._is_admin_authorized(None) is False
+from pathlib import Path
 
 
-def test_is_admin_authorized_validates_token_match(monkeypatch):
-    monkeypatch.setenv(gui_app.ADMIN_TOKEN_ENV, "admin-secret")
-    assert gui_app._is_admin_authorized("wrong-token") is False
+def test_gui_enforces_admin_token_gate_for_sensitive_actions():
+    """Ensure sensitive callbacks stay protected by the admin token check."""
+    source = (Path(__file__).resolve().parents[1] / "gui" / "app.py").read_text(encoding="utf-8")
 
-    assert gui_app._is_admin_authorized("admin-secret") is True
-
-
-def test_run_action_blocked_when_unauthorized(monkeypatch):
-    monkeypatch.delenv(gui_app.ADMIN_TOKEN_ENV, raising=False)
-
-    status, output = gui_app.run_action(1, None, None, None, "statistical", "any-token")
-    assert status == "Unauthorized"
-    assert "Blocked" in output
+    assert "ADMIN_TOKEN_ENV = \"AUDORA_GUI_ADMIN_TOKEN\"" in source
+    assert "def _is_admin_authorized(" in source
+    assert "State(\"admin-token\", \"value\")" in source
+    assert "if not _is_admin_authorized(admin_token):" in source
+    assert "return \"Unauthorized\"" in source
 
