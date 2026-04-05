@@ -4,6 +4,7 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
@@ -115,6 +116,11 @@ class EnhancedNotificationService:
 
     def _load_config(self, config_file: str | None) -> dict[str, Any]:
         """Load notification configuration."""
+        def _split_env_list(env_name: str) -> list[str]:
+            """Split comma-separated environment values and drop blanks."""
+            raw = os.getenv(env_name, "")
+            return [value.strip() for value in raw.split(",") if value.strip()]
+
         default_config = {
             "enabled": True,
             "default_channels": ["console"],
@@ -129,7 +135,7 @@ class EnhancedNotificationService:
                 "username": os.getenv("SMTP_USERNAME", ""),
                 "password": os.getenv("SMTP_PASSWORD", ""),
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
-                "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
+                "recipients": _split_env_list("EMAIL_RECIPIENTS"),
                 "use_tls": True,
             },
             "slack": {
@@ -156,7 +162,7 @@ class EnhancedNotificationService:
                 "api_key": os.getenv("SMS_API_KEY", ""),
                 "api_secret": os.getenv("SMS_API_SECRET", ""),
                 "from_number": os.getenv("SMS_FROM_NUMBER", ""),
-                "recipients": os.getenv("SMS_RECIPIENTS", "").split(","),
+                "recipients": _split_env_list("SMS_RECIPIENTS"),
             },
         }
 
@@ -509,9 +515,10 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
-        return f"{content_hash}:{message.priority.value}"
+        # Stable digest avoids randomized Python hash and reduces collision risk.
+        raw = f"{message.priority.value}\n{message.title}\n{message.content[:500]}"
+        content_digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return content_digest
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""
