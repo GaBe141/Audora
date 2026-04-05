@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +126,48 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSecurity:
+    """Tests for security properties in RedisCacheBackend serialization."""
+
+    @staticmethod
+    def _backend_for_test(allow_pickle: bool = False, max_payload_bytes: int = 1_000_000):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        backend._allow_pickle = allow_pickle
+        backend._max_payload_bytes = max_payload_bytes
+        return backend
+
+    def test_json_envelope_roundtrip_when_pickle_disabled(self):
+        backend = self._backend_for_test(allow_pickle=False)
+        payload = {"a": 1, "b": ["x", "y"], "nested": {"ok": True}}
+        serialized = backend._serialize(payload)
+        assert backend._deserialize(serialized) == payload
+
+    def test_rejects_pickle_entries_when_pickle_disabled(self):
+        backend = self._backend_for_test(allow_pickle=False)
+        pickled_payload = pickle.dumps({"sensitive": "object"}, protocol=pickle.HIGHEST_PROTOCOL)
+        signature = hmac.new(backend._signing_key, pickled_payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "fmt": "pickle",
+            "sig": signature,
+            "payload": base64.b64encode(pickled_payload).decode("ascii"),
+        }
+        serialized = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(serialized) is None
+
+    def test_rejects_payload_exceeding_size_limit(self):
+        backend = self._backend_for_test(allow_pickle=False, max_payload_bytes=8)
+        large_payload = {"value": "x" * 200}
+        serialized = backend._serialize(large_payload)
+
+        assert backend._deserialize(serialized) is None
+
+    def test_non_json_serializable_value_requires_pickle_opt_in(self):
+        backend = self._backend_for_test(allow_pickle=False)
+        with pytest.raises(ValueError, match="pickle is disabled"):
+            backend._serialize({"set_value": {1, 2, 3}})
