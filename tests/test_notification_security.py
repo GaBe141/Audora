@@ -1,8 +1,15 @@
-"""Security tests for notification webhook URL validation."""
+"""Security tests for notification service hardening."""
+
+import asyncio
+from unittest.mock import patch
 
 import pytest
 
-from core.notification_service import EnhancedNotificationService
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationMessage,
+    NotificationPriority,
+)
 
 
 class TestWebhookUrlValidation:
@@ -27,3 +34,49 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+
+class TestEmailTransportSecurity:
+    """Validate secure SMTP behavior for outbound email notifications."""
+
+    def test_send_email_enforces_tls_certificate_validation(self):
+        svc = EnhancedNotificationService()
+        svc.config["email"].update(
+            {
+                "smtp_server": "smtp.example.com",
+                "port": 587,
+                "username": "user",
+                "password": "pass",
+                "from_address": "noreply@example.com",
+                "recipients": [" alice@example.com ", "", "bob@example.com"],
+                "use_tls": True,
+                "timeout": 12,
+            }
+        )
+        message = NotificationMessage(
+            title="Security test",
+            content="Testing TLS setup",
+            priority=NotificationPriority.LOW,
+            channels=[],
+        )
+
+        tls_context = object()
+        with (
+            patch(
+                "core.notification_service.ssl.create_default_context", return_value=tls_context
+            ) as context_mock,
+            patch("core.notification_service.smtplib.SMTP") as smtp_mock,
+        ):
+            smtp_instance = smtp_mock.return_value
+            result = asyncio.run(svc._send_email(message))
+
+        assert result["success"] is True
+        smtp_mock.assert_called_once_with("smtp.example.com", 587, timeout=12)
+        context_mock.assert_called_once_with()
+        smtp_instance.starttls.assert_called_once_with(context=tls_context)
+        smtp_instance.login.assert_called_once_with("user", "pass")
+        smtp_instance.send_message.assert_called_once()
+        assert smtp_instance.send_message.call_args.kwargs["to_addrs"] == [
+            "alice@example.com",
+            "bob@example.com",
+        ]
