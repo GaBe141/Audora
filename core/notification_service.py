@@ -145,10 +145,8 @@ class EnhancedNotificationService:
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
-                },
+                # Keep persisted config free of secrets; webhook auth is injected from env at send time.
+                "headers": {"Content-Type": "application/json"},
                 "timeout": 30,
             },
             "sms": {
@@ -192,7 +190,9 @@ class EnhancedNotificationService:
         # Only save channel-specific sections (not internal runtime state)
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = self._sanitize_config_for_persistence(
+            {k: self.config[k] for k in saveable_keys if k in self.config}
+        )
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -201,6 +201,45 @@ class EnhancedNotificationService:
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _sanitize_config_for_persistence(self, value: Any) -> Any:
+        """Strip secrets before writing config to disk."""
+        if isinstance(value, dict):
+            sanitized: dict[str, Any] = {}
+            for key, nested in value.items():
+                normalized_key = key.lower()
+                if (
+                    "password" in normalized_key
+                    or "secret" in normalized_key
+                    or "token" in normalized_key
+                    or normalized_key in {"authorization", "api_key", "apikey"}
+                ):
+                    continue
+                sanitized[key] = self._sanitize_config_for_persistence(nested)
+            return sanitized
+
+        if isinstance(value, list):
+            return [self._sanitize_config_for_persistence(item) for item in value]
+
+        return value
+
+    def _get_webhook_headers(self, webhook_config: dict[str, Any]) -> dict[str, str]:
+        """Build outbound webhook headers with auth sourced from environment."""
+        configured_headers = webhook_config.get("headers")
+        if isinstance(configured_headers, dict):
+            headers = {str(k): str(v) for k, v in configured_headers.items()}
+        else:
+            headers = {"Content-Type": "application/json"}
+
+        webhook_token = os.getenv("WEBHOOK_TOKEN", "").strip()
+        if webhook_token:
+            headers["Authorization"] = f"Bearer {webhook_token}"
+        else:
+            auth_value = headers.get("Authorization")
+            if isinstance(auth_value, str) and "${WEBHOOK_TOKEN}" in auth_value:
+                headers.pop("Authorization", None)
+
+        return headers
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
@@ -771,7 +810,7 @@ System status: {{ system_status }}
                 )
                 payload["formatted_content"] = template.render(**message.template_vars)
 
-            headers = webhook_config.get("headers", {"Content-Type": "application/json"})
+            headers = self._get_webhook_headers(webhook_config)
             timeout = webhook_config.get("timeout", 30)
 
             async with (
