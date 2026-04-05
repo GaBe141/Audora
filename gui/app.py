@@ -7,6 +7,7 @@ Includes live trend dashboard, history search, notification settings, and accura
 import json
 import subprocess
 import sys
+from hmac import compare_digest
 from pathlib import Path
 
 import dash
@@ -16,6 +17,7 @@ from dash import Input, Output, State, ctx, dash_table, dcc, html
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+ADMIN_TOKEN_ENV = "AUDORA_GUI_ADMIN_TOKEN"
 
 app = dash.Dash(
     __name__,
@@ -279,6 +281,13 @@ app.layout = dbc.Container(
                 [
                     html.H4("Audora", className="mb-3"),
                     html.Hr(),
+                    html.Label("Admin token", className="mt-2 small text-muted"),
+                    dbc.Input(
+                        id="admin-token",
+                        type="password",
+                        placeholder="Required for setup/validate/settings",
+                        className="mb-2",
+                    ),
                     dbc.Button(
                         "Run single discovery",
                         id="btn-discovery",
@@ -364,6 +373,16 @@ def _run_command(args: list[str]) -> tuple[str, str]:
         return "Error", str(e)
 
 
+def _is_admin_authorized(provided_token: str | None) -> bool:
+    """Require a configured and user-provided admin token for sensitive GUI actions."""
+    configured_token = os.getenv(ADMIN_TOKEN_ENV, "").strip()
+    if not configured_token:
+        return False
+
+    candidate = (provided_token or "").strip()
+    return bool(candidate) and compare_digest(candidate, configured_token)
+
+
 def _get_data_store():
     """Return an EnhancedMusicDataStore pointed at the default DB path."""
     from core.data_store import EnhancedMusicDataStore
@@ -383,6 +402,7 @@ def _get_data_store():
     Input("btn-setup", "n_clicks"),
     Input("btn-validate", "n_clicks"),
     State("demo-select", "value"),
+    State("admin-token", "value"),
     prevent_initial_call=True,
 )
 def run_action(
@@ -391,7 +411,14 @@ def run_action(
     _setup_clicks,
     _validate_clicks,
     demo_value,
+    admin_token,
 ):
+    if not _is_admin_authorized(admin_token):
+        return "Unauthorized", (
+            f"Blocked: set {ADMIN_TOKEN_ENV} on the server and provide a matching token "
+            "in the Admin token field to enable command actions."
+        )
+
     triggered = ctx.triggered_id
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
@@ -582,9 +609,23 @@ def export_csv(_n, table_data):
     State("input-smtp-port", "value"),
     State("input-smtp-user", "value"),
     State("input-smtp-pass", "value"),
+    State("admin-token", "value"),
     prevent_initial_call=True,
 )
-def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+def save_settings(
+    _n,
+    slack_url,
+    discord_url,
+    webhook_url,
+    smtp_host,
+    smtp_port,
+    smtp_user,
+    smtp_pass,
+    admin_token,
+):
+    if not _is_admin_authorized(admin_token):
+        return "Unauthorized"
+
     try:
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
@@ -615,9 +656,12 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         Output(f"test-status-{channel_key}", "children"),
         Input(f"btn-test-{channel_key}", "n_clicks"),
         State(url_input_id, "value"),
+        State("admin-token", "value"),
         prevent_initial_call=True,
     )
-    def _cb(_n, url):
+    def _cb(_n, url, admin_token):
+        if not _is_admin_authorized(admin_token):
+            return "Unauthorized"
         if not url:
             return "No URL"
         try:
