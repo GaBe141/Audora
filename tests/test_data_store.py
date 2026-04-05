@@ -1,5 +1,8 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+import hashlib
+import json
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -64,6 +67,29 @@ class TestGetTracksWithArtistsBulk:
     def test_get_tracks_with_artists_bulk_empty_pairs_returns_empty_df(self, data_store):
         df = data_store.get_tracks_with_artists_bulk([])
         assert df.empty
+
+    def test_get_tracks_with_artists_bulk_uses_stable_sha256_cache_key(
+        self, data_store, sample_trends, monkeypatch
+    ):
+        data_store.save_trends_bulk(sample_trends)
+        pairs = [(t.track_name, t.artist) for t in sample_trends]
+
+        captured_keys: list[str] = []
+        original_get = data_store._cache.get
+
+        def spy_get(key: str):
+            captured_keys.append(key)
+            return original_get(key)
+
+        monkeypatch.setattr(data_store._cache, "get", spy_get)
+        data_store.get_tracks_with_artists_bulk(pairs)
+
+        canonical_pairs = json.dumps(
+            sorted(pairs), ensure_ascii=True, separators=(",", ":")
+        )
+        expected_digest = hashlib.sha256(canonical_pairs.encode("utf-8")).hexdigest()
+        assert captured_keys
+        assert captured_keys[0] == f"tracks_bulk:{expected_digest}"
 
 
 class TestGetTrendingSummaryCached:
