@@ -13,7 +13,8 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+# Use TLS to prevent API key exposure and response tampering in transit.
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
 class LastFmAPI:

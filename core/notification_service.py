@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import ssl
 import socket
 import smtplib
 from dataclasses import dataclass
@@ -571,10 +572,13 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            server = smtplib.SMTP(
+                email_config["smtp_server"], email_config.get("port", 587), timeout=30
+            )
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                # Enforce certificate verification for SMTP TLS.
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
