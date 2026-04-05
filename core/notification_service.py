@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import ssl
 import socket
 import smtplib
 from dataclasses import dataclass
@@ -145,10 +146,8 @@ class EnhancedNotificationService:
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
-                },
+                # Keep persisted config free of secrets; webhook auth is injected from env at send time.
+                "headers": {"Content-Type": "application/json"},
                 "timeout": 30,
             },
             "sms": {
@@ -192,7 +191,9 @@ class EnhancedNotificationService:
         # Only save channel-specific sections (not internal runtime state)
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = self._sanitize_config_for_persistence(
+            {k: self.config[k] for k in saveable_keys if k in self.config}
+        )
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -201,6 +202,45 @@ class EnhancedNotificationService:
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _sanitize_config_for_persistence(self, value: Any) -> Any:
+        """Strip secrets before writing config to disk."""
+        if isinstance(value, dict):
+            sanitized: dict[str, Any] = {}
+            for key, nested in value.items():
+                normalized_key = key.lower()
+                if (
+                    "password" in normalized_key
+                    or "secret" in normalized_key
+                    or "token" in normalized_key
+                    or normalized_key in {"authorization", "api_key", "apikey"}
+                ):
+                    continue
+                sanitized[key] = self._sanitize_config_for_persistence(nested)
+            return sanitized
+
+        if isinstance(value, list):
+            return [self._sanitize_config_for_persistence(item) for item in value]
+
+        return value
+
+    def _get_webhook_headers(self, webhook_config: dict[str, Any]) -> dict[str, str]:
+        """Build outbound webhook headers with auth sourced from environment."""
+        configured_headers = webhook_config.get("headers")
+        if isinstance(configured_headers, dict):
+            headers = {str(k): str(v) for k, v in configured_headers.items()}
+        else:
+            headers = {"Content-Type": "application/json"}
+
+        webhook_token = os.getenv("WEBHOOK_TOKEN", "").strip()
+        if webhook_token:
+            headers["Authorization"] = f"Bearer {webhook_token}"
+        else:
+            auth_value = headers.get("Authorization")
+            if isinstance(auth_value, str) and "${WEBHOOK_TOKEN}" in auth_value:
+                headers.pop("Authorization", None)
+
+        return headers
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
@@ -233,6 +273,8 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
@@ -571,10 +613,13 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            server = smtplib.SMTP(
+                email_config["smtp_server"], email_config.get("port", 587), timeout=10
+            )
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                # Use a verified TLS context to prevent credential interception.
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -650,7 +695,9 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url, json=slack_message, allow_redirects=False
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +764,9 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url, json=discord_message, allow_redirects=False
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -771,13 +820,17 @@ System status: {{ system_status }}
                 )
                 payload["formatted_content"] = template.render(**message.template_vars)
 
-            headers = webhook_config.get("headers", {"Content-Type": "application/json"})
+            headers = self._get_webhook_headers(webhook_config)
             timeout = webhook_config.get("timeout", 30)
 
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
