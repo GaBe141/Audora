@@ -1,4 +1,4 @@
-"""Security tests for notification webhook URL validation."""
+"""Security tests for notification service hardening."""
 
 import pytest
 
@@ -27,3 +27,31 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+
+class TestAttachmentPathValidation:
+    """Validate attachment path restrictions to prevent file exfiltration."""
+
+    def test_resolve_attachment_path_allows_files_inside_allowed_dir(self, tmp_path, monkeypatch):
+        attachment_dir = tmp_path / "attachments"
+        attachment_dir.mkdir(parents=True, exist_ok=True)
+        allowed_file = attachment_dir / "report.txt"
+        allowed_file.write_text("ok", encoding="utf-8")
+
+        monkeypatch.setenv("AUDORA_ATTACHMENT_DIR", str(attachment_dir))
+        svc = EnhancedNotificationService()
+
+        resolved = svc._resolve_attachment_path("report.txt")
+        assert resolved == allowed_file.resolve()
+
+    def test_resolve_attachment_path_rejects_directory_traversal(self, tmp_path, monkeypatch):
+        attachment_dir = tmp_path / "attachments"
+        attachment_dir.mkdir(parents=True, exist_ok=True)
+        outside_file = tmp_path / "secret.txt"
+        outside_file.write_text("secret", encoding="utf-8")
+
+        monkeypatch.setenv("AUDORA_ATTACHMENT_DIR", str(attachment_dir))
+        svc = EnhancedNotificationService()
+
+        with pytest.raises(ValueError, match="outside the allowed attachment directory"):
+            svc._resolve_attachment_path("../secret.txt")
