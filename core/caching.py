@@ -10,9 +10,9 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
+from datetime import date, datetime
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
@@ -178,8 +178,8 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
-        # This keeps the cache safe by default, with only a reduced cross-process hit rate.
+        # Fallback to process-local random key to prevent cross-process trust of cache payloads.
+        # This keeps cache integrity checks safe by default, with reduced cross-process hit rate.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
             "Set AUDORA_CACHE_SIGNING_KEY for shared Redis cache across processes."
@@ -188,23 +188,110 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload_json = json.dumps(
+            value,
+            separators=(",", ":"),
+            default=self._json_default_serializer,
+        )
+        payload = payload_json.encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
+            "fmt": "json",
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
+    def _json_default_serializer(self, value: Any) -> Any:
+        """Serialize a strict, allowlisted set of non-JSON-native types."""
+        marker_key = "__audora_type__"
+
+        if isinstance(value, tuple):
+            return {marker_key: "tuple", "items": list(value)}
+        if isinstance(value, set):
+            return {marker_key: "set", "items": list(value)}
+        if isinstance(value, datetime):
+            return {marker_key: "datetime", "value": value.isoformat()}
+        if isinstance(value, date):
+            return {marker_key: "date", "value": value.isoformat()}
+
+        # Optional pandas support for cached DataFrame query results.
+        try:
+            import pandas as pd
+
+            if isinstance(value, pd.DataFrame):
+                return {
+                    marker_key: "pandas.DataFrame",
+                    "columns": list(value.columns),
+                    "records": value.to_dict(orient="records"),
+                }
+        except Exception:
+            pass
+
+        raise TypeError(f"Unsupported type for secure cache serialization: {type(value).__name__}")
+
+    def _json_object_hook(self, value: dict[str, Any]) -> Any:
+        """Deserialize allowlisted tagged values from cache JSON payloads."""
+        marker = value.get("__audora_type__")
+        if not marker:
+            return value
+
+        if marker == "tuple":
+            items = value.get("items", [])
+            return tuple(items) if isinstance(items, list) else tuple()
+        if marker == "set":
+            items = value.get("items", [])
+            return set(items) if isinstance(items, list) else set()
+        if marker == "datetime":
+            raw = value.get("value")
+            if isinstance(raw, str):
+                try:
+                    return datetime.fromisoformat(raw)
+                except ValueError:
+                    return raw
+            return raw
+        if marker == "date":
+            raw = value.get("value")
+            if isinstance(raw, str):
+                try:
+                    return date.fromisoformat(raw)
+                except ValueError:
+                    return raw
+            return raw
+        if marker == "pandas.DataFrame":
+            records = value.get("records", [])
+            columns = value.get("columns")
+            try:
+                import pandas as pd
+            except Exception:
+                # Fall back to records if pandas is unavailable.
+                return records
+
+            if isinstance(records, list):
+                df = pd.DataFrame.from_records(records)
+                if isinstance(columns, list):
+                    return df.reindex(columns=columns)
+                return df
+            return pd.DataFrame()
+
+        return value
+
     def _deserialize(self, value: bytes) -> Any | None:
         """Deserialize cache value only after signature verification."""
         try:
             envelope = json.loads(value.decode("utf-8"))
+            if isinstance(envelope, dict) and envelope.get("v") == 1:
+                logger.warning(
+                    "Rejected legacy cache entry format v1 (pickle serialization is disabled)"
+                )
+                return None
+
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
+                or envelope.get("fmt") != "json"
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -223,7 +310,7 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return json.loads(payload.decode("utf-8"), object_hook=self._json_object_hook)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -337,7 +424,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable or supported structured type)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)

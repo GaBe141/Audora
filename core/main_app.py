@@ -14,6 +14,8 @@ from integrations.extended_platforms import ExtendedSocialDiscoveryEngine
 from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
 from integrations.trending_schema import TrendingSchema
 
+REPORTS_BASE_DIR = (Path(__file__).resolve().parent.parent / "data").resolve()
+
 
 class ComprehensiveMusicDiscoveryApp:
     """Main application orchestrating all music discovery systems."""
@@ -337,13 +339,25 @@ class ComprehensiveMusicDiscoveryApp:
         self, discovery_results: dict[str, Any], custom_filename: str | None = None
     ) -> str:
         """Save comprehensive discovery report."""
+        base_dir = REPORTS_BASE_DIR
+        base_dir.mkdir(parents=True, exist_ok=True)
+
         if custom_filename:
-            filename = custom_filename
+            requested = Path(custom_filename)
+            if requested.is_absolute():
+                raise ValueError("custom_filename must be a relative path under the data directory")
+            filepath = (base_dir / requested).resolve()
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            filepath = (base_dir / f"comprehensive_discovery_report_{timestamp}.json").resolve()
 
-        filepath = Path(filename)
+        try:
+            filepath.relative_to(base_dir)
+        except ValueError as exc:
+            raise ValueError("custom_filename escapes the allowed data directory") from exc
+        if filepath.suffix.lower() != ".json":
+            raise ValueError("Discovery reports must be saved with a .json extension")
+
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
         with open(filepath, "w", encoding="utf-8") as f:
