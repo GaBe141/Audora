@@ -181,6 +181,52 @@ class EnhancedNotificationService:
 
         return default_config
 
+    def _to_bool_env(self, value: str | None) -> bool:
+        """Parse environment-style boolean strings."""
+        return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _allow_persisting_notification_secrets(self) -> bool:
+        """Whether secret values may be written to disk."""
+        return self._to_bool_env(os.getenv("AUDORA_ALLOW_PERSIST_NOTIFICATION_SECRETS"))
+
+    def _redact_sensitive_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Return config with sensitive values removed for safer persistence."""
+        redacted = json.loads(json.dumps(config))
+
+        # Credentials/secrets that should not be persisted by default.
+        section_fields = {
+            "email": {"password"},
+            "slack": {"webhook_url"},
+            "discord": {"webhook_url"},
+            "webhook": {"url"},
+            "sms": {"api_key", "api_secret"},
+        }
+        for section, fields in section_fields.items():
+            section_value = redacted.get(section)
+            if isinstance(section_value, dict):
+                for field in fields:
+                    if field in section_value:
+                        section_value[field] = ""
+
+        # Keep non-sensitive headers (e.g., Content-Type), redact auth-like header values.
+        webhook_section = redacted.get("webhook")
+        if isinstance(webhook_section, dict):
+            headers = webhook_section.get("headers")
+            if isinstance(headers, dict):
+                sensitive_header_keys = {
+                    "authorization",
+                    "proxy-authorization",
+                    "x-api-key",
+                    "api-key",
+                    "x-auth-token",
+                    "x-access-token",
+                }
+                for header_name in list(headers.keys()):
+                    if str(header_name).strip().lower() in sensitive_header_keys:
+                        headers[header_name] = ""
+
+        return redacted
+
     def save_config(self, path: str = "config/notification_config.json") -> None:
         """Persist the current channel configuration to a JSON file.
 
@@ -193,6 +239,8 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        if not self._allow_persisting_notification_secrets():
+            to_save = self._redact_sensitive_config(to_save)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
