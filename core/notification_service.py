@@ -88,6 +88,10 @@ class EnhancedNotificationService:
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
         self.config = self._load_config(config_file)
+        self.allowed_attachment_dir = Path(
+            os.getenv("AUDORA_ATTACHMENT_DIR", "notification_attachments")
+        ).resolve()
+        self.allowed_attachment_dir.mkdir(parents=True, exist_ok=True)
         self.sent_notifications: dict[str, Any] = {}
         self.notification_history: list[dict[str, Any]] = []
         self.failed_deliveries: list[dict[str, Any]] = []
@@ -254,6 +258,30 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _resolve_attachment_path(self, attachment_path: str) -> Path:
+        """Resolve and validate email attachment path to reduce file exfiltration risk."""
+        if not attachment_path or not attachment_path.strip():
+            raise ValueError("Attachment path cannot be empty")
+
+        requested_path = Path(attachment_path.strip())
+        resolved_path = (
+            requested_path.resolve()
+            if requested_path.is_absolute()
+            else (self.allowed_attachment_dir / requested_path).resolve()
+        )
+
+        try:
+            resolved_path.relative_to(self.allowed_attachment_dir)
+        except ValueError as exc:
+            raise ValueError(
+                "Attachment path is outside the allowed attachment directory"
+            ) from exc
+
+        if not resolved_path.is_file():
+            raise ValueError("Attachment file does not exist")
+
+        return resolved_path
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -559,16 +587,21 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    try:
+                        validated_path = self._resolve_attachment_path(attachment_path)
+                    except ValueError as exc:
+                        self.logger.warning("Skipping unsafe attachment path: %s", exc)
+                        continue
+
+                    with validated_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {validated_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
