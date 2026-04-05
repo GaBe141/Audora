@@ -90,4 +90,4 @@ class TestWebhookUrlValidation:
         assert captured["session"].post_called is True
         assert captured["session"].allow_redirects is False
         assert result["success"] is False
-        assert "Unsafe webhook redirect target blocked" in result["error"]
+        assert "Webhook redirects are not allowed" in result["error"]
