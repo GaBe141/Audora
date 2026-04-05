@@ -107,3 +107,33 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestSecureTableQuerying:
+    """Ensure table-based exports and quality checks avoid SQL injection vectors."""
+
+    def test_export_to_csv_rejects_non_whitelisted_table(self, data_store, tmp_path):
+        output = tmp_path / "export.csv"
+        with pytest.raises(ValueError, match="Invalid table name"):
+            data_store.export_to_csv("trends; DROP TABLE trends;--", str(output))
+
+    def test_export_to_csv_writes_expected_rows(self, data_store, sample_trends, tmp_path):
+        data_store.save_trends_bulk(sample_trends)
+        output = tmp_path / "trends_export.csv"
+        result_path = data_store.export_to_csv("trends", str(output))
+        assert result_path == str(output)
+        assert output.exists()
+        content = output.read_text(encoding="utf-8")
+        assert "track_name" in content
+        assert "Track One" in content
+
+    def test_get_data_quality_report_contains_expected_table_stats(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        report = data_store.get_data_quality_report()
+        stats = report["table_statistics"]
+        assert set(stats.keys()) == {
+            "trends",
+            "trend_history",
+            "viral_predictions",
+            "cross_platform_correlations",
+        }
