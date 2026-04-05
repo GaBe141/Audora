@@ -87,6 +87,7 @@ class EnhancedNotificationService:
 
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
+        self.project_root = Path(__file__).resolve().parent.parent
         self.config = self._load_config(config_file)
         self.sent_notifications: dict[str, Any] = {}
         self.notification_history: list[dict[str, Any]] = []
@@ -131,6 +132,14 @@ class EnhancedNotificationService:
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
                 "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
                 "use_tls": True,
+                "attachment_allowed_dirs": [
+                    entry.strip()
+                    for entry in os.getenv(
+                        "EMAIL_ATTACHMENT_ALLOWED_DIRS", "data/reports,reports"
+                    ).split(",")
+                    if entry.strip()
+                ],
+                "max_attachment_size_mb": int(os.getenv("EMAIL_MAX_ATTACHMENT_SIZE_MB", "10")),
             },
             "slack": {
                 "webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
@@ -262,6 +271,52 @@ class EnhancedNotificationService:
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    def _resolve_email_attachment_path(self, attachment_path: str) -> Path:
+        """Resolve and validate attachment paths to prevent local file exfiltration."""
+        if not isinstance(attachment_path, str) or not attachment_path.strip():
+            raise ValueError("Attachment path must be a non-empty string")
+
+        email_config = self.config.get("email", {})
+        allowed_dirs_config = email_config.get("attachment_allowed_dirs", [])
+        if isinstance(allowed_dirs_config, str):
+            allowed_dirs = [allowed_dirs_config]
+        elif isinstance(allowed_dirs_config, list):
+            allowed_dirs = [entry for entry in allowed_dirs_config if isinstance(entry, str)]
+        else:
+            allowed_dirs = []
+
+        if not allowed_dirs:
+            raise ValueError("No allowed attachment directories configured")
+
+        try:
+            resolved_attachment = Path(attachment_path).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as e:
+            raise ValueError("Attachment file not found or inaccessible") from e
+
+        if not resolved_attachment.is_file():
+            raise ValueError("Attachment path must reference a file")
+
+        resolved_allowed_dirs = []
+        for allowed_dir in allowed_dirs:
+            candidate_dir = Path(allowed_dir.strip())
+            if not candidate_dir.is_absolute():
+                candidate_dir = self.project_root / candidate_dir
+            resolved_allowed_dirs.append(candidate_dir.resolve(strict=False))
+
+        if not any(resolved_attachment.is_relative_to(allowed) for allowed in resolved_allowed_dirs):
+            raise ValueError("Attachment path is outside allowed attachment directories")
+
+        max_size_mb = email_config.get("max_attachment_size_mb", 10)
+        try:
+            max_size_bytes = max(1, int(max_size_mb)) * 1024 * 1024
+        except (TypeError, ValueError):
+            max_size_bytes = 10 * 1024 * 1024
+
+        if resolved_attachment.stat().st_size > max_size_bytes:
+            raise ValueError("Attachment exceeds maximum allowed size")
+
+        return resolved_attachment
 
     def _load_templates(self) -> dict[str, str]:
         """Load message templates."""
@@ -559,16 +614,16 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    safe_attachment_path = self._resolve_email_attachment_path(attachment_path)
+                    with safe_attachment_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {safe_attachment_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
