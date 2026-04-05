@@ -255,6 +255,28 @@ class EnhancedNotificationService:
 
         return url
 
+    def _get_http_timeout(self, configured_timeout: Any) -> aiohttp.ClientTimeout:
+        """Build a bounded HTTP timeout to avoid hanging outbound requests."""
+        default_timeout = 30.0
+        max_timeout = 120.0
+        min_timeout = 1.0
+        connect_timeout = 10.0
+
+        try:
+            timeout_seconds = float(configured_timeout)
+        except (TypeError, ValueError):
+            timeout_seconds = default_timeout
+
+        timeout_seconds = max(min_timeout, min(timeout_seconds, max_timeout))
+        connect_seconds = min(timeout_seconds, connect_timeout)
+
+        return aiohttp.ClientTimeout(
+            total=timeout_seconds,
+            connect=connect_seconds,
+            sock_connect=connect_seconds,
+            sock_read=timeout_seconds,
+        )
+
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
         for key, value in update.items():
@@ -648,9 +670,12 @@ System status: {{ system_status }}
                 if fields:
                     slack_message["attachments"][0]["fields"] = fields
 
+            timeout = self._get_http_timeout(
+                slack_config.get("timeout", self.config.get("webhook", {}).get("timeout", 30))
+            )
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -715,9 +740,12 @@ System status: {{ system_status }}
                 if fields:
                     discord_message["embeds"][0]["fields"] = fields
 
+            timeout = self._get_http_timeout(
+                discord_config.get("timeout", self.config.get("webhook", {}).get("timeout", 30))
+            )
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -772,12 +800,12 @@ System status: {{ system_status }}
                 payload["formatted_content"] = template.render(**message.template_vars)
 
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
-            timeout = webhook_config.get("timeout", 30)
+            timeout = self._get_http_timeout(webhook_config.get("timeout", 30))
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(timeout=timeout) as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url, json=payload, headers=headers, allow_redirects=False
                 ) as response,
             ):
                 if 200 <= response.status < 300:
