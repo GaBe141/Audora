@@ -27,3 +27,31 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+
+class TestWebhookHttpTimeouts:
+    """Validate bounded outbound timeout handling."""
+
+    def test_timeout_clamps_to_maximum(self):
+        svc = EnhancedNotificationService()
+        timeout = svc._get_http_timeout(1000)
+        assert timeout.total == 120
+        assert timeout.connect == 10
+        assert timeout.sock_connect == 10
+        assert timeout.sock_read == 120
+
+    def test_timeout_clamps_to_minimum(self):
+        svc = EnhancedNotificationService()
+        timeout = svc._get_http_timeout(0)
+        assert timeout.total == 1
+        assert timeout.connect == 1
+        assert timeout.sock_connect == 1
+        assert timeout.sock_read == 1
+
+    def test_timeout_uses_default_for_invalid_values(self):
+        svc = EnhancedNotificationService()
+        timeout = svc._get_http_timeout("not-a-number")
+        assert timeout.total == 30
+        assert timeout.connect == 10
+        assert timeout.sock_connect == 10
+        assert timeout.sock_read == 30
