@@ -255,6 +255,32 @@ class EnhancedNotificationService:
 
         return url
 
+    async def _post_json_no_redirects(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, str]:
+        """POST JSON while forbidding redirects to prevent SSRF bypass."""
+        client_timeout = aiohttp.ClientTimeout(total=timeout) if timeout else None
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.post(
+                url,
+                json=payload,
+                headers=headers,
+                allow_redirects=False,
+            ) as response:
+                response_text = await response.text()
+                if 300 <= response.status < 400:
+                    location = response.headers.get("Location", "")
+                    redirect_msg = "Redirect responses are not allowed for webhook delivery"
+                    if location:
+                        redirect_msg += f" (Location: {location})"
+                    return response.status, redirect_msg
+                return response.status, response_text
+
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
         for key, value in update.items():
@@ -648,19 +674,17 @@ System status: {{ system_status }}
                 if fields:
                     slack_message["attachments"][0]["fields"] = fields
 
-            async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
-            ):
-                if response.status == 200:
-                    self.logger.info("Slack notification sent successfully")
-                    return {"success": True, "status_code": response.status}
-                else:
-                    error_text = await response.text()
-                    self.logger.error(
-                        f"Slack notification failed: {response.status} - {error_text}"
-                    )
-                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            status_code, response_text = await self._post_json_no_redirects(
+                webhook_url,
+                slack_message,
+                timeout=slack_config.get("timeout", 30),
+            )
+            if status_code == 200:
+                self.logger.info("Slack notification sent successfully")
+                return {"success": True, "status_code": status_code}
+
+            self.logger.error(f"Slack notification failed: {status_code} - {response_text}")
+            return {"success": False, "error": f"HTTP {status_code}: {response_text}"}
 
         except Exception as e:
             self.logger.error(f"Failed to send Slack notification: {e}")
@@ -715,19 +739,17 @@ System status: {{ system_status }}
                 if fields:
                     discord_message["embeds"][0]["fields"] = fields
 
-            async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
-            ):
-                if response.status in [200, 204]:
-                    self.logger.info("Discord notification sent successfully")
-                    return {"success": True, "status_code": response.status}
-                else:
-                    error_text = await response.text()
-                    self.logger.error(
-                        f"Discord notification failed: {response.status} - {error_text}"
-                    )
-                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            status_code, response_text = await self._post_json_no_redirects(
+                webhook_url,
+                discord_message,
+                timeout=discord_config.get("timeout", 30),
+            )
+            if status_code in [200, 204]:
+                self.logger.info("Discord notification sent successfully")
+                return {"success": True, "status_code": status_code}
+
+            self.logger.error(f"Discord notification failed: {status_code} - {response_text}")
+            return {"success": False, "error": f"HTTP {status_code}: {response_text}"}
 
         except Exception as e:
             self.logger.error(f"Failed to send Discord notification: {e}")
@@ -774,21 +796,18 @@ System status: {{ system_status }}
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
             timeout = webhook_config.get("timeout", 30)
 
-            async with (
-                aiohttp.ClientSession() as session,
-                session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
-                ) as response,
-            ):
-                if 200 <= response.status < 300:
-                    self.logger.info(f"Webhook notification sent successfully: {response.status}")
-                    return {"success": True, "status_code": response.status}
-                else:
-                    error_text = await response.text()
-                    self.logger.error(
-                        f"Webhook notification failed: {response.status} - {error_text}"
-                    )
-                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            status_code, response_text = await self._post_json_no_redirects(
+                url,
+                payload,
+                headers=headers,
+                timeout=timeout,
+            )
+            if 200 <= status_code < 300:
+                self.logger.info(f"Webhook notification sent successfully: {status_code}")
+                return {"success": True, "status_code": status_code}
+
+            self.logger.error(f"Webhook notification failed: {status_code} - {response_text}")
+            return {"success": False, "error": f"HTTP {status_code}: {response_text}"}
 
         except Exception as e:
             self.logger.error(f"Failed to send webhook notification: {e}")
