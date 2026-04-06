@@ -46,6 +46,7 @@ env_data
 *_secrets
 credentials.*
 config.ini
+config/social_apis.json
 config/*_config.json
 !config/*.template
 !config/*.example
