@@ -197,7 +197,7 @@ def test_email_starttls_uses_secure_ssl_context(monkeypatch):
     assert context.check_hostname is True
 
 
-def test_email_rejects_smtp_auth_without_tls():
+def test_email_rejects_smtp_auth_without_tls(monkeypatch):
     svc = EnhancedNotificationService()
     svc.config["email"].update(
         {
@@ -218,6 +218,8 @@ def test_email_rejects_smtp_auth_without_tls():
         channels=[NotificationChannel.EMAIL],
     )
 
+    server = Mock()
+    monkeypatch.setattr("core.notification_service.smtplib.SMTP", lambda *args, **kwargs: server)
     result = asyncio.run(svc._send_email(message))
     assert result["success"] is False
     assert "requires TLS" in result["error"]
