@@ -10,13 +10,19 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
+
+try:
+    import pandas as pd
+
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
 
 # Try to import Redis, fall back to local cache if unavailable
 try:
@@ -188,7 +194,31 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload_type: str
+        payload_data: str
+
+        if isinstance(value, bytes):
+            payload_type = "bytes"
+            payload_data = base64.b64encode(value).decode("ascii")
+        elif HAS_PANDAS and isinstance(value, pd.DataFrame):
+            payload_type = "pandas_dataframe"
+            payload_data = value.to_json(orient="split", date_format="iso")
+        else:
+            try:
+                payload_type = "json"
+                payload_data = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+            except (TypeError, ValueError) as e:
+                raise TypeError(
+                    f"Unsupported cache value type for secure serialization: {type(value).__name__}"
+                ) from e
+
+        payload_envelope = {
+            "type": payload_type,
+            "data": payload_data,
+        }
+        payload = json.dumps(payload_envelope, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
@@ -223,7 +253,39 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            payload_envelope = json.loads(payload.decode("utf-8"))
+            if (
+                not isinstance(payload_envelope, dict)
+                or not isinstance(payload_envelope.get("type"), str)
+                or "data" not in payload_envelope
+            ):
+                logger.warning("Rejected cache entry with invalid payload envelope")
+                return None
+
+            payload_type = payload_envelope["type"]
+            payload_data = payload_envelope["data"]
+
+            if payload_type == "json":
+                if not isinstance(payload_data, str):
+                    logger.warning("Rejected cache entry with invalid JSON payload")
+                    return None
+                return json.loads(payload_data)
+            if payload_type == "bytes":
+                if not isinstance(payload_data, str):
+                    logger.warning("Rejected cache entry with invalid bytes payload")
+                    return None
+                return base64.b64decode(payload_data.encode("ascii"), validate=True)
+            if payload_type == "pandas_dataframe":
+                if not HAS_PANDAS:
+                    logger.warning("Rejected DataFrame cache entry because pandas is unavailable")
+                    return None
+                if not isinstance(payload_data, str):
+                    logger.warning("Rejected cache entry with invalid DataFrame payload")
+                    return None
+                return pd.read_json(payload_data, orient="split")
+
+            logger.warning("Rejected cache entry with unsupported payload type: %s", payload_type)
+            return None
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -337,7 +399,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON/bytes/DataFrame serializable for Redis backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +494,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
