@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +125,56 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerializationSecurity:
+    """Security-focused tests for Redis cache serialization."""
+
+    @pytest.fixture
+    def backend(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        backend._max_payload_bytes = 1024 * 1024
+        return backend
+
+    def test_round_trip_uses_safe_allowlisted_types(self, backend):
+        value = {
+            "artist": "Example Artist",
+            "score": 97.4,
+            "flags": [True, False, None],
+            "meta": {"region": "US", "rank": 3},
+            "coords": (1, 2),
+            "raw": b"abc123",
+        }
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+        assert restored == value
+
+    def test_tampered_payload_is_rejected(self, backend):
+        original = backend._serialize({"ok": True})
+        envelope = json.loads(original.decode("utf-8"))
+        payload = base64.b64decode(envelope["payload"].encode("ascii"), validate=True)
+        tampered_payload = payload + b"tamper"
+        envelope["payload"] = base64.b64encode(tampered_payload).decode("ascii")
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(tampered) is None
+
+    def test_legacy_envelope_without_format_is_rejected(self, backend):
+        encoded = backend._encode_value({"legacy": "format"})
+        payload = json.dumps(encoded, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        signature = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        legacy_bytes = json.dumps(legacy_envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(legacy_bytes) is None
+
+    def test_unsupported_object_type_is_not_serialized(self, backend):
+        class Unsupported:
+            pass
+
+        with pytest.raises(TypeError, match="Unsupported Redis cache value type"):
+            backend._serialize(Unsupported())
