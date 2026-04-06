@@ -118,3 +118,14 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_build_cache_key_is_stable_and_sha256_length(self, mock_cache):
+        key1 = mock_cache._build_cache_key("prefix", args=("a", 1), kwargs={"x": True})
+        key2 = mock_cache._build_cache_key("prefix", args=("a", 1), kwargs={"x": True})
+        assert key1 == key2
+
+        parts = key1.split(":")
+        assert parts[0] == "prefix"
+        # sha256 hex digest length
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
