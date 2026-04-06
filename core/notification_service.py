@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import ssl
 import socket
 import smtplib
 from dataclasses import dataclass
@@ -571,16 +572,25 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            smtp_timeout = int(email_config.get("timeout", 30))
+            with smtplib.SMTP(
+                email_config["smtp_server"], email_config.get("port", 587), timeout=smtp_timeout
+            ) as server:
+                if email_config.get("use_tls", True):
+                    server.ehlo()
+                    if not server.has_extn("starttls"):
+                        return {"success": False, "error": "SMTP server does not support STARTTLS"}
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+                    tls_context = ssl.create_default_context()
+                    if hasattr(ssl, "TLSVersion"):
+                        tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+                    server.starttls(context=tls_context)
+                    server.ehlo()
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"

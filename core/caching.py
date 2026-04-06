@@ -163,6 +163,7 @@ class RedisCacheBackend(CacheBackend):
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
+        self._allow_pickle = self._is_pickle_deserialization_enabled()
 
         # Test connection
         try:
@@ -186,13 +187,38 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _is_pickle_deserialization_enabled(self) -> bool:
+        """Whether legacy pickle-based cache payloads are allowed."""
+        value = os.getenv("AUDORA_CACHE_ALLOW_PICKLE", "").strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value with integrity protection.
+
+        Security note:
+        - JSON is the secure default because it avoids executable payloads.
+        - Pickle is only used when explicitly enabled via AUDORA_CACHE_ALLOW_PICKLE.
+        """
+        fmt: str
+        payload: bytes
+
+        try:
+            payload = json.dumps(value, separators=(",", ":")).encode("utf-8")
+            fmt = "json"
+        except (TypeError, ValueError):
+            if not self._allow_pickle:
+                raise ValueError(
+                    "Cache value is not JSON-serializable and pickle is disabled. "
+                    "Set AUDORA_CACHE_ALLOW_PICKLE=true only if you explicitly accept pickle risk."
+                )
+            payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+            fmt = "pickle"
+
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "fmt": fmt,
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
@@ -204,7 +230,7 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") not in {1, 2}
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -223,7 +249,26 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            # Legacy entries (v1) were pickle-only.
+            if envelope.get("v") == 1:
+                if not self._allow_pickle:
+                    logger.warning(
+                        "Rejected legacy pickle cache entry because pickle deserialization is disabled"
+                    )
+                    return None
+                return pickle.loads(payload)
+
+            payload_format = envelope.get("fmt")
+            if payload_format == "json":
+                return json.loads(payload.decode("utf-8"))
+            if payload_format == "pickle":
+                if not self._allow_pickle:
+                    logger.warning("Rejected pickle cache entry because pickle deserialization is disabled")
+                    return None
+                return pickle.loads(payload)
+
+            logger.warning("Rejected cache entry with unknown payload format")
+            return None
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
