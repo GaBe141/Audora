@@ -189,10 +189,8 @@ class EnhancedNotificationService:
         """
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        # Persist only non-sensitive settings. Secrets must come from environment variables.
+        to_save = self._build_safe_persisted_config()
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -201,6 +199,50 @@ class EnhancedNotificationService:
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _build_safe_persisted_config(self) -> dict[str, Any]:
+        """Build a sanitized config payload safe to write to disk."""
+        email = self.config.get("email", {})
+        slack = self.config.get("slack", {})
+        discord = self.config.get("discord", {})
+        webhook = self.config.get("webhook", {})
+        sms = self.config.get("sms", {})
+
+        safe_headers: dict[str, str] = {}
+        if isinstance(webhook.get("headers"), dict):
+            for key, value in webhook["headers"].items():
+                if str(key).strip().lower() in {"content-type", "user-agent"}:
+                    safe_headers[str(key)] = str(value)
+
+        return {
+            "default_channels": self.config.get("default_channels", ["console"]),
+            "rate_limit_per_hour": self.config.get("rate_limit_per_hour", 50),
+            "email": {
+                "smtp_server": email.get("smtp_server", ""),
+                "port": email.get("port", 587),
+                "from_address": email.get("from_address", "music-discovery@example.com"),
+                "recipients": email.get("recipients", []),
+                "use_tls": email.get("use_tls", True),
+            },
+            "slack": {
+                "channel": slack.get("channel", "#music-trends"),
+                "username": slack.get("username", "Music Discovery Bot"),
+                "icon_emoji": slack.get("icon_emoji", ":musical_note:"),
+            },
+            "discord": {
+                "username": discord.get("username", "Music Discovery"),
+                "avatar_url": discord.get("avatar_url", ""),
+            },
+            "webhook": {
+                "headers": safe_headers,
+                "timeout": webhook.get("timeout", 30),
+            },
+            "sms": {
+                "provider": sms.get("provider", "twilio"),
+                "from_number": sms.get("from_number", ""),
+                "recipients": sms.get("recipients", []),
+            },
+        }
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
