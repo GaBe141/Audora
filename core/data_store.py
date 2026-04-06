@@ -3,6 +3,7 @@ Enhanced data persistence layer for music discovery data.
 Handles trending data, viral predictions, and cross-platform analysis.
 """
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -665,8 +666,10 @@ class EnhancedMusicDataStore:
         if not track_artist_pairs:
             return pd.DataFrame()
 
-        # Create cache key from the pairs
-        cache_key = f"tracks_bulk:{hash(tuple(sorted(track_artist_pairs)))}"
+        # Use deterministic cryptographic digest for stable cache keying.
+        pairs_payload = json.dumps(sorted(track_artist_pairs), separators=(",", ":"))
+        pairs_digest = hashlib.sha256(pairs_payload.encode("utf-8")).hexdigest()
+        cache_key = f"tracks_bulk:{pairs_digest}"
         cached_result = self._cache.get(cache_key)
         if cached_result is not None:
             self.logger.debug(f"Cache hit for bulk tracks query ({len(track_artist_pairs)} pairs)")
