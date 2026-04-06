@@ -10,6 +10,8 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -509,8 +511,9 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
+        # Use deterministic SHA-256 to avoid runtime-randomized Python hashes.
+        key_material = f"{message.title}:{message.content[:100]}:{message.priority.value}"
+        content_hash = hashlib.sha256(key_material.encode("utf-8")).hexdigest()[:24]
         return f"{content_hash}:{message.priority.value}"
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
@@ -574,7 +577,9 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.ehlo()
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -649,8 +654,10 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=15), trust_env=False
+                ) as session,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -716,8 +723,10 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=15), trust_env=False
+                ) as session,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -775,9 +784,14 @@ System status: {{ system_status }}
             timeout = webhook_config.get("timeout", 30)
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=timeout), trust_env=False
+                ) as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
