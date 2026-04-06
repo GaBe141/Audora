@@ -976,9 +976,14 @@ class EnhancedMusicDataStore:
             # Whitelist of valid tables to prevent SQL injection
             tables = ["trends", "trend_history", "viral_predictions", "cross_platform_correlations"]
 
+            table_count_queries = {
+                "trends": "SELECT COUNT(*) FROM trends",
+                "trend_history": "SELECT COUNT(*) FROM trend_history",
+                "viral_predictions": "SELECT COUNT(*) FROM viral_predictions",
+                "cross_platform_correlations": "SELECT COUNT(*) FROM cross_platform_correlations",
+            }
             for table in tables:
-                # Table names are from whitelist, safe to use
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                cursor.execute(table_count_queries[table])
                 table_stats[table] = cursor.fetchone()[0]
 
             # Data quality checks
