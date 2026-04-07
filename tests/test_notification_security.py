@@ -13,6 +13,11 @@ class TestWebhookUrlValidation:
         with pytest.raises(ValueError, match="HTTPS"):
             svc._validate_webhook_url("http://example.com/webhook")
 
+    def test_rejects_embedded_credentials(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="embedded credentials"):
+            svc._validate_webhook_url("https://user:pass@example.com/webhook")
+
     def test_rejects_localhost_targets(self):
         svc = EnhancedNotificationService()
         with pytest.raises(ValueError, match="Localhost"):
