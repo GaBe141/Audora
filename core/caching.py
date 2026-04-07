@@ -163,6 +163,7 @@ class RedisCacheBackend(CacheBackend):
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
+        self._max_payload_bytes = self._get_max_payload_bytes()
 
         # Test connection
         try:
@@ -186,9 +187,29 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _get_max_payload_bytes(self) -> int:
+        """Get maximum accepted serialized payload size for Redis cache values."""
+        configured = os.getenv("AUDORA_CACHE_MAX_PAYLOAD_BYTES", "5242880").strip()
+        try:
+            value = int(configured)
+            if value <= 0:
+                raise ValueError("must be positive")
+            return value
+        except ValueError:
+            logger.warning(
+                "Invalid AUDORA_CACHE_MAX_PAYLOAD_BYTES=%s; defaulting to 5242880 bytes",
+                configured,
+            )
+            return 5 * 1024 * 1024
+
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
         payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        if len(payload) > self._max_payload_bytes:
+            raise ValueError(
+                f"Serialized cache payload too large: {len(payload)} bytes "
+                f"(limit {self._max_payload_bytes})"
+            )
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
@@ -201,6 +222,9 @@ class RedisCacheBackend(CacheBackend):
     def _deserialize(self, value: bytes) -> Any | None:
         """Deserialize cache value only after signature verification."""
         try:
+            if len(value) > (self._max_payload_bytes * 2):
+                logger.warning("Rejected cache entry larger than configured size limit")
+                return None
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
@@ -432,12 +456,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode("utf-8")).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode("utf-8")).hexdigest())
 
         return ":".join(key_parts)
 
