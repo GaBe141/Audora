@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import smtplib
 from dataclasses import dataclass
@@ -254,6 +255,46 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _validate_channel_webhook_url(
+        self,
+        url: str,
+        *,
+        channel_name: str,
+        allowed_hosts: set[str],
+        path_pattern: str,
+    ) -> str:
+        """Validate channel-specific webhook constraints before network calls."""
+        parsed = urlparse(url.strip())
+        hostname = (parsed.hostname or "").lower()
+
+        if hostname not in allowed_hosts:
+            raise ValueError(
+                f"{channel_name} webhook URL must use one of: {sorted(allowed_hosts)}"
+            )
+
+        if not re.match(path_pattern, parsed.path or ""):
+            raise ValueError(f"{channel_name} webhook URL path is invalid")
+
+        return self._validate_webhook_url(url, allow_private=False)
+
+    def _validate_slack_webhook_url(self, url: str) -> str:
+        """Validate Slack webhook host/path constraints."""
+        return self._validate_channel_webhook_url(
+            url,
+            channel_name="Slack",
+            allowed_hosts={"hooks.slack.com", "hooks.slack-gov.com"},
+            path_pattern=r"^/services/[^/]+/[^/]+/[^/]+$",
+        )
+
+    def _validate_discord_webhook_url(self, url: str) -> str:
+        """Validate Discord webhook host/path constraints."""
+        return self._validate_channel_webhook_url(
+            url,
+            channel_name="Discord",
+            allowed_hosts={"discord.com", "discordapp.com", "ptb.discord.com", "canary.discord.com"},
+            path_pattern=r"^/api(?:/v\d+)?/webhooks/[^/]+/[^/]+$",
+        )
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -600,7 +641,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Slack webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            webhook_url = self._validate_slack_webhook_url(webhook_url)
             # Create Slack message format
             color_map = {
                 NotificationPriority.LOW: "good",
@@ -650,7 +691,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -675,7 +716,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Discord webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            webhook_url = self._validate_discord_webhook_url(webhook_url)
             # Format content for Discord
             content = message.content
             if message.template_vars:
@@ -717,7 +758,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +818,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
