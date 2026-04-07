@@ -89,3 +89,12 @@ class TestLastFmAPIErrorHandling:
         with patch.object(api.session, "get", return_value=mock_response):
             with pytest.raises(APIConnectionError, match="429"):
                 api.get_top_artists_global(limit=5)
+
+
+class TestLastFmApiTransportSecurity:
+    """Ensure Last.fm client uses secure transport defaults."""
+
+    def test_uses_https_base_url(self):
+        from integrations import lastfm_integration
+
+        assert lastfm_integration.BASE_URL.startswith("https://")
