@@ -6,6 +6,7 @@ Handles trending data, viral predictions, and cross-platform analysis.
 import json
 import logging
 import sqlite3
+import hashlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -666,7 +667,7 @@ class EnhancedMusicDataStore:
             return pd.DataFrame()
 
         # Create cache key from the pairs
-        cache_key = f"tracks_bulk:{hash(tuple(sorted(track_artist_pairs)))}"
+        cache_key = self._build_tracks_bulk_cache_key(track_artist_pairs)
         cached_result = self._cache.get(cache_key)
         if cached_result is not None:
             self.logger.debug(f"Cache hit for bulk tracks query ({len(track_artist_pairs)} pairs)")
@@ -702,6 +703,13 @@ class EnhancedMusicDataStore:
             self.logger.debug(f"Loaded {len(df)} tracks in bulk query")
 
             return df
+
+    def _build_tracks_bulk_cache_key(self, track_artist_pairs: list[tuple[str, str]]) -> str:
+        """Build stable cache key for bulk track/artist lookups."""
+        normalized_pairs = sorted((str(track), str(artist)) for track, artist in track_artist_pairs)
+        pairs_repr = json.dumps(normalized_pairs, ensure_ascii=True)
+        cache_digest = hashlib.sha256(pairs_repr.encode("utf-8")).hexdigest()
+        return f"tracks_bulk:{cache_digest}"
 
     def get_trending_summary_cached(
         self, platform: str | None = None, days: int = 7
