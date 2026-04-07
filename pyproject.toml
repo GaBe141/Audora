@@ -130,8 +130,8 @@ ignore_missing_imports = true
 
 [tool.bandit]
 exclude_dirs = ["tests", "scripts/demo_*", "notebooks", ".venv", "venv"]
-# Skip: B101=assert_used, B601=paramiko, B403=pickle_import, B301=pickle_loads, B324=hashlib_md5, B608=hardcoded_sql
-skips = ["B101", "B601", "B403", "B301", "B324", "B608"]
+# Keep skips narrowly scoped; do not suppress critical crypto/deserialization/SQL checks globally.
+skips = ["B101", "B601"]
 
 [tool.bandit.assert_used]
 skips = ["*/test_*.py", "*/tests/*.py"]
