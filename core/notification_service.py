@@ -229,10 +229,14 @@ class EnhancedNotificationService:
     def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
         """Validate outbound webhook URL to reduce SSRF risk."""
         parsed = urlparse(url.strip())
-        if parsed.scheme != "https":
+        if parsed.scheme.lower() != "https":
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
+        if parsed.fragment:
+            raise ValueError("Webhook URL must not include a URL fragment")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
@@ -240,11 +244,18 @@ class EnhancedNotificationService:
 
         resolved_ips = set()
         try:
-            # Validate all resolved addresses to avoid DNS-based bypass.
-            for info in socket.getaddrinfo(hostname, parsed.port or 443, proto=socket.IPPROTO_TCP):
-                resolved_ips.add(info[4][0])
-        except socket.gaierror as e:
-            raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
+            # If hostname is already an IP literal, validate directly.
+            ipaddress.ip_address(hostname)
+            resolved_ips.add(hostname)
+        except ValueError:
+            try:
+                # Validate all resolved addresses to avoid DNS-based bypass.
+                for info in socket.getaddrinfo(
+                    hostname, parsed.port or 443, proto=socket.IPPROTO_TCP
+                ):
+                    resolved_ips.add(info[4][0])
+            except socket.gaierror as e:
+                raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
 
         if not allow_private:
             for ip in resolved_ips:
@@ -253,7 +264,48 @@ class EnhancedNotificationService:
                         "Webhook URL resolves to a private or restricted network address"
                     )
 
-        return url
+        return parsed.geturl()
+
+    def _validate_connected_peer(
+        self, response: aiohttp.ClientResponse, *, allow_private: bool = False
+    ) -> None:
+        """Validate connected peer IP to reduce DNS rebinding risk."""
+        if allow_private:
+            return
+
+        connection = response.connection
+        if connection is None or connection.transport is None:
+            raise ValueError("Unable to verify webhook destination address")
+
+        peername = connection.transport.get_extra_info("peername")
+        if not peername:
+            raise ValueError("Unable to verify webhook destination address")
+
+        # peername is typically (ip, port) for TCP sockets.
+        peer_ip = peername[0] if isinstance(peername, tuple) else str(peername)
+        if self._is_restricted_ip(peer_ip):
+            raise ValueError(
+                "Webhook connection resolved to a private or restricted network address"
+            )
+
+    def _attachment_root(self) -> Path:
+        """Return allowed root for outbound email attachments."""
+        configured_root = os.getenv("AUDORA_EMAIL_ATTACHMENT_DIR", "").strip()
+        root = Path(configured_root) if configured_root else Path("data/exports")
+        return root.expanduser().resolve()
+
+    def _resolve_attachment_path(self, raw_path: str, allowed_root: Path) -> Path:
+        """Resolve and validate attachment path against allowed root."""
+        candidate = Path(raw_path).expanduser().resolve(strict=True)
+        try:
+            candidate.relative_to(allowed_root)
+        except ValueError as e:
+            raise ValueError(
+                f"Attachment path is outside allowed directory: {allowed_root}"
+            ) from e
+        if not candidate.is_file():
+            raise ValueError(f"Attachment path is not a regular file: {candidate}")
+        return candidate
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -558,17 +610,18 @@ System status: {{ system_status }}
 
             # Add attachments
             if message.attachments:
+                allowed_root = self._attachment_root()
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    safe_path = self._resolve_attachment_path(attachment_path, allowed_root)
+                    with safe_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename={safe_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
@@ -650,8 +703,14 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response,
             ):
+                self._validate_connected_peer(response, allow_private=False)
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -717,8 +776,14 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response,
             ):
+                self._validate_connected_peer(response, allow_private=False)
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -777,9 +842,16 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
+                self._validate_connected_peer(
+                    response, allow_private=self._allow_private_webhooks()
+                )
                 if 200 <= response.status < 300:
                     self.logger.info(f"Webhook notification sent successfully: {response.status}")
                     return {"success": True, "status_code": response.status}

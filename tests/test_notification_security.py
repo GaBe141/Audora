@@ -1,4 +1,4 @@
-"""Security tests for notification webhook URL validation."""
+"""Security tests for notification webhook URL validation and attachment safety."""
 
 import pytest
 
@@ -27,3 +27,37 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_rejects_embedded_credentials(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="embedded credentials"):
+            svc._validate_webhook_url("https://user:pass@example.com/webhook")
+
+    def test_rejects_fragment(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="URL fragment"):
+            svc._validate_webhook_url("https://example.com/webhook#frag")
+
+
+class TestAttachmentPathValidation:
+    """Validate attachment path constraints."""
+
+    def test_rejects_attachment_outside_allowed_root(self, tmp_path):
+        svc = EnhancedNotificationService()
+        allowed_root = tmp_path / "exports"
+        allowed_root.mkdir(parents=True, exist_ok=True)
+        outside_file = tmp_path / "secret.txt"
+        outside_file.write_text("secret", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="outside allowed directory"):
+            svc._resolve_attachment_path(str(outside_file), allowed_root.resolve())
+
+    def test_allows_attachment_within_allowed_root(self, tmp_path):
+        svc = EnhancedNotificationService()
+        allowed_root = tmp_path / "exports"
+        allowed_root.mkdir(parents=True, exist_ok=True)
+        safe_file = allowed_root / "report.csv"
+        safe_file.write_text("a,b\n1,2\n", encoding="utf-8")
+
+        resolved = svc._resolve_attachment_path(str(safe_file), allowed_root.resolve())
+        assert resolved == safe_file.resolve()

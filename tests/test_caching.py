@@ -2,8 +2,12 @@
 
 import time
 
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,27 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSerialization:
+    """Security-focused tests for Redis serializer restrictions."""
+
+    def test_serialize_rejects_arbitrary_object(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-key"
+
+        class Dangerous:
+            pass
+
+        with pytest.raises(TypeError, match="JSON-serializable"):
+            backend._serialize(Dangerous())
+
+
+class TestCacheKeyHashing:
+    """Regression tests for cache key hashing function."""
+
+    def test_build_cache_key_is_deterministic(self):
+        manager = CacheManager(backend=LocalCacheBackend(max_size=10))
+        key1 = manager._build_cache_key("prefix", args=(1, "a"), kwargs={"x": 2})
+        key2 = manager._build_cache_key("prefix", args=(1, "a"), kwargs={"x": 2})
+        assert key1 == key2
