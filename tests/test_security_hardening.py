@@ -39,8 +39,7 @@ def test_bulk_track_cache_key_is_stable_across_processes():
     assert len(key1.split("tracks_bulk:")[1]) == 64
 
 
-@pytest.mark.asyncio
-async def test_webhook_post_disables_redirects():
+def test_webhook_post_disables_redirects():
     svc = EnhancedNotificationService()
 
     fake_response = AsyncMock()
@@ -57,8 +56,10 @@ async def test_webhook_post_disables_redirects():
         patch("core.notification_service.aiohttp.ClientSession", return_value=fake_session),
     ):
         with pytest.raises(ValueError, match="redirects are not allowed"):
-            await svc._post_json_with_ssrf_protection(
-                "https://example.com/hook",
-                {"ok": True},
-                allow_private=False,
+            asyncio.run(
+                svc._post_json_with_ssrf_protection(
+                    "https://example.com/hook",
+                    {"ok": True},
+                    allow_private=False,
+                )
             )
