@@ -5,6 +5,7 @@ Handles trending data, viral predictions, and cross-platform analysis.
 
 import json
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -931,6 +932,7 @@ class EnhancedMusicDataStore:
         """Export table data to CSV.
 
         Note: Table name is validated against whitelist to prevent SQL injection.
+        Export path is constrained to an approved base directory to prevent path traversal.
         """
         # Whitelist valid table names to prevent SQL injection
         valid_tables = {
@@ -943,6 +945,8 @@ class EnhancedMusicDataStore:
         }
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
+
+        export_path = self._resolve_export_path(filepath)
 
         with self.get_connection() as conn:
             if days:
@@ -959,12 +963,41 @@ class EnhancedMusicDataStore:
                 df = pd.read_sql_query(query, conn)
 
             # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            export_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(export_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {export_path}")
 
-        return filepath
+        return str(export_path)
+
+    def _resolve_export_path(self, filepath: str) -> Path:
+        """Resolve and validate export path against an allowed base directory."""
+        base_dir = self._get_export_base_dir()
+        requested_path = Path(filepath).expanduser()
+
+        if requested_path.suffix.lower() != ".csv":
+            raise ValueError("Export filepath must end with .csv")
+
+        resolved_path = (
+            requested_path.resolve()
+            if requested_path.is_absolute()
+            else (base_dir / requested_path).resolve()
+        )
+        try:
+            resolved_path.relative_to(base_dir)
+        except ValueError as exc:
+            raise ValueError(
+                f"Export path must be inside approved directory: {base_dir}"
+            ) from exc
+
+        return resolved_path
+
+    def _get_export_base_dir(self) -> Path:
+        """Return approved base directory for CSV exports."""
+        configured = os.getenv("AUDORA_EXPORT_BASE_DIR", "").strip()
+        if configured:
+            return Path(configured).expanduser().resolve()
+        return self.backup_dir.parent.resolve()
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
