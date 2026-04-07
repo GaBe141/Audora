@@ -971,14 +971,17 @@ class EnhancedMusicDataStore:
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
-            # Table row counts with validated table names
+            # Table row counts using fixed queries (no dynamic SQL interpolation).
             table_stats = {}
-            # Whitelist of valid tables to prevent SQL injection
-            tables = ["trends", "trend_history", "viral_predictions", "cross_platform_correlations"]
+            table_count_queries = {
+                "trends": "SELECT COUNT(*) FROM trends",
+                "trend_history": "SELECT COUNT(*) FROM trend_history",
+                "viral_predictions": "SELECT COUNT(*) FROM viral_predictions",
+                "cross_platform_correlations": "SELECT COUNT(*) FROM cross_platform_correlations",
+            }
 
-            for table in tables:
-                # Table names are from whitelist, safe to use
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+            for table, count_query in table_count_queries.items():
+                cursor.execute(count_query)
                 table_stats[table] = cursor.fetchone()[0]
 
             # Data quality checks
