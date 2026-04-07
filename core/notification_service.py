@@ -24,6 +24,8 @@ from urllib.parse import urlparse
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
 
+ATTACHMENT_BASE_DIR = (Path(__file__).resolve().parent.parent / "data").resolve()
+
 
 class NotificationPriority(Enum):
     """Notification priority levels."""
@@ -254,6 +256,23 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _resolve_safe_attachment_path(self, attachment_path: str) -> Path | None:
+        """Resolve and validate attachment path to prevent arbitrary file exfiltration."""
+        candidate = Path(attachment_path)
+        if not candidate.exists() or not candidate.is_file():
+            return None
+
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(ATTACHMENT_BASE_DIR)
+        except ValueError:
+            self.logger.warning(
+                "Skipping unsafe attachment path outside data directory: %s", attachment_path
+            )
+            return None
+
+        return resolved
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -559,14 +578,15 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
+                    safe_attachment = self._resolve_safe_attachment_path(attachment_path)
+                    if safe_attachment:
+                        with safe_attachment.open("rb") as f:
                             attachment = MIMEBase("application", "octet-stream")
                             attachment.set_payload(f.read())
                             encoders.encode_base64(attachment)
                             attachment.add_header(
                                 "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
+                                f"attachment; filename= {safe_attachment.name}",
                             )
                             msg.attach(attachment)
 
