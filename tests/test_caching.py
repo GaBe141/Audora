@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
 import time
+from datetime import date, datetime
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,69 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for safe JSON-based Redis serialization internals."""
+
+    @staticmethod
+    def _backend() -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_safe_round_trip_without_pickle(self):
+        backend = self._backend()
+        payload = {
+            "name": "Audora",
+            "count": 3,
+            "enabled": True,
+            "created_at": datetime(2026, 4, 7, 11, 0, 0),
+            "created_on": date(2026, 4, 7),
+            "labels": ("music", "security"),
+            "flags": {"a", "b"},
+            "raw": b"bytes",
+        }
+
+        encoded = backend._serialize(payload)
+        decoded = backend._deserialize(encoded)
+
+        assert isinstance(decoded, dict)
+        assert decoded["name"] == "Audora"
+        assert decoded["count"] == 3
+        assert decoded["enabled"] is True
+        assert decoded["created_at"] == datetime(2026, 4, 7, 11, 0, 0)
+        assert decoded["created_on"] == date(2026, 4, 7)
+        assert decoded["labels"] == ("music", "security")
+        assert decoded["flags"] == {"a", "b"}
+        assert decoded["raw"] == b"bytes"
+
+    def test_rejects_tampered_payload(self):
+        backend = self._backend()
+        encoded = backend._serialize({"hello": "world"})
+        tampered = bytearray(encoded)
+        tampered[-5] = (tampered[-5] + 1) % 255
+
+        assert backend._deserialize(bytes(tampered)) is None
+
+    def test_rejects_unsupported_types(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            backend._serialize(object())
+
+    def test_round_trip_dataframe(self):
+        pd = pytest.importorskip("pandas")
+        backend = self._backend()
+        frame = pd.DataFrame(
+            {
+                "track_name": ["Song A", "Song B"],
+                "score": [88.5, 91.0],
+            }
+        )
+
+        encoded = backend._serialize(frame)
+        decoded = backend._deserialize(encoded)
+
+        assert isinstance(decoded, pd.DataFrame)
+        assert decoded.equals(frame)
