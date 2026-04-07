@@ -944,6 +944,19 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        # Keep exports constrained to the project's data/exports directory.
+        # This prevents path traversal or accidental writes to sensitive locations.
+        export_base_dir = (Path(__file__).resolve().parent.parent / "data" / "exports").resolve()
+        requested_path = Path(filepath)
+        if requested_path.is_absolute():
+            raise ValueError("Absolute export paths are not allowed")
+
+        safe_path = (export_base_dir / requested_path).resolve()
+        try:
+            safe_path.relative_to(export_base_dir)
+        except ValueError as e:
+            raise ValueError("Export path must stay within data/exports") from e
+
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -959,12 +972,12 @@ class EnhancedMusicDataStore:
                 df = pd.read_sql_query(query, conn)
 
             # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            safe_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(safe_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {safe_path}")
 
-        return filepath
+        return str(safe_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""

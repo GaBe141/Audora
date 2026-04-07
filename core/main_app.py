@@ -341,15 +341,25 @@ class ComprehensiveMusicDiscoveryApp:
             filename = custom_filename
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            filename = f"comprehensive_discovery_report_{timestamp}.json"
 
-        filepath = Path(filename)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
+        output_base_dir = Path("data").resolve()
+        requested_path = Path(filename)
+        if requested_path.is_absolute():
+            raise ValueError("Absolute report paths are not allowed")
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        safe_path = (output_base_dir / requested_path).resolve()
+        try:
+            safe_path.relative_to(output_base_dir)
+        except ValueError as e:
+            raise ValueError("Report path must stay within the data directory") from e
+
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(safe_path, "w", encoding="utf-8") as f:
             json.dump(discovery_results, f, indent=2, default=str, ensure_ascii=False)
 
-        return str(filepath)
+        return str(safe_path)
 
     async def run_continuous_monitoring(
         self, interval_hours: int = 4, regions: list[str] | None = None
