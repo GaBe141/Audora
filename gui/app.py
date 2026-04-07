@@ -5,17 +5,73 @@ Includes live trend dashboard, history search, notification settings, and accura
 """
 
 import json
+import ipaddress
+import os
+import secrets
 import subprocess
 import sys
+from base64 import b64decode
 from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import Response, request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _is_truthy_env(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_local_request() -> bool:
+    """Return True when the current HTTP request originates from loopback."""
+    remote_addr = (request.remote_addr or "").strip()
+    if not remote_addr:
+        return False
+    try:
+        return ipaddress.ip_address(remote_addr).is_loopback
+    except ValueError:
+        return False
+
+
+_ALLOW_REMOTE_GUI = _is_truthy_env(os.getenv("AUDORA_GUI_ALLOW_REMOTE"))
+_GUI_AUTH_USERNAME = os.getenv("AUDORA_GUI_AUTH_USERNAME", "").strip()
+_GUI_AUTH_PASSWORD = os.getenv("AUDORA_GUI_AUTH_PASSWORD", "").strip()
+_GUI_AUTH_ENABLED = bool(_GUI_AUTH_USERNAME and _GUI_AUTH_PASSWORD)
+
+if _ALLOW_REMOTE_GUI and not _GUI_AUTH_ENABLED:
+    # Random credential prevents accidental exposure if remote access is enabled
+    # without explicit auth settings.
+    _GUI_AUTH_USERNAME = "audora-admin"
+    _GUI_AUTH_PASSWORD = secrets.token_urlsafe(24)
+    _GUI_AUTH_ENABLED = True
+    print(
+        "WARNING: AUDORA_GUI_ALLOW_REMOTE is enabled without credentials. "
+        f"Using one-time GUI credentials: {_GUI_AUTH_USERNAME}/{_GUI_AUTH_PASSWORD}",
+        file=sys.stderr,
+    )
+
+
+def _check_basic_auth(auth_header: str | None) -> bool:
+    if not _GUI_AUTH_ENABLED:
+        return True
+    if not auth_header or not auth_header.startswith("Basic "):
+        return False
+    try:
+        decoded = b64decode(auth_header.split(" ", 1)[1]).decode("utf-8")
+    except Exception:
+        return False
+    if ":" not in decoded:
+        return False
+    username, password = decoded.split(":", 1)
+    return (
+        secrets.compare_digest(username, _GUI_AUTH_USERNAME)
+        and secrets.compare_digest(password, _GUI_AUTH_PASSWORD)
+    )
 
 app = dash.Dash(
     __name__,
@@ -23,6 +79,23 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Audora",
 )
+
+
+@app.server.before_request
+def _restrict_gui_access() -> Response | None:
+    # Default security posture: only loopback can access the dashboard unless
+    # remote access is explicitly enabled.
+    if not _ALLOW_REMOTE_GUI and not _is_local_request():
+        return Response("Remote GUI access is disabled", status=403)
+
+    # When auth is enabled, require HTTP Basic auth for all dashboard routes.
+    if _GUI_AUTH_ENABLED and not _check_basic_auth(request.headers.get("Authorization")):
+        return Response(
+            "Authentication required",
+            status=401,
+            headers={"WWW-Authenticate": 'Basic realm="Audora GUI"'},
+        )
+    return None
 
 # ---------------------------------------------------------------------------
 # Layout helpers
@@ -541,7 +614,7 @@ def search_history(_n, platform, min_score, days, artist_filter):
 
     # Optional artist filter (client-side simple substring)
     if artist_filter:
-        mask = df["artist"].str.contains(artist_filter, case=False, na=False)
+        mask = df["artist"].str.contains(artist_filter, case=False, na=False, regex=False)
         df = df[mask]
 
     # Round score

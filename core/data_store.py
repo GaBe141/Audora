@@ -73,6 +73,7 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    _DEFAULT_EXPORT_ROOT = (Path(__file__).resolve().parent.parent / "data" / "exports").resolve()
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
@@ -944,6 +945,8 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        safe_path = self._resolve_export_path(filepath)
+
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -959,12 +962,32 @@ class EnhancedMusicDataStore:
                 df = pd.read_sql_query(query, conn)
 
             # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            safe_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(safe_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {safe_path}")
 
-        return filepath
+        return str(safe_path)
+
+    def _resolve_export_path(self, filepath: str) -> Path:
+        """Resolve and constrain export paths to the managed export directory."""
+        export_root = self._DEFAULT_EXPORT_ROOT
+        export_root.mkdir(parents=True, exist_ok=True)
+
+        candidate_path = Path(filepath).expanduser()
+        if candidate_path.is_absolute():
+            resolved = candidate_path.resolve()
+        else:
+            resolved = (export_root / candidate_path).resolve()
+
+        try:
+            resolved.relative_to(export_root)
+        except ValueError as e:
+            raise ValueError(
+                f"Export path must be under {export_root} (got: {resolved})"
+            ) from e
+
+        return resolved
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
