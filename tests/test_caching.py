@@ -1,6 +1,5 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
-import hashlib
 import time
 
 from core.caching import (
@@ -95,13 +94,11 @@ class TestCacheManager:
         for digest in parts[1:]:
             int(digest, 16)
 
-    def test_build_cache_key_not_equal_to_md5_digest(self):
+    def test_build_cache_key_uses_non_legacy_digest_length(self):
         manager = CacheManager(backend=LocalCacheBackend(max_size=10), key_prefix="audora_test")
         key = manager._build_cache_key("fn", ("abc",), {})
         _, args_digest = key.split(":")
-        md5_digest = hashlib.md5('["abc"]'.encode()).hexdigest()
-
-        assert args_digest != md5_digest
+        assert len(args_digest) == 64
 
 
 class TestCachedDecorator:
