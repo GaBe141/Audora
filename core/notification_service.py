@@ -193,6 +193,19 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        # Never persist plaintext credentials to disk.
+        if "email" in to_save and isinstance(to_save["email"], dict):
+            to_save["email"] = dict(to_save["email"])
+            to_save["email"]["password"] = ""
+        if "sms" in to_save and isinstance(to_save["sms"], dict):
+            to_save["sms"] = dict(to_save["sms"])
+            to_save["sms"]["api_key"] = ""
+            to_save["sms"]["api_secret"] = ""
+        if "webhook" in to_save and isinstance(to_save["webhook"], dict):
+            to_save["webhook"] = dict(to_save["webhook"])
+            headers = dict(to_save["webhook"].get("headers", {}))
+            headers.pop("Authorization", None)
+            to_save["webhook"]["headers"] = headers
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -203,13 +216,16 @@ class EnhancedNotificationService:
             self.logger.error(f"Failed to save notification config: {e}")
 
     def _allow_private_webhooks(self) -> bool:
-        """Whether private network webhook targets are allowed."""
-        return os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        """Whether private network webhook targets are allowed.
+
+        Private-network webhook delivery is intentionally disabled to avoid
+        SSRF access into internal services.
+        """
+        if os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip():
+            self.logger.warning(
+                "AUDORA_ALLOW_PRIVATE_WEBHOOKS is ignored; private webhook targets are disabled."
+            )
+        return False
 
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""

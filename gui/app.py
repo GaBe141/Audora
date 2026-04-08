@@ -4,7 +4,9 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
+import hmac
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +25,15 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Audora",
 )
+
+
+def _is_sensitive_action_authorized(provided_token: str | None) -> bool:
+    """Validate admin token for sensitive GUI actions (settings writes/tests)."""
+    expected_token = os.getenv("AUDORA_GUI_ADMIN_TOKEN", "").strip()
+    if not expected_token:
+        return False
+    candidate = (provided_token or "").strip()
+    return hmac.compare_digest(candidate, expected_token)
 
 # ---------------------------------------------------------------------------
 # Layout helpers
@@ -209,6 +220,16 @@ _settings_tab = dbc.Tab(
             dbc.Col(dbc.Input(id="input-smtp-port", placeholder="587", type="number", value=587), width=2),
             dbc.Col(dbc.Input(id="input-smtp-user", placeholder="username"), width=3),
             dbc.Col(dbc.Input(id="input-smtp-pass", placeholder="password", type="password"), width=3),
+        ], className="mb-2"),
+        dbc.Row([
+            dbc.Col(
+                dbc.Input(
+                    id="input-admin-token",
+                    placeholder="Admin token (required to save/test channels)",
+                    type="password",
+                ),
+                width=6,
+            ),
         ], className="mb-2"),
         dbc.Row([
             dbc.Col(
@@ -582,9 +603,23 @@ def export_csv(_n, table_data):
     State("input-smtp-port", "value"),
     State("input-smtp-user", "value"),
     State("input-smtp-pass", "value"),
+    State("input-admin-token", "value"),
     prevent_initial_call=True,
 )
-def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+def save_settings(
+    _n,
+    slack_url,
+    discord_url,
+    webhook_url,
+    smtp_host,
+    smtp_port,
+    smtp_user,
+    smtp_pass,
+    admin_token,
+):
+    if not _is_sensitive_action_authorized(admin_token):
+        return "Unauthorized: set AUDORA_GUI_ADMIN_TOKEN and provide a valid token."
+
     try:
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
@@ -600,9 +635,12 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
             svc.config["email"]["port"] = int(smtp_port)
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
+        # Do not persist SMTP passwords from the web UI.
         if smtp_pass:
-            svc.config["email"]["password"] = smtp_pass
+            svc.config["email"]["password"] = os.getenv("SMTP_PASSWORD", "")
         svc.save_config()
+        if smtp_pass:
+            return "Saved (SMTP password is sourced from SMTP_PASSWORD env var only)."
         return "Saved"
     except Exception as e:
         return f"Error: {e}"
@@ -615,9 +653,12 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         Output(f"test-status-{channel_key}", "children"),
         Input(f"btn-test-{channel_key}", "n_clicks"),
         State(url_input_id, "value"),
+        State("input-admin-token", "value"),
         prevent_initial_call=True,
     )
-    def _cb(_n, url):
+    def _cb(_n, url, admin_token):
+        if not _is_sensitive_action_authorized(admin_token):
+            return "Unauthorized"
         if not url:
             return "No URL"
         try:

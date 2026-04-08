@@ -27,3 +27,8 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_private_webhooks_env_flag_is_ignored(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "true")
+        svc = EnhancedNotificationService()
+        assert svc._allow_private_webhooks() is False
