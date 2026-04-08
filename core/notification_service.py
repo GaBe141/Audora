@@ -4,12 +4,14 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -145,10 +147,7 @@ class EnhancedNotificationService:
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
-                },
+                "headers": {"Content-Type": "application/json"},
                 "timeout": 30,
             },
             "sms": {
@@ -159,6 +158,9 @@ class EnhancedNotificationService:
                 "recipients": os.getenv("SMS_RECIPIENTS", "").split(","),
             },
         }
+        webhook_token = os.getenv("WEBHOOK_TOKEN", "").strip()
+        if webhook_token:
+            default_config["webhook"]["headers"]["Authorization"] = f"Bearer {webhook_token}"
 
         if config_file and Path(config_file).exists():
             try:
@@ -509,8 +511,19 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
+        key_material = json.dumps(
+            {
+                "title": message.title,
+                "content_prefix": message.content[:100],
+                "priority": message.priority.value,
+                "channels": sorted(channel.value for channel in message.channels),
+                "data": message.data or {},
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        content_hash = hashlib.sha256(key_material.encode("utf-8")).hexdigest()
         return f"{content_hash}:{message.priority.value}"
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
@@ -570,17 +583,20 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
-            # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            # Send email with explicit TLS context and transport timeout.
+            smtp_timeout = email_config.get("timeout_seconds", 30)
+            with smtplib.SMTP(
+                email_config["smtp_server"], email_config.get("port", 587), timeout=smtp_timeout
+            ) as server:
+                server.ehlo()
+                if email_config.get("use_tls", True):
+                    server.starttls(context=ssl.create_default_context())
+                    server.ehlo()
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
-
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"
@@ -650,7 +666,12 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +738,12 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -772,12 +798,24 @@ System status: {{ system_status }}
                 payload["formatted_content"] = template.render(**message.template_vars)
 
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
+            if isinstance(headers, dict):
+                headers = headers.copy()
+                auth_header = headers.get("Authorization")
+                if isinstance(auth_header, str) and auth_header.strip().removesuffix(" ").strip() in {
+                    "",
+                    "Bearer",
+                }:
+                    headers.pop("Authorization", None)
             timeout = webhook_config.get("timeout", 30)
 
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
