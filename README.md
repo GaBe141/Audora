@@ -25,6 +25,7 @@ python main.py --mode continuous      # Continuous monitoring
 python main.py --demo all            # See all demonstrations
 
 # 5. (Optional) Prototyping GUI - run discovery, demos, setup from the browser
+export AUDORA_GUI_ADMIN_TOKEN=change-this-to-a-strong-random-value
 python run_gui.py                     # Opens http://127.0.0.1:8050
 ```
 

@@ -5,6 +5,8 @@ Includes live trend dashboard, history search, notification settings, and accura
 """
 
 import json
+import hmac
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +25,8 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Audora",
 )
+
+GUI_ADMIN_TOKEN_ENV = "AUDORA_GUI_ADMIN_TOKEN"
 
 # ---------------------------------------------------------------------------
 # Layout helpers
@@ -318,6 +322,14 @@ app.layout = dbc.Container(
                         outline=True,
                         className="w-100 mb-2",
                     ),
+                    html.Hr(),
+                    html.Label("Admin token", className="small text-muted"),
+                    dbc.Input(
+                        id="input-admin-token",
+                        placeholder="Required for protected actions",
+                        type="password",
+                        className="mb-2",
+                    ),
                 ],
                 width=2,
                 className="pt-4",
@@ -371,6 +383,20 @@ def _get_data_store():
     return EnhancedMusicDataStore(str(db_path))
 
 
+def _validate_admin_token(provided_token: str | None) -> tuple[bool, str]:
+    """Validate admin token for sensitive GUI actions."""
+    expected_token = os.getenv(GUI_ADMIN_TOKEN_ENV, "").strip()
+    if not expected_token:
+        return False, f"Protected action blocked: set {GUI_ADMIN_TOKEN_ENV} to enable."
+
+    supplied = (provided_token or "").strip()
+    if not supplied:
+        return False, "Protected action blocked: admin token required."
+    if not hmac.compare_digest(supplied, expected_token):
+        return False, "Protected action blocked: invalid admin token."
+    return True, ""
+
+
 # ---------------------------------------------------------------------------
 # Callbacks — sidebar actions
 # ---------------------------------------------------------------------------
@@ -383,6 +409,7 @@ def _get_data_store():
     Input("btn-setup", "n_clicks"),
     Input("btn-validate", "n_clicks"),
     State("demo-select", "value"),
+    State("input-admin-token", "value"),
     prevent_initial_call=True,
 )
 def run_action(
@@ -391,7 +418,12 @@ def run_action(
     _setup_clicks,
     _validate_clicks,
     demo_value,
+    admin_token,
 ):
+    is_valid, error = _validate_admin_token(admin_token)
+    if not is_valid:
+        return "Forbidden", error
+
     triggered = ctx.triggered_id
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
@@ -582,9 +614,16 @@ def export_csv(_n, table_data):
     State("input-smtp-port", "value"),
     State("input-smtp-user", "value"),
     State("input-smtp-pass", "value"),
+    State("input-admin-token", "value"),
     prevent_initial_call=True,
 )
-def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+def save_settings(
+    _n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass, admin_token
+):
+    is_valid, error = _validate_admin_token(admin_token)
+    if not is_valid:
+        return error
+
     try:
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
@@ -615,9 +654,14 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         Output(f"test-status-{channel_key}", "children"),
         Input(f"btn-test-{channel_key}", "n_clicks"),
         State(url_input_id, "value"),
+        State("input-admin-token", "value"),
         prevent_initial_call=True,
     )
-    def _cb(_n, url):
+    def _cb(_n, url, admin_token):
+        is_valid, error = _validate_admin_token(admin_token)
+        if not is_valid:
+            return error
+
         if not url:
             return "No URL"
         try:
