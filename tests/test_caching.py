@@ -1,9 +1,15 @@
-"""Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
+"""Tests for core caching (LocalCacheBackend, CacheManager, Redis hardening, @cached)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -81,6 +87,15 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_cache_key_hashing_uses_sha256(self):
+        manager = CacheManager(backend=LocalCacheBackend(max_size=10))
+        key = manager._build_cache_key("prefix", ("a", 1), {"b": True})
+        # prefix + two SHA-256 hex digests (args and kwargs)
+        parts = key.split(":")
+        assert parts[0] == "prefix"
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +133,52 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for RedisCacheBackend signed JSON serialization."""
+
+    @staticmethod
+    def _backend() -> RedisCacheBackend:
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_round_trip_supported_types(self):
+        backend = self._backend()
+        value = {
+            "artist": "Billie Eilish",
+            "score": 92.5,
+            "tags": ["pop", "indie"],
+            "meta": {"platform": "spotify", "viral": True},
+            "window": (7, 30),
+        }
+        serialized = backend._serialize(value)
+        assert isinstance(serialized, bytes)
+        restored = backend._deserialize(serialized)
+        assert restored == value
+
+    def test_rejects_legacy_v1_pickle_envelope(self):
+        backend = self._backend()
+        payload = b"not-a-safe-pickle-payload"
+        sig = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": sig,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        serialized = json.dumps(legacy_envelope, separators=(",", ":")).encode("utf-8")
+        assert backend._deserialize(serialized) is None
+
+    def test_detects_signature_tampering(self):
+        backend = self._backend()
+        serialized = backend._serialize({"track": "bad guy", "score": 95})
+        envelope = json.loads(serialized.decode("utf-8"))
+        payload = base64.b64decode(envelope["payload"].encode("ascii"), validate=True)
+
+        tampered_payload = payload.replace(b"95", b"96")
+        envelope["payload"] = base64.b64encode(tampered_payload).decode("ascii")
+        tampered_serialized = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(tampered_serialized) is None
