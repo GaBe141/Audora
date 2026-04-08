@@ -3,6 +3,7 @@
 import json
 import logging
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import Any
 
@@ -341,15 +342,19 @@ def save_report(
         >>> save_report({"data": "test"}, filename="custom_report.json")
         PosixPath('data/reports/custom_report.json')
     """
+    # Resolve and pin report writes to output_dir to prevent path traversal.
+    output_path = Path(output_dir).resolve()
+    output_path.mkdir(parents=True, exist_ok=True)
+
     # Auto-generate filename if not provided
     if filename is None:
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{timestamp_str}.json"
 
-    # Create full path
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    filepath = output_path / filename
+    candidate_path = Path(filename)
+    if candidate_path.is_absolute() or ".." in candidate_path.parts or len(candidate_path.parts) != 1:
+        raise ValueError("Invalid report filename: path traversal is not allowed")
+    filepath = (output_path / candidate_path.name).resolve()
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:

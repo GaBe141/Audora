@@ -5,6 +5,7 @@ Integrates all social media APIs for Gen Z/Alpha music trend analysis.
 
 import asyncio
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -337,14 +338,24 @@ class ComprehensiveMusicDiscoveryApp:
         self, discovery_results: dict[str, Any], custom_filename: str | None = None
     ) -> str:
         """Save comprehensive discovery report."""
+        output_dir = (Path("data")).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
         if custom_filename:
-            filename = custom_filename
+            candidate = Path(custom_filename)
+            if (
+                candidate.is_absolute()
+                or ".." in candidate.parts
+                or len(candidate.parts) != 1
+            ):
+                raise ValueError("Invalid report filename: path traversal is not allowed")
+            filename = candidate.name
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            filename = f"comprehensive_discovery_report_{timestamp}.json"
 
-        filepath = Path(filename)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
+        filepath = (output_dir / filename).resolve()
+        if os.path.commonpath([str(output_dir), str(filepath)]) != str(output_dir):
+            raise ValueError("Invalid report filename: path traversal is not allowed")
 
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(discovery_results, f, indent=2, default=str, ensure_ascii=False)
