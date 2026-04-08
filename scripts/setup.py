@@ -6,6 +6,7 @@ Installs dependencies, configures services, and validates the system.
 
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -73,6 +74,15 @@ class EnhancedMusicDiscoverySetup:
             ],
         )
         return logging.getLogger(__name__)
+
+    def _harden_file_permissions(self, file_path: Path) -> None:
+        """Restrict file access on Unix-like systems for sensitive configs."""
+        if os.name == "nt":
+            return
+        try:
+            file_path.chmod(0o600)
+        except OSError as e:
+            self.logger.warning(f"  Could not tighten permissions on {file_path}: {e}")
 
     def run_complete_setup(self) -> bool:
         """Run the complete setup process."""
@@ -191,8 +201,9 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
+                with config_path.open("w", encoding="utf-8") as f:
                     json.dump(config_data, f, indent=2)
+                self._harden_file_permissions(config_path)
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -473,7 +484,7 @@ System Status: {{ system_status }}
         for template_name, template_content in templates.items():
             template_path = self.templates_dir / template_name
             try:
-                with open(template_path, "w") as f:
+                with template_path.open("w", encoding="utf-8") as f:
                     f.write(template_content.strip())
                 self.logger.info(f"  Created template: {template_name}")
             except Exception as e:
@@ -522,8 +533,9 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
+            with env_path.open("w", encoding="utf-8") as f:
                 f.write(env_template.strip())
+            self._harden_file_permissions(env_path)
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True
