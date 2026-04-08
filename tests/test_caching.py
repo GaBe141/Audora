@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
+from datetime import date, datetime
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,61 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSerialization:
+    """Security-focused tests for Redis serialization envelope behavior."""
+
+    def _build_backend(self) -> RedisCacheBackend:
+        # Build backend instance without touching Redis network dependencies.
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_round_trip_json_safe_types(self):
+        backend = self._build_backend()
+        value = {
+            "text": "value",
+            "count": 2,
+            "is_ok": True,
+            "raw": b"abc",
+            "tuple": (1, "two"),
+            "when": datetime(2026, 4, 8, 8, 0, 0),
+            "day": date(2026, 4, 8),
+        }
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        assert isinstance(restored, dict)
+        assert restored["text"] == "value"
+        assert restored["count"] == 2
+        assert restored["is_ok"] is True
+        assert restored["raw"] == b"abc"
+        assert restored["tuple"] == (1, "two")
+        assert restored["when"] == datetime(2026, 4, 8, 8, 0, 0)
+        assert restored["day"] == date(2026, 4, 8)
+
+    def test_deserialize_rejects_signature_tampering(self):
+        backend = self._build_backend()
+        serialized = backend._serialize({"k": "v"})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["sig"] = "0" * 64  # invalid HMAC
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(tampered) is None
+
+    def test_deserialize_rejects_legacy_pickle_payload(self):
+        backend = self._build_backend()
+        legacy_pickle_payload = base64.b64encode(b"\x80\x04K*.").decode("ascii")
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "placeholder",
+            "payload": legacy_pickle_payload,
+        }
+        payload_bytes = base64.b64decode(envelope["payload"].encode("ascii"), validate=True)
+        envelope["sig"] = hmac.new(backend._signing_key, payload_bytes, hashlib.sha256).hexdigest()
+        signed_legacy = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        # Even with a valid signature, non-JSON payloads are rejected safely.
+        assert backend._deserialize(signed_legacy) is None

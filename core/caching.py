@@ -7,11 +7,12 @@ fallback to in-memory caching when Redis is unavailable.
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
-import pickle
 import time
+from datetime import date, datetime
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -187,8 +188,18 @@ class RedisCacheBackend(CacheBackend):
         return os.urandom(32)
 
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value with integrity protection.
+
+        Uses a strictly-typed JSON representation to avoid unsafe code execution
+        during deserialization.
+        """
+        normalized_value = self._to_json_compatible(value)
+        payload = json.dumps(
+            normalized_value,
+            separators=(",", ":"),
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
@@ -199,7 +210,10 @@ class RedisCacheBackend(CacheBackend):
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
     def _deserialize(self, value: bytes) -> Any | None:
-        """Deserialize cache value only after signature verification."""
+        """Deserialize cache value only after signature verification.
+
+        The payload format is JSON-only by design; legacy pickle payloads are rejected.
+        """
         try:
             envelope = json.loads(value.decode("utf-8"))
             if (
@@ -223,10 +237,117 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            parsed_payload = json.loads(payload.decode("utf-8"))
+            return self._from_json_compatible(parsed_payload)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
+
+    def _to_json_compatible(self, value: Any) -> Any:
+        """Convert runtime values into safe JSON-compatible structures."""
+        if value is None or isinstance(value, bool | int | float | str):
+            return value
+
+        if isinstance(value, bytes):
+            return {
+                "__audora_type__": "bytes",
+                "__audora_value__": base64.b64encode(value).decode("ascii"),
+            }
+
+        if isinstance(value, tuple):
+            return {
+                "__audora_type__": "tuple",
+                "__audora_value__": [self._to_json_compatible(v) for v in value],
+            }
+
+        if isinstance(value, datetime):
+            return {"__audora_type__": "datetime", "__audora_value__": value.isoformat()}
+
+        if isinstance(value, date):
+            return {"__audora_type__": "date", "__audora_value__": value.isoformat()}
+
+        if self._is_pandas_dataframe(value):
+            return {
+                "__audora_type__": "pandas.DataFrame",
+                "__audora_value__": value.to_json(orient="split", date_format="iso"),
+            }
+
+        if isinstance(value, list):
+            return [self._to_json_compatible(v) for v in value]
+
+        if isinstance(value, dict):
+            normalized: dict[str, Any] = {}
+            for key, dict_value in value.items():
+                if not isinstance(key, str):
+                    raise TypeError(
+                        f"Redis cache only supports string dictionary keys, got {type(key).__name__}"
+                    )
+                normalized[key] = self._to_json_compatible(dict_value)
+            return normalized
+
+        raise TypeError(
+            f"Unsupported value type for Redis cache serialization: {type(value).__name__}"
+        )
+
+    def _from_json_compatible(self, value: Any) -> Any:
+        """Reconstruct values from safe JSON-compatible structures."""
+        if value is None or isinstance(value, bool | int | float | str):
+            return value
+
+        if isinstance(value, list):
+            return [self._from_json_compatible(v) for v in value]
+
+        if isinstance(value, dict):
+            has_type_marker = (
+                value.get("__audora_type__") is not None
+                and "__audora_value__" in value
+                and len(value) == 2
+            )
+            if has_type_marker:
+                marker = value["__audora_type__"]
+                marker_value = value["__audora_value__"]
+
+                if marker == "bytes":
+                    if not isinstance(marker_value, str):
+                        raise ValueError("Invalid bytes marker payload in cache entry")
+                    return base64.b64decode(marker_value.encode("ascii"), validate=True)
+
+                if marker == "tuple":
+                    if not isinstance(marker_value, list):
+                        raise ValueError("Invalid tuple marker payload in cache entry")
+                    return tuple(self._from_json_compatible(v) for v in marker_value)
+
+                if marker == "datetime":
+                    if not isinstance(marker_value, str):
+                        raise ValueError("Invalid datetime marker payload in cache entry")
+                    return datetime.fromisoformat(marker_value)
+
+                if marker == "date":
+                    if not isinstance(marker_value, str):
+                        raise ValueError("Invalid date marker payload in cache entry")
+                    return date.fromisoformat(marker_value)
+
+                if marker == "pandas.DataFrame":
+                    if not isinstance(marker_value, str):
+                        raise ValueError("Invalid DataFrame marker payload in cache entry")
+                    try:
+                        import pandas as pd
+                    except ImportError as e:
+                        raise ValueError(
+                            "Cannot decode cached DataFrame because pandas is not installed"
+                        ) from e
+                    return pd.read_json(io.StringIO(marker_value), orient="split")
+
+                raise ValueError(f"Unknown typed cache marker: {marker}")
+
+            return {key: self._from_json_compatible(dict_value) for key, dict_value in value.items()}
+
+        raise ValueError(f"Unsupported cached payload type: {type(value).__name__}")
+
+    def _is_pandas_dataframe(self, value: Any) -> bool:
+        """Detect pandas DataFrame without adding hard dependency at import time."""
+        cls = value.__class__
+        return cls.__name__ == "DataFrame" and cls.__module__.startswith("pandas.")
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
@@ -432,12 +553,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
