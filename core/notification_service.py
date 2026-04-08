@@ -573,18 +573,21 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
-            # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
-
-            if email_config.get("use_tls", True):
-                server.starttls(context=ssl.create_default_context())
-            elif email_config.get("username") and email_config.get("password"):
+            use_tls = bool(email_config.get("use_tls", True))
+            has_smtp_auth = bool(email_config.get("username") and email_config.get("password"))
+            if not use_tls and has_smtp_auth:
                 return {
                     "success": False,
                     "error": "Refusing SMTP authentication without TLS",
                 }
 
-            if email_config.get("username") and email_config.get("password"):
+            # Send email
+            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+
+            if use_tls:
+                server.starttls(context=ssl.create_default_context())
+
+            if has_smtp_auth:
                 server.login(email_config["username"], email_config["password"])
 
             server.send_message(msg)
