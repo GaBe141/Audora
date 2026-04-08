@@ -4,6 +4,7 @@ Integrates TikTok, YouTube, Instagram, Twitter, and other platforms to track Gen
 """
 
 import asyncio
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
@@ -760,7 +761,16 @@ class SocialMusicDiscoveryEngine:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filepath = f"data/social_discovery_report_{timestamp}.json"
 
-        saved_path = write_json(filepath, report)
+        target = Path(filepath)
+        if target.is_absolute() or ".." in target.parts:
+            raise ValueError("Invalid report filename: path traversal is not allowed")
+
+        # Prevent writing reports outside the intended data directory.
+        safe_dir = Path("data").resolve()
+        safe_path = (safe_dir / target.name).resolve()
+        if os.path.commonpath([str(safe_dir), str(safe_path)]) != str(safe_dir):
+            raise ValueError("Invalid report filename: path traversal is not allowed")
+        saved_path = write_json(safe_path, report)
         return str(saved_path)
 
 
