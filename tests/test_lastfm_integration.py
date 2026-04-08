@@ -15,6 +15,12 @@ from core.exceptions import APIConnectionError, APIResponseError
 from integrations.lastfm_integration import LastFmAPI
 
 
+def test_lastfm_base_url_uses_https():
+    from integrations import lastfm_integration
+
+    assert lastfm_integration.BASE_URL.startswith("https://")
+
+
 class TestLastFmAPISuccess:
     """Test successful API responses with mocked session.get."""
 
