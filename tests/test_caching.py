@@ -1,8 +1,10 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
 )
 
@@ -80,6 +82,26 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+    def test_build_cache_key_uses_sha256_hashes(self):
+        manager = CacheManager(backend=LocalCacheBackend(max_size=10), key_prefix="audora_test")
+        key = manager._build_cache_key("fn", (1, "x"), {"a": 2})
+        parts = key.split(":")
+
+        assert parts[0] == "fn"
+        assert len(parts) == 3
+        assert all(len(part) == 64 for part in parts[1:])
+        # Ensure the digests are valid SHA-256 hex strings.
+        for digest in parts[1:]:
+            int(digest, 16)
+
+    def test_build_cache_key_not_equal_to_md5_digest(self):
+        manager = CacheManager(backend=LocalCacheBackend(max_size=10), key_prefix="audora_test")
+        key = manager._build_cache_key("fn", ("abc",), {})
+        _, args_digest = key.split(":")
+        md5_digest = hashlib.md5('["abc"]'.encode()).hexdigest()
+
+        assert args_digest != md5_digest
 
 
 class TestCachedDecorator:

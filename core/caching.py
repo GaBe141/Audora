@@ -163,6 +163,17 @@ class RedisCacheBackend(CacheBackend):
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
+        self._allow_pickle = os.getenv("AUDORA_CACHE_ALLOW_PICKLE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if self._allow_pickle:
+            logger.warning(
+                "AUDORA_CACHE_ALLOW_PICKLE is enabled. This allows caching of arbitrary "
+                "Python objects and should only be used in trusted environments."
+            )
 
         # Test connection
         try:
@@ -186,13 +197,27 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
-    def _serialize(self, value: Any) -> bytes:
+    def _serialize(self, value: Any) -> bytes | None:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+        format_name = "json"
+        try:
+            payload = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        except (TypeError, ValueError):
+            if not self._allow_pickle:
+                logger.warning(
+                    "Skipping Redis cache write for non-JSON-serializable value because "
+                    "AUDORA_CACHE_ALLOW_PICKLE is disabled"
+                )
+                return None
+            format_name = "pickle"
+            payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+
+        signature_payload = f"{format_name}:".encode("utf-8") + payload
+        signature = hmac.new(self._signing_key, signature_payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "fmt": format_name,
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
@@ -202,10 +227,16 @@ class RedisCacheBackend(CacheBackend):
         """Deserialize cache value only after signature verification."""
         try:
             envelope = json.loads(value.decode("utf-8"))
+            if not isinstance(envelope, dict):
+                logger.warning("Rejected cache entry with invalid serialization envelope")
+                return None
+
+            version = envelope.get("v")
+            format_name = "pickle" if version == 1 else envelope.get("fmt")
             if (
-                not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                version not in (1, 2)
                 or envelope.get("alg") != "HMAC-SHA256"
+                or format_name not in ("json", "pickle")
                 or "sig" not in envelope
                 or "payload" not in envelope
             ):
@@ -218,9 +249,22 @@ class RedisCacheBackend(CacheBackend):
                 return None
 
             payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
-            expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+            if version == 1:
+                expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+            else:
+                signature_payload = f"{format_name}:".encode("utf-8") + payload
+                expected_sig = hmac.new(self._signing_key, signature_payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
+                return None
+
+            if format_name == "json":
+                return json.loads(payload.decode("utf-8"))
+
+            if not self._allow_pickle:
+                logger.warning(
+                    "Rejected pickle cache payload because AUDORA_CACHE_ALLOW_PICKLE is disabled"
+                )
                 return None
 
             return pickle.loads(payload)
@@ -243,6 +287,8 @@ class RedisCacheBackend(CacheBackend):
         """Set value in cache with optional TTL."""
         try:
             serialized = self._serialize(value)
+            if serialized is None:
+                return
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
@@ -432,12 +478,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
