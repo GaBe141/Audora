@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import ssl
 import socket
 import smtplib
 from dataclasses import dataclass
@@ -523,6 +524,14 @@ System status: {{ system_status }}
 
         return datetime.now() - last_sent < cooldown_period
 
+    def _create_smtp_tls_context(self) -> ssl.SSLContext:
+        """Create a verified TLS context for SMTP STARTTLS."""
+        context = ssl.create_default_context()
+        # Enforce modern TLS when available.
+        if hasattr(ssl, "TLSVersion"):
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+        return context
+
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
         email_config = self.config.get("email", {})
@@ -571,16 +580,28 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            use_tls = bool(email_config.get("use_tls", True))
+            has_auth = bool(email_config.get("username") and email_config.get("password"))
+            if not use_tls and has_auth:
+                # Prevent sending SMTP credentials in plaintext.
+                return {"success": False, "error": "Refusing SMTP authentication without TLS"}
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+            timeout_seconds = int(email_config.get("timeout", 30))
+            server = smtplib.SMTP(
+                email_config["smtp_server"],
+                email_config.get("port", 587),
+                timeout=timeout_seconds,
+            )
+            try:
+                if use_tls:
+                    server.starttls(context=self._create_smtp_tls_context())
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
+                if has_auth:
+                    server.login(email_config["username"], email_config["password"])
 
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
+            finally:
+                server.quit()
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"
