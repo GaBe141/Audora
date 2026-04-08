@@ -16,6 +16,8 @@ from dash import Input, Output, State, ctx, dash_table, dcc, html
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+MAIN_SCRIPT = str(PROJECT_ROOT / "main.py")
+ALLOWED_DEMOS = {"statistical", "trending", "multi_source", "platform", "all"}
 
 app = dash.Dash(
     __name__,
@@ -345,6 +347,26 @@ app.layout = dbc.Container(
 
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
+    if not args:
+        return "Error", "Refused to run empty command"
+
+    # Defense in depth: only permit the expected Python entrypoint invocations.
+    if args[0] != sys.executable or len(args) < 3 or args[1] != MAIN_SCRIPT:
+        return "Error", "Refused to run unexpected command"
+
+    is_allowed = (
+        args == [sys.executable, MAIN_SCRIPT, "--setup"]
+        or args == [sys.executable, MAIN_SCRIPT, "--validate"]
+        or args == [sys.executable, MAIN_SCRIPT, "--mode", "single"]
+        or (
+            len(args) == 4
+            and args[:3] == [sys.executable, MAIN_SCRIPT, "--demo"]
+            and args[3] in ALLOWED_DEMOS
+        )
+    )
+    if not is_allowed:
+        return "Error", "Refused to run disallowed command arguments"
+
     try:
         proc = subprocess.Popen(
             args,
