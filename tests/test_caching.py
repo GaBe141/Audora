@@ -1,9 +1,15 @@
-"""Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
+"""Tests for core caching (LocalCacheBackend, CacheManager, Redis serialization, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
+from unittest.mock import MagicMock
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,33 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis cache safe serialization/deserialization helpers."""
+
+    def _build_backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._client = MagicMock()
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_round_trip_json_payload(self):
+        backend = self._build_backend()
+        value = {"a": 1, "b": ["x", "y"], "c": {"nested": True}}
+        serialized = backend._serialize(value)
+        assert backend._deserialize(serialized) == value
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._build_backend()
+        payload = b"not-a-safe-json-payload"
+        legacy_sig = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        legacy_envelope = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": legacy_sig,
+                "payload": base64.b64encode(payload).decode("ascii"),
+            }
+        ).encode("utf-8")
+        assert backend._deserialize(legacy_envelope) is None
