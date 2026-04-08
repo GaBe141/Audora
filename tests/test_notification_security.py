@@ -27,3 +27,17 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+
+class TestNotificationEmailSecurity:
+    """Validate email channel security controls."""
+
+    def test_rejects_header_injection_values(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="header injection"):
+            svc._sanitize_header_value("safe@example.com\r\nBcc: attacker@example.com", "To")
+
+    def test_normalize_recipients_filters_and_strips(self):
+        svc = EnhancedNotificationService()
+        recipients = svc._normalize_recipients(["  user@example.com  ", "", "admin@example.com"])
+        assert recipients == ["user@example.com", "admin@example.com"]

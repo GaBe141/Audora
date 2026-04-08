@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import ssl
 import socket
 import smtplib
 from dataclasses import dataclass
@@ -513,6 +514,30 @@ System status: {{ system_status }}
         content_hash = hash(f"{message.title}:{message.content[:100]}")
         return f"{content_hash}:{message.priority.value}"
 
+    def _sanitize_header_value(self, value: str, header_name: str) -> str:
+        """Sanitize user-controlled email header values to prevent header injection."""
+        sanitized = value.strip()
+        if any(char in sanitized for char in ("\r", "\n")):
+            raise ValueError(f"Potential header injection in {header_name}")
+        return sanitized
+
+    def _normalize_recipients(self, recipients: Any) -> list[str]:
+        """Normalize and validate recipient list from config."""
+        if isinstance(recipients, str):
+            recipients = recipients.split(",")
+        if not isinstance(recipients, list):
+            return []
+
+        normalized: list[str] = []
+        for recipient in recipients:
+            if not isinstance(recipient, str):
+                continue
+            candidate = recipient.strip()
+            if not candidate:
+                continue
+            normalized.append(self._sanitize_header_value(candidate, "To"))
+        return normalized
+
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""
         if message_key not in self.sent_notifications:
@@ -526,15 +551,18 @@ System status: {{ system_status }}
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
         email_config = self.config.get("email", {})
-
-        if not email_config.get("smtp_server") or not email_config.get("recipients"):
+        recipients = self._normalize_recipients(email_config.get("recipients", []))
+        smtp_server = str(email_config.get("smtp_server", "")).strip()
+        if not smtp_server or not recipients:
             return {"success": False, "error": "Email not configured"}
 
         try:
             msg = MIMEMultipart("alternative")
-            msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
-            msg["Subject"] = message.title
+            msg["From"] = self._sanitize_header_value(
+                str(email_config.get("from_address", "music-discovery@example.com")), "From"
+            )
+            msg["To"] = ", ".join(recipients)
+            msg["Subject"] = self._sanitize_header_value(message.title, "Subject")
 
             # Set priority
             if message.priority in [NotificationPriority.HIGH, NotificationPriority.CRITICAL]:
@@ -571,21 +599,26 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            with smtplib.SMTP(
+                smtp_server,
+                int(email_config.get("port", 587)),
+                timeout=15,
+            ) as server:
+                if email_config.get("use_tls", True):
+                    server.ehlo()
+                    tls_context = ssl.create_default_context()
+                    server.starttls(context=tls_context)
+                    server.ehlo()
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
-
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg, to_addrs=recipients)
 
             self.logger.info(
-                f"Email notification sent to {len(email_config['recipients'])} recipients"
+                f"Email notification sent to {len(recipients)} recipients"
             )
-            return {"success": True, "recipients": len(email_config["recipients"])}
+            return {"success": True, "recipients": len(recipients)}
 
         except Exception as e:
             self.logger.error(f"Failed to send email notification: {e}")
