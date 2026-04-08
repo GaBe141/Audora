@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,32 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSerialization:
+    """Security-focused tests for Redis payload handling."""
+
+    def _build_backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_safe_json_round_trip_dict(self):
+        backend = self._build_backend()
+        value = {"a": 1, "nested": {"b": [1, 2, 3]}, "flag": True}
+        encoded = backend._serialize(value)
+        decoded = backend._deserialize(encoded)
+        assert decoded == value
+
+    def test_rejects_legacy_envelope_version(self):
+        backend = self._build_backend()
+        legacy_payload = base64.b64encode(b"legacy-bytes").decode("ascii")
+        envelope = {"v": 1, "alg": "HMAC-SHA256", "sig": "abc", "payload": legacy_payload}
+        encoded = json.dumps(envelope).encode("utf-8")
+        assert backend._deserialize(encoded) is None
+
+    def test_rejects_unsupported_type_on_serialize(self):
+        backend = self._build_backend()
+        unsupported = {"bad": {1, 2, 3}}
+        with pytest.raises(TypeError):
+            backend._serialize(unsupported)
