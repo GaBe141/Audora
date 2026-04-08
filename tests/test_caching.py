@@ -1,9 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,50 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSecurity:
+    """Security-focused tests for Redis serialization and key hashing behavior."""
+
+    def test_serialize_deserialize_roundtrip_safe_json(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        value = {"alpha": 1, "beta": ["x", "y"], "gamma": {"nested": True}}
+        encoded = backend._serialize(value)
+
+        decoded = backend._deserialize(encoded)
+        assert decoded == value
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        payload = base64.b64encode(b"legacy").decode("ascii")
+        legacy = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "deadbeef",
+            "payload": payload,
+        }
+        encoded = json.dumps(legacy).encode("utf-8")
+        assert backend._deserialize(encoded) is None
+
+    def test_rejects_tampered_signature(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        encoded = backend._serialize({"ok": True})
+        envelope = json.loads(encoded.decode("utf-8"))
+        envelope["sig"] = "0" * 64
+
+        tampered = json.dumps(envelope).encode("utf-8")
+        assert backend._deserialize(tampered) is None
+
+    def test_cache_key_uses_sha256_hexdigests(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", ({"a": 1},), {"z": 2})
+        # fn:<sha256-of-args>:<sha256-of-kwargs>
+        parts = key.split(":")
+        assert parts[0] == "fn"
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64

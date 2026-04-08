@@ -67,6 +67,11 @@ class TestLastFmAPISuccess:
         assert df.iloc[0]["name"] == "Track One"
         assert df.iloc[0]["artist"] == "Artist One"
 
+    def test_base_url_uses_https(self):
+        assert LastFmAPI(api_key="test_key").session is not None
+        from integrations import lastfm_integration
+        assert lastfm_integration.BASE_URL.startswith("https://")
+
 
 class TestLastFmAPIErrorHandling:
     """Test API error and HTTP error handling."""
