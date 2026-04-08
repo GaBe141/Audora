@@ -27,3 +27,26 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_private_webhook_override_is_ignored(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "true")
+        svc = EnhancedNotificationService()
+        assert svc._allow_private_webhooks() is False
+
+    def test_save_config_redacts_sensitive_values(self, tmp_path):
+        svc = EnhancedNotificationService()
+        svc.config["email"]["password"] = "super-secret"
+        svc.config["sms"]["api_key"] = "sms-key"
+        svc.config["sms"]["api_secret"] = "sms-secret"
+        svc.config["webhook"]["headers"]["Authorization"] = "Bearer abc123"
+        svc.config["webhook"]["headers"]["X-Api-Key"] = "apikey"
+
+        out_file = tmp_path / "notification_config.json"
+        svc.save_config(path=str(out_file))
+
+        persisted = __import__("json").loads(out_file.read_text(encoding="utf-8"))
+        assert persisted["email"]["password"] == ""
+        assert persisted["sms"]["api_key"] == ""
+        assert persisted["sms"]["api_secret"] == ""
+        assert persisted["webhook"]["headers"]["Authorization"] == ""
+        assert persisted["webhook"]["headers"]["X-Api-Key"] == ""

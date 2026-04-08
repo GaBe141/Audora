@@ -19,7 +19,7 @@ class SecureConfig:
             env_file: Path to .env file. If None, searches for .env in project root.
         """
         self.project_root = Path(__file__).resolve().parent.parent
-        self.env_file = env_file or (self.project_root / ".env")
+        self.env_file = Path(env_file) if env_file else (self.project_root / ".env")
         self._config: dict[str, Any] = {}
         self._load_environment()
 
@@ -33,8 +33,9 @@ class SecureConfig:
             )
             return
 
-        # Load with explicit encoding and override
-        load_dotenv(dotenv_path=str(self.env_file), override=True, encoding="utf-8")
+        # Never allow local .env values to override already-provided runtime secrets.
+        # This prevents untrusted file content from replacing CI/container-managed credentials.
+        load_dotenv(dotenv_path=str(self.env_file), override=False, encoding="utf-8")
 
         # Validate file permissions (Unix-like systems)
         if hasattr(os, "stat") and not sys.platform.startswith("win"):

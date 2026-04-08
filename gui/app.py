@@ -4,7 +4,9 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
+import hmac
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -208,8 +210,27 @@ _settings_tab = dbc.Tab(
             dbc.Col(dbc.Input(id="input-smtp-host", placeholder="smtp.example.com"), width=4),
             dbc.Col(dbc.Input(id="input-smtp-port", placeholder="587", type="number", value=587), width=2),
             dbc.Col(dbc.Input(id="input-smtp-user", placeholder="username"), width=3),
-            dbc.Col(dbc.Input(id="input-smtp-pass", placeholder="password", type="password"), width=3),
+            dbc.Col(
+                dbc.Input(
+                    id="input-smtp-pass",
+                    placeholder="managed via SMTP_PASSWORD environment variable",
+                    type="password",
+                    disabled=True,
+                ),
+                width=3,
+            ),
         ], className="mb-2"),
+        html.Div(
+            [
+                html.Label("Admin Token", className="small text-muted"),
+                dbc.Input(
+                    id="input-admin-token",
+                    type="password",
+                    placeholder="Required for save/test actions",
+                ),
+            ],
+            className="mb-2",
+        ),
         dbc.Row([
             dbc.Col(
                 dbc.Button("Save Settings", id="btn-save-settings", color="primary"),
@@ -369,6 +390,21 @@ def _get_data_store():
     from core.data_store import EnhancedMusicDataStore
     db_path = PROJECT_ROOT / "data" / "enhanced_music_trends.db"
     return EnhancedMusicDataStore(str(db_path))
+
+
+def _get_admin_token() -> str:
+    """Read GUI admin token from environment."""
+    return os.getenv("AUDORA_GUI_ADMIN_TOKEN", "").strip()
+
+
+def _is_authorized_admin(provided_token: str | None) -> bool:
+    """Validate a provided admin token in constant time."""
+    configured_token = _get_admin_token()
+    if not configured_token:
+        return False
+    if not provided_token:
+        return False
+    return hmac.compare_digest(provided_token.strip(), configured_token)
 
 
 # ---------------------------------------------------------------------------
@@ -582,11 +618,18 @@ def export_csv(_n, table_data):
     State("input-smtp-port", "value"),
     State("input-smtp-user", "value"),
     State("input-smtp-pass", "value"),
+    State("input-admin-token", "value"),
     prevent_initial_call=True,
 )
-def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+def save_settings(
+    _n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass, admin_token
+):
     try:
+        if not _is_authorized_admin(admin_token):
+            return "Unauthorized"
+
         from core.notification_service import EnhancedNotificationService
+
         svc = EnhancedNotificationService()
         if slack_url:
             svc.config["slack"]["webhook_url"] = slack_url
@@ -600,8 +643,9 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
             svc.config["email"]["port"] = int(smtp_port)
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
-        if smtp_pass:
-            svc.config["email"]["password"] = smtp_pass
+
+        # Never persist SMTP password from GUI input.
+        # Password is loaded from SMTP_PASSWORD environment variable.
         svc.save_config()
         return "Saved"
     except Exception as e:
@@ -615,11 +659,14 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         Output(f"test-status-{channel_key}", "children"),
         Input(f"btn-test-{channel_key}", "n_clicks"),
         State(url_input_id, "value"),
+        State("input-admin-token", "value"),
         prevent_initial_call=True,
     )
-    def _cb(_n, url):
+    def _cb(_n, url, admin_token):
         if not url:
             return "No URL"
+        if not _is_authorized_admin(admin_token):
+            return "Unauthorized"
         try:
             import asyncio
             from core.notification_service import (
