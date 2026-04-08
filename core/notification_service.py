@@ -116,6 +116,7 @@ class EnhancedNotificationService:
 
     def _load_config(self, config_file: str | None) -> dict[str, Any]:
         """Load notification configuration."""
+        webhook_token = os.getenv("WEBHOOK_TOKEN", "").strip()
         default_config = {
             "enabled": True,
             "default_channels": ["console"],
@@ -132,24 +133,31 @@ class EnhancedNotificationService:
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
                 "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
                 "use_tls": True,
+                "timeout": os.getenv("SMTP_TIMEOUT", "30"),
             },
             "slack": {
                 "webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
                 "channel": os.getenv("SLACK_CHANNEL", "#music-trends"),
                 "username": os.getenv("SLACK_USERNAME", "Music Discovery Bot"),
                 "icon_emoji": ":musical_note:",
+                "timeout": os.getenv("SLACK_TIMEOUT", "15"),
             },
             "discord": {
                 "webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),
                 "username": os.getenv("DISCORD_USERNAME", "Music Discovery"),
                 "avatar_url": "",
+                "timeout": os.getenv("DISCORD_TIMEOUT", "15"),
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
-                },
+                "headers": (
+                    {
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {webhook_token}",
+                    }
+                    if webhook_token
+                    else {"Content-Type": "application/json"}
+                ),
                 "timeout": 30,
             },
             "sms": {
@@ -255,6 +263,67 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _safe_http_timeout(
+        self,
+        configured_timeout: Any,
+        *,
+        default_seconds: float = 30.0,
+        max_seconds: float = 120.0,
+    ) -> aiohttp.ClientTimeout:
+        """Build a bounded aiohttp timeout from config values."""
+        try:
+            timeout_seconds = float(configured_timeout)
+        except (TypeError, ValueError):
+            timeout_seconds = default_seconds
+
+        if timeout_seconds <= 0:
+            timeout_seconds = default_seconds
+
+        timeout_seconds = min(timeout_seconds, max_seconds)
+        return aiohttp.ClientTimeout(total=timeout_seconds)
+
+    def _sanitize_headers(self, headers: Any) -> dict[str, str]:
+        """Sanitize configured HTTP headers to avoid invalid/non-string values."""
+        if not isinstance(headers, dict):
+            return {}
+
+        sanitized: dict[str, str] = {}
+        for key, value in headers.items():
+            if key is None or value is None:
+                continue
+            key_str = str(key).strip()
+            value_str = str(value).strip()
+            if key_str and value_str:
+                sanitized[key_str] = value_str
+        return sanitized
+
+    def _sanitize_webhook_headers(self, headers: Any) -> dict[str, str]:
+        """Sanitize webhook headers and drop empty auth headers."""
+        sanitized: dict[str, str] = {"Content-Type": "application/json"}
+        if not isinstance(headers, dict):
+            return sanitized
+
+        for raw_key, raw_value in headers.items():
+            if not isinstance(raw_key, str) or not isinstance(raw_value, str):
+                continue
+
+            key = raw_key.strip()
+            value = raw_value.strip()
+            if not key:
+                continue
+
+            if key.lower() == "authorization":
+                if not value:
+                    continue
+                if value.lower().startswith("bearer"):
+                    parts = value.split(None, 1)
+                    if len(parts) == 1 or not parts[1].strip():
+                        continue
+
+            sanitized[key] = value
+
+        return sanitized
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -586,7 +655,12 @@ System status: {{ system_status }}
                 # Prevent sending SMTP credentials in plaintext.
                 return {"success": False, "error": "Refusing SMTP authentication without TLS"}
 
-            timeout_seconds = int(email_config.get("timeout", 30))
+            timeout_seconds = 30
+            try:
+                timeout_seconds = int(float(email_config.get("timeout", 30)))
+            except (TypeError, ValueError):
+                timeout_seconds = 30
+            timeout_seconds = min(max(timeout_seconds, 1), 120)
             server = smtplib.SMTP(
                 email_config["smtp_server"],
                 email_config.get("port", 587),
@@ -669,8 +743,9 @@ System status: {{ system_status }}
                 if fields:
                     slack_message["attachments"][0]["fields"] = fields
 
+            timeout = self._safe_http_timeout(slack_config.get("timeout", 15))
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(timeout=timeout) as session,
                 session.post(webhook_url, json=slack_message) as response,
             ):
                 if response.status == 200:
@@ -736,8 +811,9 @@ System status: {{ system_status }}
                 if fields:
                     discord_message["embeds"][0]["fields"] = fields
 
+            timeout = self._safe_http_timeout(discord_config.get("timeout", 15))
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(timeout=timeout) as session,
                 session.post(webhook_url, json=discord_message) as response,
             ):
                 if response.status in [200, 204]:
@@ -792,14 +868,12 @@ System status: {{ system_status }}
                 )
                 payload["formatted_content"] = template.render(**message.template_vars)
 
-            headers = webhook_config.get("headers", {"Content-Type": "application/json"})
-            timeout = webhook_config.get("timeout", 30)
+            headers = self._sanitize_webhook_headers(webhook_config.get("headers", {}))
+            timeout = self._safe_http_timeout(webhook_config.get("timeout", 30))
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
-                ) as response,
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.post(url, json=payload, headers=headers) as response,
             ):
                 if 200 <= response.status < 300:
                     self.logger.info(f"Webhook notification sent successfully: {response.status}")
