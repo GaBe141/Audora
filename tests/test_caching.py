@@ -1,9 +1,15 @@
-"""Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
+"""Tests for core caching (LocalCacheBackend, RedisCacheBackend, CacheManager)."""
 
+import base64
+import hashlib
+import hmac
+import json
+from datetime import date, datetime
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,55 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSerialization:
+    """Security-focused tests for Redis payload serialization."""
+
+    @staticmethod
+    def _backend_with_key(signing_key: bytes = b"test-signing-key") -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = signing_key
+        return backend
+
+    def test_rejects_legacy_pickle_envelope_v1(self):
+        backend = self._backend_with_key()
+        raw_payload = b"legacy-bytes"
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": hmac.new(backend._signing_key, raw_payload, hashlib.sha256).hexdigest(),
+            "payload": base64.b64encode(raw_payload).decode("ascii"),
+        }
+        encoded = json.dumps(envelope).encode("utf-8")
+        assert backend._deserialize(encoded) is None
+
+    def test_secure_roundtrip_for_supported_types(self):
+        backend = self._backend_with_key()
+        value = {
+            "tuple": ("a", 1, True),
+            "set": {"x", "y"},
+            "dt": datetime(2026, 1, 2, 3, 4, 5),
+            "d": date(2026, 1, 2),
+            "bytes": b"abc123",
+            "nested": [{"k": "v"}],
+        }
+        encoded = backend._serialize(value)
+        decoded = backend._deserialize(encoded)
+        assert decoded is not None
+        assert decoded["tuple"] == ("a", 1, True)
+        assert decoded["set"] == {"x", "y"}
+        assert decoded["dt"] == datetime(2026, 1, 2, 3, 4, 5)
+        assert decoded["d"] == date(2026, 1, 2)
+        assert decoded["bytes"] == b"abc123"
+        assert decoded["nested"] == [{"k": "v"}]
+
+    def test_secure_roundtrip_for_pandas_dataframe(self):
+        pd = __import__("pandas")
+        backend = self._backend_with_key()
+        frame = pd.DataFrame([{"artist": "A", "score": 90}, {"artist": "B", "score": 85}])
+        encoded = backend._serialize(frame)
+        decoded = backend._deserialize(encoded)
+        assert decoded is not None
+        assert isinstance(decoded, pd.DataFrame)
+        assert decoded.to_dict("records") == frame.to_dict("records")

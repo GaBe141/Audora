@@ -193,8 +193,9 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = self._sanitize_config_for_persistence(to_save)
         try:
-            with config_path.open("w") as f:
+            with config_path.open("w", encoding="utf-8") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
                 os.chmod(config_path, 0o600)
@@ -202,14 +203,42 @@ class EnhancedNotificationService:
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
 
+    def _sanitize_config_for_persistence(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Strip secrets before persisting user-editable configuration."""
+        sanitized = json.loads(json.dumps(config))
+
+        email_cfg = sanitized.get("email")
+        if isinstance(email_cfg, dict) and "password" in email_cfg:
+            email_cfg["password"] = ""
+
+        sms_cfg = sanitized.get("sms")
+        if isinstance(sms_cfg, dict):
+            for key in ("api_key", "api_secret"):
+                if key in sms_cfg:
+                    sms_cfg[key] = ""
+
+        webhook_cfg = sanitized.get("webhook")
+        if isinstance(webhook_cfg, dict):
+            headers = webhook_cfg.get("headers")
+            if isinstance(headers, dict):
+                for header_name, header_value in list(headers.items()):
+                    if not isinstance(header_name, str):
+                        continue
+                    if header_name.lower() in {
+                        "authorization",
+                        "proxy-authorization",
+                        "x-api-key",
+                        "api-key",
+                    }:
+                        headers[header_name] = "" if header_value else header_value
+
+        return sanitized
+
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
-        return os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        # Private-network webhook targets are always disallowed to prevent SSRF.
+        # This intentionally ignores environment overrides.
+        return False
 
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
