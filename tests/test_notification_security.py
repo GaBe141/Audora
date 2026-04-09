@@ -27,3 +27,21 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_sanitize_webhook_headers_removes_host_override(self):
+        svc = EnhancedNotificationService()
+        headers = {
+            "Content-Type": "application/json",
+            "Host": "169.254.169.254",
+            "Authorization": "Bearer token",
+        }
+        sanitized = svc._sanitize_webhook_headers(headers)
+        assert "Host" not in sanitized
+        assert sanitized["Authorization"] == "Bearer token"
+
+    def test_sanitize_webhook_headers_drops_empty_bearer_authorization(self):
+        svc = EnhancedNotificationService()
+        headers = {"Authorization": "Bearer "}
+        sanitized = svc._sanitize_webhook_headers(headers)
+        assert "Authorization" not in sanitized
+        assert sanitized["Content-Type"] == "application/json"
