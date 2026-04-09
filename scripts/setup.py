@@ -6,6 +6,7 @@ Installs dependencies, configures services, and validates the system.
 
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -61,6 +62,22 @@ class EnhancedMusicDiscoverySetup:
             "python_version": sys.version,
             "architecture": platform.architecture()[0],
         }
+
+    def _secure_write_json(
+        self, file_path: Path, data: dict[str, Any], file_mode: int | None = None
+    ) -> None:
+        """Write JSON file and optionally apply an explicit file mode."""
+        with file_path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        if file_mode is not None and os.name != "nt":
+            file_path.chmod(file_mode)
+
+    def _secure_write_text(self, file_path: Path, content: str, file_mode: int | None = None) -> None:
+        """Write text file and optionally apply an explicit file mode."""
+        with file_path.open("w", encoding="utf-8") as f:
+            f.write(content)
+        if file_mode is not None and os.name != "nt":
+            file_path.chmod(file_mode)
 
     def _setup_logging(self) -> logging.Logger:
         """Set up logging for setup process."""
@@ -191,8 +208,7 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
-                    json.dump(config_data, f, indent=2)
+                self._secure_write_json(config_path, config_data, file_mode=0o600)
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -473,8 +489,7 @@ System Status: {{ system_status }}
         for template_name, template_content in templates.items():
             template_path = self.templates_dir / template_name
             try:
-                with open(template_path, "w") as f:
-                    f.write(template_content.strip())
+                self._secure_write_text(template_path, template_content.strip())
                 self.logger.info(f"  Created template: {template_name}")
             except Exception as e:
                 self.logger.error(f"  Failed to create template {template_name}: {e}")
@@ -522,8 +537,7 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
-                f.write(env_template.strip())
+            self._secure_write_text(env_path, env_template.strip(), file_mode=0o600)
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True

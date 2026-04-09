@@ -202,11 +202,16 @@ AUDIODB_API_KEY=123
             print(f"❌ No .env file found at: {self.env_file}")
             print("\n📝 Creating template .env file...")
 
-            self.env_file.write_text(self.create_env_template(), encoding="utf-8")
-
-            # Set restrictive permissions on Unix-like systems
-            if hasattr(os, "chmod") and not sys.platform.startswith("win"):
-                os.chmod(self.env_file, 0o600)
+            if not sys.platform.startswith("win"):
+                fd = os.open(
+                    self.env_file,
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                    0o600,
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(self.create_env_template())
+            else:
+                self.env_file.write_text(self.create_env_template(), encoding="utf-8")
 
             print(f"✅ Created template: {self.env_file}")
             print("\n🔑 Next steps:")
