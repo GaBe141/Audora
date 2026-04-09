@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +125,41 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheBackendSerialization:
+    """Security-focused tests for Redis cache serialization."""
+
+    @staticmethod
+    def _backend() -> RedisCacheBackend:
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_secure_json_round_trip(self):
+        backend = self._backend()
+        value = {"track": "Example", "score": 87, "tags": ["viral", "pop"]}
+        serialized = backend._serialize(value)
+        assert backend._deserialize(serialized) == value
+
+    def test_secure_dataframe_round_trip(self):
+        backend = self._backend()
+        df = pd.DataFrame({"track": ["a", "b"], "score": [1, 2]})
+        serialized = backend._serialize(df)
+        restored = backend._deserialize(serialized)
+        assert isinstance(restored, pd.DataFrame)
+        assert restored.equals(df)
+
+    def test_rejects_legacy_envelope_version(self):
+        backend = self._backend()
+        payload_obj = {"t": "json", "v": {"x": 1}}
+        payload = json.dumps(payload_obj).encode("utf-8")
+        sig = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 1,  # Legacy version should be rejected
+            "alg": "HMAC-SHA256",
+            "sig": sig,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        raw = json.dumps(envelope).encode("utf-8")
+        assert backend._deserialize(raw) is None
