@@ -4,11 +4,13 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import copy
 import ipaddress
 import json
 import logging
 import os
 import socket
+import ssl
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -190,9 +192,33 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
+        to_save = {k: copy.deepcopy(self.config[k]) for k in saveable_keys if k in self.config}
+
+        # Never persist sensitive credentials back to disk.
+        email_cfg = to_save.get("email")
+        if isinstance(email_cfg, dict):
+            email_cfg["password"] = ""
+
+        sms_cfg = to_save.get("sms")
+        if isinstance(sms_cfg, dict):
+            sms_cfg["api_key"] = ""
+            sms_cfg["api_secret"] = ""
+
+        webhook_cfg = to_save.get("webhook")
+        if isinstance(webhook_cfg, dict):
+            headers = webhook_cfg.get("headers")
+            if isinstance(headers, dict):
+                headers.pop("Authorization", None)
+
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -204,12 +230,12 @@ class EnhancedNotificationService:
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
-        return os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        if os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip():
+            self.logger.warning(
+                "AUDORA_ALLOW_PRIVATE_WEBHOOKS is ignored for security; "
+                "private webhook destinations remain blocked."
+            )
+        return False
 
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
@@ -526,14 +552,19 @@ System status: {{ system_status }}
     async def _send_email(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via email."""
         email_config = self.config.get("email", {})
+        recipients = [
+            r.strip()
+            for r in email_config.get("recipients", [])
+            if isinstance(r, str) and r.strip()
+        ]
 
-        if not email_config.get("smtp_server") or not email_config.get("recipients"):
+        if not email_config.get("smtp_server") or not recipients:
             return {"success": False, "error": "Email not configured"}
 
         try:
             msg = MIMEMultipart("alternative")
             msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
+            msg["To"] = ", ".join(recipients)
             msg["Subject"] = message.title
 
             # Set priority
@@ -571,16 +602,19 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            with smtplib.SMTP(
+                email_config["smtp_server"],
+                email_config.get("port", 587),
+                timeout=15,
+            ) as server:
+                if email_config.get("use_tls", True):
+                    # Enforce certificate validation for SMTP TLS.
+                    server.starttls(context=ssl.create_default_context())
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
-
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"
@@ -649,8 +683,15 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=15),
+                    trust_env=False,
+                ) as session,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -716,8 +757,15 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=15),
+                    trust_env=False,
+                ) as session,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -773,11 +821,22 @@ System status: {{ system_status }}
 
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
             timeout = webhook_config.get("timeout", 30)
+            try:
+                timeout = int(timeout)
+            except (TypeError, ValueError):
+                timeout = 30
+            timeout = max(1, min(timeout, 60))
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    trust_env=False,
+                ) as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:

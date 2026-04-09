@@ -1,4 +1,6 @@
-"""Security tests for notification webhook URL validation."""
+"""Security tests for notification webhook URL validation and secret handling."""
+
+import json
 
 import pytest
 
@@ -27,3 +29,28 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_private_webhook_env_override_is_ignored(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "true")
+        svc = EnhancedNotificationService()
+        assert svc._allow_private_webhooks() is False
+
+
+class TestNotificationConfigPersistence:
+    """Ensure persisted config does not include sensitive data."""
+
+    def test_save_config_redacts_sensitive_fields(self, tmp_path):
+        svc = EnhancedNotificationService()
+        svc.config["email"]["password"] = "super-secret-password"
+        svc.config["sms"]["api_key"] = "sms-key"
+        svc.config["sms"]["api_secret"] = "sms-secret"
+        svc.config["webhook"]["headers"]["Authorization"] = "Bearer very-secret-token"
+
+        out_path = tmp_path / "notification_config.json"
+        svc.save_config(str(out_path))
+
+        saved = json.loads(out_path.read_text(encoding="utf-8"))
+        assert saved["email"]["password"] == ""
+        assert saved["sms"]["api_key"] == ""
+        assert saved["sms"]["api_secret"] == ""
+        assert "Authorization" not in saved["webhook"]["headers"]
