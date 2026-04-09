@@ -6,6 +6,13 @@ Fixes type hints, imports, and code quality issues identified by linters.
 import subprocess
 
 
+def _split_command(cmd: str) -> list[str]:
+    """Safely split a command string into argv without invoking a shell."""
+    import shlex
+
+    return shlex.split(cmd)
+
+
 def print_step(step_num: int, description: str):
     """Print formatted step."""
     print(f"\n{'='*60}")
@@ -17,7 +24,13 @@ def run_command(cmd: str, description: str) -> bool:
     """Run a command and return success status."""
     print(f"  → {description}")
     try:
-        subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+        subprocess.run(
+            _split_command(cmd),
+            shell=False,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         print("  ✅ Success")
         return True
     except subprocess.CalledProcessError as e:

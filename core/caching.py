@@ -7,12 +7,13 @@ fallback to in-memory caching when Redis is unavailable.
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
+from datetime import date, datetime
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
@@ -188,7 +189,11 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload = json.dumps(
+            self._to_json_safe(value),
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
@@ -197,6 +202,70 @@ class RedisCacheBackend(CacheBackend):
             "payload": base64.b64encode(payload).decode("ascii"),
         }
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+    def _to_json_safe(self, value: Any) -> Any:
+        """Convert values to a JSON-safe form with explicit type tagging."""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+
+        if isinstance(value, datetime):
+            return {"__type__": "datetime", "value": value.isoformat()}
+        if isinstance(value, date):
+            return {"__type__": "date", "value": value.isoformat()}
+        if isinstance(value, tuple):
+            return {"__type__": "tuple", "value": [self._to_json_safe(v) for v in value]}
+        if isinstance(value, set):
+            return {"__type__": "set", "value": [self._to_json_safe(v) for v in value]}
+        if isinstance(value, bytes):
+            return {"__type__": "bytes", "value": base64.b64encode(value).decode("ascii")}
+        if isinstance(value, list):
+            return [self._to_json_safe(v) for v in value]
+        if isinstance(value, dict):
+            converted: dict[str, Any] = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise TypeError("Cache dictionary keys must be strings for JSON serialization")
+                converted[key] = self._to_json_safe(item)
+            return converted
+
+        # Lazy import to avoid introducing hard runtime dependency at import time.
+        try:
+            import pandas as pd
+
+            if isinstance(value, pd.DataFrame):
+                return {
+                    "__type__": "dataframe",
+                    "orient": "split",
+                    "value": value.to_json(orient="split", date_format="iso"),
+                }
+        except Exception:
+            pass
+
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+    def _json_object_hook(self, value: Any) -> Any:
+        """Decode supported structured JSON types."""
+        if not isinstance(value, dict) or "__type__" not in value:
+            return value
+
+        value_type = value.get("__type__")
+        if value_type == "datetime":
+            return datetime.fromisoformat(str(value["value"]))
+        if value_type == "date":
+            return date.fromisoformat(str(value["value"]))
+        if value_type == "tuple":
+            return tuple(value.get("value", []))
+        if value_type == "set":
+            return set(value.get("value", []))
+        if value_type == "bytes":
+            return base64.b64decode(str(value.get("value", "")).encode("ascii"), validate=True)
+        if value_type == "dataframe":
+            import pandas as pd
+
+            orient = str(value.get("orient", "split"))
+            return pd.read_json(io.StringIO(str(value["value"])), orient=orient)
+
+        return value
 
     def _deserialize(self, value: bytes) -> Any | None:
         """Deserialize cache value only after signature verification."""
@@ -223,7 +292,7 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return json.loads(payload.decode("utf-8"), object_hook=self._json_object_hook)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -337,7 +406,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be serializable by backend)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +501,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
