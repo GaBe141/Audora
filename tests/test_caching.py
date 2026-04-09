@@ -1,5 +1,6 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
 import time
 
 from core.caching import (
@@ -118,3 +119,12 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256_hashes(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, "a"), {"k": "v"})
+        parts = key.split(":")
+        assert len(parts) == 3
+        assert parts[0] == "fn"
+        # Ensure strong hash length/format (sha256 hex digest = 64 chars)
+        assert len(parts[1]) == hashlib.sha256().digest_size * 2
+        assert len(parts[2]) == hashlib.sha256().digest_size * 2
