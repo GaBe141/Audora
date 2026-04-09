@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,65 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Safety tests for Redis cache serialization/deserialization."""
+
+    @staticmethod
+    def _backend_with_test_key() -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_roundtrip_json_safe_types(self):
+        backend = self._backend_with_test_key()
+        value = {
+            "track": "Song",
+            "score": 98.5,
+            "metadata": {"platforms": ["spotify", "youtube"], "viral": True},
+            "pair": ("artist", 42),
+        }
+
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        assert restored == value
+
+    def test_roundtrip_pandas_dataframe(self):
+        backend = self._backend_with_test_key()
+        value = pd.DataFrame(
+            {
+                "track_name": ["A", "B"],
+                "artist": ["X", "Y"],
+                "score": [91.2, 87.4],
+            }
+        )
+
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored, value)
+
+    def test_rejects_tampered_signature(self):
+        backend = self._backend_with_test_key()
+        serialized = backend._serialize({"foo": "bar"})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["sig"] = "0" * len(envelope["sig"])
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(tampered) is None
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._backend_with_test_key()
+        payload = base64.b64encode(b"legacy-payload").decode("ascii")
+        legacy = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "deadbeef",
+            "payload": payload,
+        }
+        serialized = json.dumps(legacy, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(serialized) is None
