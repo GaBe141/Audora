@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
+import os
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,65 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerializationSecurity:
+    """Security-focused tests for Redis payload serialization."""
+
+    def _build_backend(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_rejects_legacy_v1_envelope(self):
+        backend = self._build_backend()
+        legacy_payload = b"legacy-pickle-bytes"
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "deadbeef",
+            "payload": base64.b64encode(legacy_payload).decode("ascii"),
+        }
+        serialized = json.dumps(legacy_envelope).encode("utf-8")
+        assert backend._deserialize(serialized) is None
+
+    def test_round_trip_json_safe_types(self):
+        backend = self._build_backend()
+        value = {
+            "text": "ok",
+            "int": 7,
+            "float": 3.14,
+            "bool": True,
+            "none": None,
+            "bytes": b"abc",
+            "tuple": ("x", 1),
+            "set": {1, 2},
+            "list": [1, "a", {"k": "v"}],
+        }
+
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        assert isinstance(restored, dict)
+        assert restored["text"] == "ok"
+        assert restored["int"] == 7
+        assert restored["float"] == 3.14
+        assert restored["bool"] is True
+        assert restored["none"] is None
+        assert restored["bytes"] == b"abc"
+        assert restored["tuple"] == ("x", 1)
+        assert restored["set"] == {1, 2}
+        assert restored["list"] == [1, "a", {"k": "v"}]
+
+    def test_serialize_rejects_non_string_dict_keys(self):
+        backend = self._build_backend()
+        with pytest.raises(TypeError):
+            backend._serialize({1: "not allowed"})
+
+    def test_build_cache_key_uses_sha256_hashes(self, mock_cache):
+        cache_key = mock_cache._build_cache_key("pref", ("a", 1), {"k": "v"})
+        parts = cache_key.split(":")
+        assert parts[0] == "pref"
+        for digest in parts[1:]:
+            assert len(digest) == 64
+            int(digest, 16)
