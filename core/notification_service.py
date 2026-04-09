@@ -211,6 +211,39 @@ class EnhancedNotificationService:
             "on",
         }
 
+    def _is_path_within_allowed_roots(self, candidate: Path, roots: list[Path]) -> bool:
+        """Return True when candidate is under any allowed root."""
+        for root in roots:
+            try:
+                candidate.relative_to(root)
+                return True
+            except ValueError:
+                continue
+        return False
+
+    def _resolve_attachment_path(self, attachment_path: str) -> Path:
+        """Resolve and validate attachment path to reduce local file exfiltration risk."""
+        # Allow attachments only from project-controlled locations.
+        project_root = Path.cwd().resolve()
+        allowed_roots = [
+            (project_root / "data").resolve(),
+            (project_root / "reports").resolve(),
+            (project_root / "exports").resolve(),
+            (project_root / "logs").resolve(),
+        ]
+
+        resolved = Path(attachment_path).expanduser().resolve()
+        if not resolved.exists():
+            raise ValueError(f"Attachment does not exist: {attachment_path}")
+        if not resolved.is_file():
+            raise ValueError(f"Attachment path is not a file: {attachment_path}")
+        if not self._is_path_within_allowed_roots(resolved, allowed_roots):
+            raise ValueError(
+                "Attachment path is outside allowed directories "
+                "(data/, reports/, exports/, logs/)"
+            )
+        return resolved
+
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
         try:
@@ -559,16 +592,21 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    try:
+                        resolved_attachment = self._resolve_attachment_path(attachment_path)
+                    except ValueError as e:
+                        self.logger.warning(f"Skipping unsafe attachment path: {e}")
+                        continue
+
+                    with resolved_attachment.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {resolved_attachment.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
