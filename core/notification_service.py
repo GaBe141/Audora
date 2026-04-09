@@ -211,6 +211,60 @@ class EnhancedNotificationService:
             "on",
         }
 
+    def _is_enabled(self, env_var: str) -> bool:
+        """Interpret a standard environment flag value."""
+        return os.getenv(env_var, "").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _get_allowed_attachment_dirs(self) -> list[Path]:
+        """Return resolved allowlisted directories for email attachments."""
+        raw_dirs = os.getenv("AUDORA_ALLOWED_ATTACHMENT_DIRS", "").strip()
+        if not raw_dirs:
+            # Secure-by-default: only allow attachments from the data directory.
+            return [(Path.cwd() / "data").resolve()]
+
+        allowed_dirs = []
+        for raw in raw_dirs.split(","):
+            cleaned = raw.strip()
+            if cleaned:
+                allowed_dirs.append(Path(cleaned).expanduser().resolve())
+        return allowed_dirs
+
+    def _validate_attachment_path(self, attachment_path: str) -> Path:
+        """Validate and normalize attachment paths to reduce file-exfiltration risk."""
+        if not self._is_enabled("AUDORA_ENABLE_EMAIL_ATTACHMENTS"):
+            raise ValueError(
+                "Email attachments are disabled. Set AUDORA_ENABLE_EMAIL_ATTACHMENTS=true "
+                "to explicitly enable this feature."
+            )
+
+        resolved_path = Path(attachment_path).expanduser().resolve()
+        if not resolved_path.exists() or not resolved_path.is_file():
+            raise ValueError(f"Attachment does not exist or is not a file: {attachment_path}")
+
+        allowed_dirs = self._get_allowed_attachment_dirs()
+        if not any(resolved_path.is_relative_to(allowed_dir) for allowed_dir in allowed_dirs):
+            raise ValueError(
+                "Attachment path is outside allowed attachment directories: "
+                f"{attachment_path}. Allowed roots: {[str(p) for p in allowed_dirs]}"
+            )
+
+        default_limit = 5 * 1024 * 1024  # 5 MB
+        try:
+            max_attachment_size = int(
+                os.getenv("AUDORA_MAX_ATTACHMENT_SIZE_BYTES", str(default_limit))
+            )
+        except ValueError:
+            max_attachment_size = default_limit
+
+        file_size = resolved_path.stat().st_size
+        if file_size > max_attachment_size:
+            raise ValueError(
+                f"Attachment exceeds maximum allowed size ({max_attachment_size} bytes): "
+                f"{resolved_path.name}"
+            )
+
+        return resolved_path
+
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
         try:
@@ -559,16 +613,17 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    validated_path = self._validate_attachment_path(attachment_path)
+                    with validated_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        safe_filename = validated_path.name.replace("\r", "").replace("\n", "")
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f'attachment; filename="{safe_filename}"',
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
@@ -650,7 +705,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +772,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +832,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
