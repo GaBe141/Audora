@@ -24,7 +24,9 @@ def data_store(temp_db_path):
     from core.data_store import EnhancedMusicDataStore
 
     store = EnhancedMusicDataStore(
-        db_path=str(temp_db_path), backup_dir=str(temp_db_path.parent / "backups")
+        db_path=str(temp_db_path),
+        backup_dir=str(temp_db_path.parent / "backups"),
+        export_dir=str(temp_db_path.parent / "exports"),
     )
     yield store
     store.close_pool()
