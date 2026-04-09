@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import socket
+import ssl
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -574,7 +575,9 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                # Enforce certificate and hostname verification for SMTP STARTTLS.
+                tls_context = ssl.create_default_context()
+                server.starttls(context=tls_context)
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
