@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,32 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security and compatibility tests for Redis cache serialization."""
+
+    def test_round_trip_serialization_for_plain_dict(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        value = {"track": "Song A", "score": 91.5, "active": True}
+        serialized = backend._serialize(value)
+        deserialized = backend._deserialize(serialized)
+
+        assert deserialized == value
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        payload = b"not-a-safe-serialization-format"
+        signature = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        legacy = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        assert backend._deserialize(json.dumps(legacy).encode("utf-8")) is None
