@@ -1,9 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hmac
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,46 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerializationSecurity:
+    """Tests for signed typed-JSON Redis serialization."""
+
+    def test_round_trip_for_supported_types(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        payload = {
+            "name": "audora",
+            "count": 3,
+            "tags": ["music", "trend"],
+            "nested": {"enabled": True},
+        }
+        serialized = backend._serialize(payload)
+        restored = backend._deserialize(serialized)
+        assert restored == payload
+
+    def test_rejects_tampered_signature(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        serialized = backend._serialize({"value": "original"})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"] = json.dumps({"type": "primitive", "value": "tampered"})
+        tampered = json.dumps(envelope, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+        assert backend._deserialize(tampered) is None
+
+    def test_rejects_legacy_envelope_version(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        payload = '{"type":"primitive","value":"legacy"}'
+        sig = hmac.new(backend._signing_key, payload.encode("utf-8"), "sha256").hexdigest()
+        legacy = json.dumps(
+            {"v": 1, "alg": "HMAC-SHA256", "sig": sig, "payload": payload},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+
+        assert backend._deserialize(legacy) is None
