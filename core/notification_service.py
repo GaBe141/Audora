@@ -4,6 +4,7 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
@@ -115,6 +116,11 @@ class EnhancedNotificationService:
 
     def _load_config(self, config_file: str | None) -> dict[str, Any]:
         """Load notification configuration."""
+        webhook_token = os.getenv("WEBHOOK_TOKEN", "").strip()
+        webhook_headers: dict[str, str] = {"Content-Type": "application/json"}
+        if webhook_token:
+            webhook_headers["Authorization"] = f"Bearer {webhook_token}"
+
         default_config = {
             "enabled": True,
             "default_channels": ["console"],
@@ -145,10 +151,7 @@ class EnhancedNotificationService:
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
-                },
+                "headers": webhook_headers,
                 "timeout": 30,
             },
             "sms": {
@@ -193,6 +196,23 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+
+        # Avoid persisting live webhook auth tokens to disk.
+        webhook_cfg = to_save.get("webhook")
+        if isinstance(webhook_cfg, dict):
+            webhook_headers = webhook_cfg.get("headers")
+            if isinstance(webhook_headers, dict):
+                sanitized_headers: dict[str, Any] = {}
+                for header_name, header_value in webhook_headers.items():
+                    if (
+                        isinstance(header_name, str)
+                        and header_name.lower() == "authorization"
+                        and header_value
+                    ):
+                        sanitized_headers[header_name] = "Bearer ${WEBHOOK_TOKEN}"
+                    else:
+                        sanitized_headers[header_name] = header_value
+                webhook_cfg["headers"] = sanitized_headers
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -228,11 +248,14 @@ class EnhancedNotificationService:
 
     def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
         """Validate outbound webhook URL to reduce SSRF risk."""
-        parsed = urlparse(url.strip())
+        normalized_url = url.strip()
+        parsed = urlparse(normalized_url)
         if parsed.scheme != "https":
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
@@ -253,7 +276,7 @@ class EnhancedNotificationService:
                         "Webhook URL resolves to a private or restricted network address"
                     )
 
-        return url
+        return normalized_url
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -509,8 +532,15 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
+        key_material = {
+            "title": message.title.strip(),
+            "content": message.content[:500],
+            "priority": message.priority.value,
+            "channels": sorted(channel.value for channel in message.channels),
+            "data": message.data or {},
+        }
+        serialized = json.dumps(key_material, sort_keys=True, default=str, separators=(",", ":"))
+        content_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:32]
         return f"{content_hash}:{message.priority.value}"
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
@@ -650,8 +680,18 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                    allow_redirects=False,
+                ) as response,
             ):
+                if 300 <= response.status < 400:
+                    return {
+                        "success": False,
+                        "error": "HTTP redirects are not allowed for webhook destinations",
+                    }
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -717,8 +757,18 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                    allow_redirects=False,
+                ) as response,
             ):
+                if 300 <= response.status < 400:
+                    return {
+                        "success": False,
+                        "error": "HTTP redirects are not allowed for webhook destinations",
+                    }
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -771,15 +821,31 @@ System status: {{ system_status }}
                 )
                 payload["formatted_content"] = template.render(**message.template_vars)
 
-            headers = webhook_config.get("headers", {"Content-Type": "application/json"})
+            headers = dict(webhook_config.get("headers", {"Content-Type": "application/json"}))
+            auth_header = headers.get("Authorization")
+            if isinstance(auth_header, str) and "${WEBHOOK_TOKEN}" in auth_header:
+                runtime_token = os.getenv("WEBHOOK_TOKEN", "").strip()
+                if runtime_token:
+                    headers["Authorization"] = auth_header.replace("${WEBHOOK_TOKEN}", runtime_token)
+                else:
+                    headers.pop("Authorization", None)
             timeout = webhook_config.get("timeout", 30)
 
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
+                if 300 <= response.status < 400:
+                    return {
+                        "success": False,
+                        "error": "HTTP redirects are not allowed for webhook destinations",
+                    }
                 if 200 <= response.status < 300:
                     self.logger.info(f"Webhook notification sent successfully: {response.status}")
                     return {"success": True, "status_code": response.status}
