@@ -193,6 +193,11 @@ class EnhancedNotificationService:
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        if "email" in to_save and isinstance(to_save["email"], dict):
+            # Prevent plaintext SMTP password persistence unless explicitly enabled.
+            to_save["email"] = dict(to_save["email"])
+            if not self._allow_plaintext_smtp_password_persistence():
+                to_save["email"].pop("password", None)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -201,6 +206,15 @@ class EnhancedNotificationService:
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _allow_plaintext_smtp_password_persistence(self) -> bool:
+        """Whether saving SMTP passwords to config files is explicitly allowed."""
+        return os.getenv("AUDORA_ALLOW_PLAINTEXT_SMTP_PASSWORD_SAVE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""

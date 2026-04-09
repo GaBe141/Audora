@@ -1,4 +1,6 @@
-"""Security tests for notification webhook URL validation."""
+"""Security tests for notification webhook URL validation and config safety."""
+
+import json
 
 import pytest
 
@@ -27,3 +29,31 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+
+class TestNotificationConfigPersistence:
+    """Validate secure defaults for persisted notification configuration."""
+
+    def test_save_config_omits_smtp_password_by_default(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AUDORA_ALLOW_PLAINTEXT_SMTP_PASSWORD_SAVE", raising=False)
+        svc = EnhancedNotificationService()
+        svc.config["email"]["password"] = "super-secret-password"
+
+        config_path = tmp_path / "notification_config.json"
+        svc.save_config(str(config_path))
+
+        saved = json.loads(config_path.read_text(encoding="utf-8"))
+        assert "password" not in saved["email"]
+
+    def test_save_config_can_persist_smtp_password_when_explicitly_enabled(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("AUDORA_ALLOW_PLAINTEXT_SMTP_PASSWORD_SAVE", "true")
+        svc = EnhancedNotificationService()
+        svc.config["email"]["password"] = "super-secret-password"
+
+        config_path = tmp_path / "notification_config.json"
+        svc.save_config(str(config_path))
+
+        saved = json.loads(config_path.read_text(encoding="utf-8"))
+        assert saved["email"]["password"] == "super-secret-password"

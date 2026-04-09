@@ -5,6 +5,8 @@ Includes live trend dashboard, history search, notification settings, and accura
 """
 
 import json
+import hmac
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +25,33 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Audora",
 )
+
+GUI_ADMIN_TOKEN_ENV = "AUDORA_GUI_ADMIN_TOKEN"
+
+
+def _is_authorized_admin_token(token: str | None) -> bool:
+    """Return True when the provided GUI admin token matches the configured secret."""
+    configured_token = os.getenv(GUI_ADMIN_TOKEN_ENV, "").strip()
+    if not configured_token:
+        return False
+    provided_token = (token or "").strip()
+    if not provided_token:
+        return False
+    return hmac.compare_digest(provided_token, configured_token)
+
+
+def _admin_auth_error(token: str | None) -> str | None:
+    """Return an error string when GUI admin authentication is missing/invalid."""
+    configured_token = os.getenv(GUI_ADMIN_TOKEN_ENV, "").strip()
+    if not configured_token:
+        return (
+            "Security block: set AUDORA_GUI_ADMIN_TOKEN in the server environment "
+            "to enable settings changes."
+        )
+    if not _is_authorized_admin_token(token):
+        return "Unauthorized: invalid admin token."
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Layout helpers
@@ -199,6 +228,25 @@ _settings_tab = dbc.Tab(
     tab_id="tab-settings",
     children=[
         html.H5("Notification Channels", className="mt-3 mb-3"),
+        dbc.Alert(
+            "Restricted action: provide GUI admin token to save settings or test webhooks.",
+            color="warning",
+            className="mb-3",
+        ),
+        dbc.Row(
+            [
+                dbc.Col(html.Label("Admin Token", className="small text-muted pt-2"), width=2),
+                dbc.Col(
+                    dbc.Input(
+                        id="input-admin-token",
+                        placeholder="Enter admin token",
+                        type="password",
+                    ),
+                    width=7,
+                ),
+            ],
+            className="mb-3 align-items-center",
+        ),
         _channel_row("Slack Webhook", "input-slack-url", "slack"),
         _channel_row("Discord Webhook", "input-discord-url", "discord"),
         _channel_row("Custom Webhook", "input-webhook-url", "webhook"),
@@ -582,17 +630,38 @@ def export_csv(_n, table_data):
     State("input-smtp-port", "value"),
     State("input-smtp-user", "value"),
     State("input-smtp-pass", "value"),
+    State("input-admin-token", "value"),
     prevent_initial_call=True,
 )
-def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+def save_settings(
+    _n,
+    slack_url,
+    discord_url,
+    webhook_url,
+    smtp_host,
+    smtp_port,
+    smtp_user,
+    smtp_pass,
+    admin_token,
+):
     try:
+        auth_error = _admin_auth_error(admin_token)
+        if auth_error:
+            return auth_error
+
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
+
         if slack_url:
+            svc._validate_webhook_url(slack_url, allow_private=False)
             svc.config["slack"]["webhook_url"] = slack_url
         if discord_url:
+            svc._validate_webhook_url(discord_url, allow_private=False)
             svc.config["discord"]["webhook_url"] = discord_url
         if webhook_url:
+            svc._validate_webhook_url(
+                webhook_url, allow_private=svc._allow_private_webhooks()
+            )
             svc.config["webhook"]["url"] = webhook_url
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
@@ -615,9 +684,14 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         Output(f"test-status-{channel_key}", "children"),
         Input(f"btn-test-{channel_key}", "n_clicks"),
         State(url_input_id, "value"),
+        State("input-admin-token", "value"),
         prevent_initial_call=True,
     )
-    def _cb(_n, url):
+    def _cb(_n, url, admin_token):
+        auth_error = _admin_auth_error(admin_token)
+        if auth_error:
+            return auth_error
+
         if not url:
             return "No URL"
         try:
