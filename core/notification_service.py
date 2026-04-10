@@ -510,10 +510,14 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Deterministic cryptographic hash avoids per-process randomization collisions.
-        material = f"{message.title}:{message.content[:100]}:{message.priority.value}"
-        content_hash = hashlib.sha256(material.encode("utf-8")).hexdigest()
-        return content_hash
+        return self._generate_message_key_payload(
+            message.title, message.content[:100], message.priority.value
+        )
+
+    def _generate_message_key_payload(self, title: str, content: str, priority: str) -> str:
+        """Generate deterministic SHA-256 key from message payload parts."""
+        material = f"{title}:{content}:{priority}"
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
         """Check if message is in cooldown period."""

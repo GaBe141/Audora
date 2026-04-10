@@ -3,6 +3,7 @@ Enhanced data persistence layer for music discovery data.
 Handles trending data, viral predictions, and cross-platform analysis.
 """
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -665,12 +666,7 @@ class EnhancedMusicDataStore:
         if not track_artist_pairs:
             return pd.DataFrame()
 
-        # Create stable deterministic cache key independent of Python hash randomization.
-        pairs_repr = json.dumps(
-            sorted(track_artist_pairs), sort_keys=True, separators=(",", ":"), ensure_ascii=True
-        )
-        pairs_digest = hashlib.sha256(pairs_repr.encode("utf-8")).hexdigest()
-        cache_key = f"tracks_bulk:{pairs_digest}"
+        cache_key = self._build_tracks_bulk_cache_key(track_artist_pairs)
         cached_result = self._cache.get(cache_key)
         if cached_result is not None:
             self.logger.debug(f"Cache hit for bulk tracks query ({len(track_artist_pairs)} pairs)")
@@ -706,6 +702,14 @@ class EnhancedMusicDataStore:
             self.logger.debug(f"Loaded {len(df)} tracks in bulk query")
 
             return df
+
+    def _build_tracks_bulk_cache_key(self, track_artist_pairs: list[tuple[str, str]]) -> str:
+        """Build deterministic cache key for bulk artist/track lookup."""
+        pairs_repr = json.dumps(
+            sorted(track_artist_pairs), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+        pairs_digest = hashlib.sha256(pairs_repr.encode("utf-8")).hexdigest()
+        return f"tracks_bulk:{pairs_digest}"
 
     def get_trending_summary_cached(
         self, platform: str | None = None, days: int = 7
