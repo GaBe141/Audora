@@ -65,6 +65,13 @@ class TestGetTracksWithArtistsBulk:
         df = data_store.get_tracks_with_artists_bulk([])
         assert df.empty
 
+    def test_tracks_bulk_cache_key_is_deterministic(self, data_store):
+        pairs_a = [("Track B", "Artist 2"), ("Track A", "Artist 1")]
+        pairs_b = [("Track A", "Artist 1"), ("Track B", "Artist 2")]
+        assert data_store._build_tracks_bulk_cache_key(pairs_a) == data_store._build_tracks_bulk_cache_key(
+            pairs_b
+        )
+
 
 class TestGetTrendingSummaryCached:
     """Test get_trending_summary_cached returns same result on second call (cache hit)."""

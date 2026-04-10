@@ -1,5 +1,7 @@
 """Security tests for notification webhook URL validation."""
 
+import hashlib
+
 import pytest
 
 from core.notification_service import EnhancedNotificationService
@@ -27,3 +29,19 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+
+class TestNotificationKeyGeneration:
+    """Validate deterministic and stable notification dedupe keys."""
+
+    def test_message_key_is_deterministic(self):
+        svc = EnhancedNotificationService()
+        key_1 = svc._generate_message_key_payload("same-title", "same-content", "high")
+        key_2 = svc._generate_message_key_payload("same-title", "same-content", "high")
+        assert key_1 == key_2
+        assert len(key_1) == 64  # sha256 hex digest
+
+    def test_message_key_payload_matches_expected_digest(self):
+        svc = EnhancedNotificationService()
+        expected = hashlib.sha256("title:content:critical".encode("utf-8")).hexdigest()
+        assert svc._generate_message_key_payload("title", "content", "critical") == expected

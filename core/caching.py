@@ -10,7 +10,6 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -188,15 +187,65 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload_obj = self._to_safe_payload(value)
+        payload = json.dumps(payload_obj, separators=(",", ":")).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
         }
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+    def _to_safe_payload(self, value: Any) -> dict[str, Any]:
+        """Convert cache value to a safe JSON payload."""
+        try:
+            # Fast path for JSON-native values.
+            json.dumps(value)
+            return {"format": "json", "value": value}
+        except (TypeError, ValueError):
+            pass
+
+        # Structured support for DataFrames used by analytics caching.
+        try:
+            import pandas as pd  # type: ignore[import-untyped]
+        except ImportError:
+            pd = None
+
+        if pd is not None and isinstance(value, pd.DataFrame):
+            return {"format": "pandas_dataframe_split", "value": value.to_dict(orient="split")}
+
+        raise TypeError(
+            "Unsupported cache value type for Redis backend. "
+            "Only JSON-serializable values and pandas.DataFrame are supported."
+        )
+
+    def _from_safe_payload(self, payload_obj: dict[str, Any]) -> Any | None:
+        """Restore value from a safe JSON payload."""
+        data_format = payload_obj.get("format")
+        if data_format == "json":
+            return payload_obj.get("value")
+
+        if data_format == "pandas_dataframe_split":
+            frame_payload = payload_obj.get("value")
+            if not isinstance(frame_payload, dict):
+                logger.warning("Rejected cache entry with invalid DataFrame payload")
+                return None
+
+            try:
+                import pandas as pd  # type: ignore[import-untyped]
+            except ImportError:
+                logger.warning("Rejected DataFrame cache entry because pandas is unavailable")
+                return None
+
+            if not all(key in frame_payload for key in ("data", "columns", "index")):
+                logger.warning("Rejected cache entry with incomplete DataFrame payload")
+                return None
+            return pd.DataFrame(**frame_payload)
+
+        logger.warning("Rejected cache entry with unsupported payload format")
+        return None
 
     def _deserialize(self, value: bytes) -> Any | None:
         """Deserialize cache value only after signature verification."""
@@ -204,7 +253,7 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -223,7 +272,12 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            payload_obj = json.loads(payload.decode("utf-8"))
+            if not isinstance(payload_obj, dict):
+                logger.warning("Rejected cache entry with invalid payload object")
+                return None
+
+            return self._from_safe_payload(payload_obj)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -432,12 +486,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
