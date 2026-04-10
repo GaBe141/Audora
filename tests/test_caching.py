@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+from io import BytesIO
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +125,71 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerializationSecurity:
+    """Security-focused tests for Redis cache serialization behavior."""
+
+    @staticmethod
+    def _backend(allow_pickle: bool) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        backend._allow_pickle = allow_pickle
+        return backend
+
+    def test_json_roundtrip_when_pickle_disabled(self):
+        backend = self._backend(allow_pickle=False)
+        serialized = backend._serialize({"artist": "test", "score": 99})
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["format"] == "json"
+        assert backend._deserialize(serialized) == {"artist": "test", "score": 99}
+
+    def test_rejects_pickle_payload_when_disabled(self):
+        backend = self._backend(allow_pickle=False)
+        payload = pickle.dumps({"danger": True}, protocol=pickle.HIGHEST_PROTOCOL)
+        sig = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": sig,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        encoded = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(encoded) is None
+
+    def test_allows_pickle_payload_when_explicitly_enabled(self):
+        backend = self._backend(allow_pickle=True)
+        payload = pickle.dumps({"legacy": "ok"}, protocol=pickle.HIGHEST_PROTOCOL)
+        sig = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 2,
+            "alg": "HMAC-SHA256",
+            "format": "pickle",
+            "sig": sig,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        encoded = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(encoded) == {"legacy": "ok"}
+
+    def test_rejects_pickle_with_unsafe_global(self):
+        backend = self._backend(allow_pickle=True)
+        unsafe_global_pickle = (
+            b"cos\nsystem\n"
+            b"(S'echo pwned'\n"
+            b"tR."
+        )
+        sig = hmac.new(backend._signing_key, unsafe_global_pickle, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 2,
+            "alg": "HMAC-SHA256",
+            "format": "pickle",
+            "sig": sig,
+            "payload": base64.b64encode(unsafe_global_pickle).decode("ascii"),
+        }
+        encoded = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(encoded) is None
