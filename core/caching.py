@@ -7,6 +7,7 @@ fallback to in-memory caching when Redis is unavailable.
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -30,6 +31,36 @@ except ImportError:
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+
+def _restricted_pickle_loads(payload: bytes) -> Any:
+    """Safely deserialize a limited subset of pickle payloads.
+
+    Only primitive built-in container/value types are allowed.
+    """
+
+    class RestrictedUnpickler(pickle.Unpickler):
+        allowed_classes = {
+            ("builtins", "dict"),
+            ("builtins", "list"),
+            ("builtins", "tuple"),
+            ("builtins", "set"),
+            ("builtins", "frozenset"),
+            ("builtins", "str"),
+            ("builtins", "int"),
+            ("builtins", "float"),
+            ("builtins", "bool"),
+            ("builtins", "bytes"),
+            ("builtins", "bytearray"),
+            ("builtins", "complex"),
+        }
+
+        def find_class(self, module: str, name: str) -> Any:
+            if (module, name) in self.allowed_classes:
+                return super().find_class(module, name)
+            raise pickle.UnpicklingError(f"Disallowed pickle class: {module}.{name}")
+
+    return RestrictedUnpickler(io.BytesIO(payload)).load()
 
 
 class CacheBackend:
@@ -259,7 +290,7 @@ class RedisCacheBackend(CacheBackend):
                         "Rejected pickle cache entry because AUDORA_CACHE_ALLOW_PICKLE is disabled"
                     )
                     return None
-                return pickle.loads(payload)
+                return _restricted_pickle_loads(payload)
 
             logger.warning("Rejected cache entry with unsupported format: %s", payload_format)
             return None

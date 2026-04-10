@@ -6,6 +6,7 @@ import hmac
 import json
 import pickle
 import time
+from io import BytesIO
 
 from core.caching import (
     LocalCacheBackend,
@@ -173,3 +174,22 @@ class TestRedisCacheSerializationSecurity:
         encoded = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
         assert backend._deserialize(encoded) == {"legacy": "ok"}
+
+    def test_rejects_pickle_with_unsafe_global(self):
+        backend = self._backend(allow_pickle=True)
+        unsafe_global_pickle = (
+            b"cos\nsystem\n"
+            b"(S'echo pwned'\n"
+            b"tR."
+        )
+        sig = hmac.new(backend._signing_key, unsafe_global_pickle, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 2,
+            "alg": "HMAC-SHA256",
+            "format": "pickle",
+            "sig": sig,
+            "payload": base64.b64encode(unsafe_global_pickle).decode("ascii"),
+        }
+        encoded = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+        assert backend._deserialize(encoded) is None
