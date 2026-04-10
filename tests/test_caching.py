@@ -1,10 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
 
-from core.caching import (
-    LocalCacheBackend,
-)
+import pytest
+
+from core.caching import LocalCacheBackend, RedisCacheBackend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +123,41 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSecurity:
+    """Security tests for Redis cache serialization and deserialization."""
+
+    def _backend_with_signing_key(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "unit-test-signing-key")
+        monkeypatch.delenv("AUDORA_CACHE_ALLOW_PICKLE", raising=False)
+        return RedisCacheBackend.__new__(RedisCacheBackend)
+
+    def test_json_format_used_for_json_serializable_values(self, monkeypatch):
+        backend = self._backend_with_signing_key(monkeypatch)
+        backend._signing_key = b"unit-test-signing-key"
+        serialized = backend._serialize({"track": "song", "score": 99})
+        envelope = json.loads(serialized.decode("utf-8"))
+        assert envelope["v"] == 2
+        assert envelope["format"] == "json"
+
+    def test_pickle_serialization_rejected_by_default(self, monkeypatch):
+        backend = self._backend_with_signing_key(monkeypatch)
+        backend._signing_key = b"unit-test-signing-key"
+        with pytest.raises(ValueError, match="AUDORA_CACHE_ALLOW_PICKLE=true"):
+            backend._serialize({"non_json": {1, 2, 3}})
+
+    def test_deserialize_pickle_payload_rejected_by_default(self, monkeypatch):
+        backend = self._backend_with_signing_key(monkeypatch)
+        backend._signing_key = b"unit-test-signing-key"
+        payload = pickle.dumps({"safe": "data"}, protocol=pickle.HIGHEST_PROTOCOL)
+        signed_message = b"pickle:" + payload
+        sig = hmac.new(backend._signing_key, signed_message, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 2,
+            "alg": "HMAC-SHA256",
+            "format": "pickle",
+            "sig": sig,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
