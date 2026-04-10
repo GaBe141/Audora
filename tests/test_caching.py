@@ -1,8 +1,10 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
 import time
+from unittest.mock import patch
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
 )
 
@@ -118,3 +120,23 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheKeyHashing:
+    """Tests for deterministic and strong cache key hashing."""
+
+    def test_build_cache_key_uses_sha256_not_md5(self, mock_cache):
+        with (
+            patch("core.caching.hashlib.sha256") as sha256_mock,
+            patch("core.caching.hashlib.md5", side_effect=AssertionError("md5 should not be used")),
+        ):
+            sha256_mock.return_value.hexdigest.return_value = "digest"
+            key = mock_cache._build_cache_key("prefix", ("a", 1), {"k": "v"})
+            assert key == "prefix:digest:digest"
+            assert sha256_mock.call_count == 2
+
+    def test_build_cache_key_is_stable_for_same_inputs(self):
+        cache = CacheManager(backend=LocalCacheBackend())
+        first = cache._build_cache_key("prefix", ("arg", 1), {"b": 2, "a": 1})
+        second = cache._build_cache_key("prefix", ("arg", 1), {"a": 1, "b": 2})
+        assert first == second
