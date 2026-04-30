@@ -5,6 +5,7 @@ Handles trending data, viral predictions, and cross-platform analysis.
 
 import json
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -944,6 +945,11 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        export_root = Path(os.getenv("AUDORA_EXPORT_DIR", "exports")).resolve()
+        export_path = Path(filepath).expanduser().resolve()
+        if export_path != export_root and export_root not in export_path.parents:
+            raise ValueError(f"Export path must be inside {export_root}")
+
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -959,12 +965,12 @@ class EnhancedMusicDataStore:
                 df = pd.read_sql_query(query, conn)
 
             # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            export_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(export_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {export_path}")
 
-        return filepath
+        return str(export_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
