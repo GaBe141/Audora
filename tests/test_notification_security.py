@@ -1,6 +1,7 @@
 """Security tests for notification delivery hardening."""
 
 import json
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -75,8 +76,7 @@ class TestNotificationTransportSecurity:
         with pytest.raises(ValueError, match="Unknown notification template"):
             svc._render_template(message)
 
-    @pytest.mark.asyncio
-    async def test_webhook_redirects_are_disabled(self):
+    def test_webhook_redirects_are_disabled(self):
         svc = EnhancedNotificationService()
         svc.config["webhook"]["url"] = "https://example.com/webhook"
         response = AsyncMock()
@@ -87,7 +87,7 @@ class TestNotificationTransportSecurity:
         session = AsyncMock()
         session.__aenter__.return_value = session
         session.__aexit__.return_value = None
-        session.post.return_value = response
+        session.post = MagicMock(return_value=response)
 
         message = NotificationMessage(
             title="Test",
@@ -101,13 +101,12 @@ class TestNotificationTransportSecurity:
             patch("core.notification_service.aiohttp.ClientSession", return_value=session),
         ):
             getaddrinfo.return_value = [(None, None, None, None, ("93.184.216.34", 443))]
-            result = await svc._send_webhook(message)
+            result = asyncio.run(svc._send_webhook(message))
 
         assert result["success"] is True
         assert session.post.call_args.kwargs["allow_redirects"] is False
 
-    @pytest.mark.asyncio
-    async def test_smtp_auth_requires_tls(self):
+    def test_smtp_auth_requires_tls(self):
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -125,12 +124,11 @@ class TestNotificationTransportSecurity:
             channels=[NotificationChannel.EMAIL],
         )
 
-        result = await svc._send_email(message)
+        result = asyncio.run(svc._send_email(message))
 
         assert result == {"success": False, "error": "Refusing SMTP authentication without TLS"}
 
-    @pytest.mark.asyncio
-    async def test_smtp_starttls_uses_verified_context(self):
+    def test_smtp_starttls_uses_verified_context(self):
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -157,7 +155,7 @@ class TestNotificationTransportSecurity:
         ):
             context = MagicMock()
             create_context.return_value = context
-            result = await svc._send_email(message)
+            result = asyncio.run(svc._send_email(message))
 
         assert result["success"] is True
         smtp.starttls.assert_called_once_with(context=context)
