@@ -46,7 +46,5 @@ def test_run_command_returns_error_when_admin_action_rejected(monkeypatch):
     monkeypatch.setenv("AUDORA_GUI_ENABLE_ADMIN_ACTIONS", "0")
 
     with gui_app.app.server.test_request_context("/", environ_base={"REMOTE_ADDR": "127.0.0.1"}):
-        status, output = gui_app._run_command(["python", "--version"])
-
-    assert status == "Error"
-    assert "disabled" in output
+        with pytest.raises(PermissionError, match="disabled"):
+            gui_app._run_command(["python", "--version"])
