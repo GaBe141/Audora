@@ -5,6 +5,7 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import io
 import json
 import logging
 import time
@@ -240,7 +241,7 @@ class RedisCacheBackend(CacheBackend):
             try:
                 import pandas as pd  # type: ignore[import-untyped]
 
-                return pd.read_json(payload, orient="split")
+                return pd.read_json(io.StringIO(payload), orient="split")
             except ImportError:
                 logger.warning("Rejected DataFrame cache entry because pandas is unavailable")
                 return None
@@ -254,7 +255,10 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return self._deserialize(value)
+            deserialized = self._deserialize(value)
+            if deserialized is None:
+                self._client.delete(key)
+            return deserialized
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None

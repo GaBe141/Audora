@@ -1,5 +1,6 @@
 """Security tests for notification transport hardening."""
 
+import asyncio
 import ssl
 from unittest.mock import MagicMock, patch
 
@@ -70,7 +71,6 @@ class _FakeClientSession:
         return _FakeResponse()
 
 
-@pytest.mark.asyncio
 class TestWebhookRedirectHardening:
     """Ensure validated webhooks cannot follow redirects to internal hosts."""
 
@@ -82,7 +82,7 @@ class TestWebhookRedirectHardening:
             ]
             yield
 
-    async def test_slack_disables_redirects(self, monkeypatch):
+    def test_slack_disables_redirects(self, monkeypatch):
         _FakeClientSession.last_post_kwargs = None
         monkeypatch.setattr("core.notification_service.aiohttp.ClientSession", _FakeClientSession)
         svc = EnhancedNotificationService()
@@ -94,12 +94,12 @@ class TestWebhookRedirectHardening:
             priority=NotificationPriority.HIGH,
             channels=[NotificationChannel.SLACK],
         )
-        result = await svc._send_slack(message)
+        result = asyncio.run(svc._send_slack(message))
 
         assert result["success"] is True
         assert _FakeClientSession.last_post_kwargs["allow_redirects"] is False
 
-    async def test_discord_disables_redirects(self, monkeypatch):
+    def test_discord_disables_redirects(self, monkeypatch):
         _FakeClientSession.last_post_kwargs = None
         monkeypatch.setattr("core.notification_service.aiohttp.ClientSession", _FakeClientSession)
         svc = EnhancedNotificationService()
@@ -111,12 +111,12 @@ class TestWebhookRedirectHardening:
             priority=NotificationPriority.HIGH,
             channels=[NotificationChannel.DISCORD],
         )
-        result = await svc._send_discord(message)
+        result = asyncio.run(svc._send_discord(message))
 
         assert result["success"] is True
         assert _FakeClientSession.last_post_kwargs["allow_redirects"] is False
 
-    async def test_custom_webhook_disables_redirects(self, monkeypatch):
+    def test_custom_webhook_disables_redirects(self, monkeypatch):
         _FakeClientSession.last_post_kwargs = None
         monkeypatch.setattr("core.notification_service.aiohttp.ClientSession", _FakeClientSession)
         svc = EnhancedNotificationService()
@@ -128,17 +128,16 @@ class TestWebhookRedirectHardening:
             priority=NotificationPriority.HIGH,
             channels=[NotificationChannel.WEBHOOK],
         )
-        result = await svc._send_webhook(message)
+        result = asyncio.run(svc._send_webhook(message))
 
         assert result["success"] is True
         assert _FakeClientSession.last_post_kwargs["allow_redirects"] is False
 
 
-@pytest.mark.asyncio
 class TestSmtpTransportSecurity:
     """Protect SMTP credentials with verified TLS."""
 
-    async def test_rejects_plaintext_smtp_auth(self):
+    def test_rejects_plaintext_smtp_auth(self):
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -156,12 +155,12 @@ class TestSmtpTransportSecurity:
             channels=[NotificationChannel.EMAIL],
         )
 
-        result = await svc._send_email(message)
+        result = asyncio.run(svc._send_email(message))
 
         assert result["success"] is False
         assert "requires TLS" in result["error"]
 
-    async def test_starttls_uses_default_ssl_context(self):
+    def test_starttls_uses_default_ssl_context(self):
         smtp = MagicMock()
         svc = EnhancedNotificationService()
         svc.config["email"].update(
@@ -181,7 +180,7 @@ class TestSmtpTransportSecurity:
         )
 
         with patch("core.notification_service.smtplib.SMTP", return_value=smtp):
-            result = await svc._send_email(message)
+            result = asyncio.run(svc._send_email(message))
 
         assert result["success"] is True
         tls_context = smtp.starttls.call_args.kwargs["context"]
