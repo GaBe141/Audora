@@ -345,6 +345,9 @@ app.layout = dbc.Container(
 
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
+    if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+        return "Error", "Invalid command arguments"
+
     try:
         proc = subprocess.Popen(
             args,
@@ -396,6 +399,9 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
+        allowed_demos = {"features", "trending", "statistical", "multi-source", "all"}
+        if demo_value not in allowed_demos:
+            return "Error", "Invalid demo selection"
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
@@ -600,9 +606,9 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
             svc.config["email"]["port"] = int(smtp_port)
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
-        if smtp_pass:
-            svc.config["email"]["password"] = smtp_pass
         svc.save_config()
+        if smtp_pass:
+            return "Saved. SMTP passwords are read from SMTP_PASSWORD and were not written to disk."
         return "Saved"
     except Exception as e:
         return f"Error: {e}"

@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
 import time
+import types
+from unittest.mock import MagicMock, patch
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,93 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSafeSerialization:
+    """Regression tests for Redis cache serialization safety."""
+
+    @staticmethod
+    def _patch_redis(redis_client):
+        return (
+            patch("core.caching.REDIS_AVAILABLE", True),
+            patch("core.caching.ConnectionPool", create=True),
+            patch(
+                "core.caching.redis",
+                types.SimpleNamespace(Redis=MagicMock(return_value=redis_client)),
+                create=True,
+            ),
+        )
+
+    def test_redis_serializes_json_without_pickle(self):
+        redis_client = MagicMock()
+        redis_client.ping.return_value = True
+
+        redis_available, connection_pool, redis_module = self._patch_redis(redis_client)
+        with redis_available, connection_pool, redis_module:
+            backend = RedisCacheBackend()
+        backend.set("k", {"artist": "A", "scores": [1, 2, 3]}, ttl=60)
+
+        stored = redis_client.setex.call_args.args[2]
+        envelope = json.loads(stored.decode("utf-8"))
+        assert envelope == {
+            "v": 2,
+            "type": "json",
+            "payload": {"artist": "A", "scores": [1, 2, 3]},
+        }
+        assert backend._deserialize(stored) == {"artist": "A", "scores": [1, 2, 3]}
+
+    def test_redis_serializes_bytes_without_pickle(self):
+        redis_client = MagicMock()
+        redis_client.ping.return_value = True
+
+        redis_available, connection_pool, redis_module = self._patch_redis(redis_client)
+        with redis_available, connection_pool, redis_module:
+            backend = RedisCacheBackend()
+        serialized = backend._serialize(b"audio-bytes")
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["type"] == "bytes"
+        assert envelope["payload"] == base64.b64encode(b"audio-bytes").decode("ascii")
+        assert backend._deserialize(serialized) == b"audio-bytes"
+
+    def test_redis_rejects_legacy_pickle_envelope(self):
+        redis_client = MagicMock()
+        redis_client.ping.return_value = True
+
+        redis_available, connection_pool, redis_module = self._patch_redis(redis_client)
+        with redis_available, connection_pool, redis_module:
+            backend = RedisCacheBackend()
+        legacy_envelope = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "ignored",
+                "payload": base64.b64encode(b"pickle-data").decode("ascii"),
+            }
+        ).encode("utf-8")
+
+        assert backend._deserialize(legacy_envelope) is None
+
+    def test_redis_rejects_unsupported_objects(self):
+        redis_client = MagicMock()
+        redis_client.ping.return_value = True
+
+        redis_available, connection_pool, redis_module = self._patch_redis(redis_client)
+        with redis_available, connection_pool, redis_module:
+            backend = RedisCacheBackend()
+
+        class UnsafeObject:
+            pass
+
+        backend.set("k", UnsafeObject(), ttl=60)
+        redis_client.setex.assert_not_called()
+
+
+def test_cache_key_uses_sha256(mock_cache):
+    key = mock_cache._build_cache_key("prefix", ("artist",), {"limit": 10})
+    parts = key.split(":")
+
+    assert parts[0] == "prefix"
+    assert len(parts[1]) == 64
+    assert len(parts[2]) == 64
