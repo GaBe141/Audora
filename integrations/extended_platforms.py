@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
-from social_discovery_engine import Platform, SocialMusicMetrics, ViralStage
+
+from integrations.social_discovery_engine import Platform, SocialMusicMetrics, ViralStage
 
 
 class RedditMusicAPI:
