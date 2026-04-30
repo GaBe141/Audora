@@ -2,8 +2,11 @@
 
 import time
 
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,51 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis cache payload serialization without a Redis server."""
+
+    def test_serialize_json_compatible_value(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = {"artist": "FKA twigs", "scores": [9.1, 8], "active": True}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_serialize_bytes_value(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = b"\x00audora\xff"
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_serialize_dataframe_value(self):
+        pd = pytest.importorskip("pandas")
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = pd.DataFrame(
+            [
+                {"track_name": "Cellophane", "score": 95},
+                {"track_name": "Two Weeks", "score": 91},
+            ]
+        )
+
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        pd.testing.assert_frame_equal(restored, value)
+
+    def test_rejects_legacy_or_malformed_payloads(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        assert backend._deserialize(b"not-json") is None
+        assert backend._deserialize(b'{"v":1,"type":"json","value":"legacy"}') is None
+        assert backend._deserialize(b'{"v":2,"type":"pickle","value":"payload"}') is None
+
+    def test_unsupported_value_type_is_not_serialized(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError, match="Unsupported Redis cache value type"):
+            backend._serialize(object())
