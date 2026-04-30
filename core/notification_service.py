@@ -605,13 +605,18 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
+            if (
+                not email_config.get("use_tls", True)
+                and email_config.get("username")
+                and email_config.get("password")
+            ):
+                raise ValueError("Refusing to send SMTP credentials without TLS")
+
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
                 server.starttls(context=ssl.create_default_context())
-            elif email_config.get("username") and email_config.get("password"):
-                raise ValueError("Refusing to send SMTP credentials without TLS")
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
