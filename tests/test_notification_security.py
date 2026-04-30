@@ -2,7 +2,12 @@
 
 import pytest
 
-from core.notification_service import EnhancedNotificationService, NotificationMessage
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
 
 
 class TestWebhookUrlValidation:
@@ -61,6 +66,14 @@ class _MockSession:
 class TestWebhookTransportSecurity:
     """Validate outbound webhook transport hardening."""
 
+    def _message(self, channel: NotificationChannel) -> NotificationMessage:
+        return NotificationMessage(
+            title="t",
+            content="c",
+            priority=NotificationPriority.MEDIUM,
+            channels=[channel],
+        )
+
     @pytest.mark.asyncio
     async def test_slack_post_disables_redirects(self, monkeypatch):
         _MockSession.post_calls = []
@@ -68,7 +81,7 @@ class TestWebhookTransportSecurity:
         svc = EnhancedNotificationService()
         svc.config["slack"]["webhook_url"] = "https://example.com/slack"
 
-        result = await svc._send_slack(NotificationMessage(title="t", content="c"))
+        result = await svc._send_slack(self._message(NotificationChannel.SLACK))
 
         assert result["success"] is True
         assert _MockSession.post_calls[0][1]["allow_redirects"] is False
@@ -80,7 +93,7 @@ class TestWebhookTransportSecurity:
         svc = EnhancedNotificationService()
         svc.config["discord"]["webhook_url"] = "https://example.com/discord"
 
-        result = await svc._send_discord(NotificationMessage(title="t", content="c"))
+        result = await svc._send_discord(self._message(NotificationChannel.DISCORD))
 
         assert result["success"] is True
         assert _MockSession.post_calls[0][1]["allow_redirects"] is False
@@ -92,7 +105,7 @@ class TestWebhookTransportSecurity:
         svc = EnhancedNotificationService()
         svc.config["webhook"]["url"] = "https://example.com/webhook"
 
-        result = await svc._send_webhook(NotificationMessage(title="t", content="c"))
+        result = await svc._send_webhook(self._message(NotificationChannel.WEBHOOK))
 
         assert result["success"] is True
         assert _MockSession.post_calls[0][1]["allow_redirects"] is False

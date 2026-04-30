@@ -3,7 +3,7 @@ Automated Fix Script for Audora Codebase Issues
 Fixes type hints, imports, and code quality issues identified by linters.
 """
 
-import subprocess
+import subprocess  # nosec B404
 import sys
 
 
@@ -18,7 +18,8 @@ def run_command(cmd: list[str], description: str) -> bool:
     """Run a command and return success status."""
     print(f"  → {description}")
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        # Commands are static argv lists defined by this maintenance script.
+        subprocess.run(cmd, check=True, capture_output=True, text=True)  # nosec B603
         print("  ✅ Success")
         return True
     except subprocess.CalledProcessError as e:
