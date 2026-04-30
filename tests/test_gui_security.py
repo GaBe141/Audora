@@ -1,11 +1,12 @@
 """Security tests for GUI admin actions."""
 
+import importlib
 import os
 from unittest.mock import patch
 
 import pytest
 
-import gui.app as gui_app
+gui_app = importlib.import_module("gui.app")
 
 
 def test_rejects_remote_admin_actions_without_token(monkeypatch):
