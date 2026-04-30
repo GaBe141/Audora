@@ -1,5 +1,6 @@
 """Security tests for notification transport hardening."""
 
+import asyncio
 import ssl
 from unittest.mock import MagicMock, patch
 
@@ -91,7 +92,7 @@ class TestNotificationTransports:
             channels=[NotificationChannel.EMAIL],
         )
 
-        result = svc._send_email(message)
+        result = asyncio.run(svc._send_email(message))
 
         assert result["success"] is False
         assert "requires TLS" in result["error"]
@@ -116,7 +117,7 @@ class TestNotificationTransports:
         )
 
         with patch("core.notification_service.smtplib.SMTP", return_value=server):
-            result = svc._send_email(message)
+            result = asyncio.run(svc._send_email(message))
 
         assert result["success"] is True
         context = server.starttls.call_args.kwargs["context"]
@@ -124,8 +125,7 @@ class TestNotificationTransports:
         assert context.check_hostname is True
         assert context.verify_mode == ssl.CERT_REQUIRED
 
-    @pytest.mark.asyncio
-    async def test_webhook_redirects_are_not_followed(self, monkeypatch):
+    def test_webhook_redirects_are_not_followed(self, monkeypatch):
         svc = EnhancedNotificationService()
         svc.config["webhook"]["url"] = "https://example.com/webhook"
         monkeypatch.setattr(
@@ -140,7 +140,7 @@ class TestNotificationTransports:
             channels=[NotificationChannel.WEBHOOK],
         )
 
-        result = await svc._send_webhook(message)
+        result = asyncio.run(svc._send_webhook(message))
 
         assert result["success"] is False
         assert _RecordingSession.last_kwargs["allow_redirects"] is False
