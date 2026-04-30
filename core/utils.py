@@ -8,6 +8,26 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
+def resolve_safe_output_path(path: Path | str, base_dir: Path | str = "data") -> Path:
+    """Resolve an output path and ensure it stays inside the configured base directory."""
+    base_path = Path(base_dir).resolve()
+    requested_path = Path(path)
+
+    if requested_path.is_absolute():
+        resolved_path = requested_path.resolve()
+    elif requested_path.parts and requested_path.parts[0] == base_path.name:
+        resolved_path = (Path.cwd() / requested_path).resolve()
+    else:
+        resolved_path = (base_path / requested_path).resolve()
+
+    try:
+        resolved_path.relative_to(base_path)
+    except ValueError as exc:
+        raise ValueError(f"Output path must stay within {base_path}") from exc
+
+    return resolved_path
+
 # Re-export for convenience
 try:
     import pandas as pd

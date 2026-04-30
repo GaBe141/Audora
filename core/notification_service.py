@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+from jinja2.sandbox import SandboxedEnvironment  # type: ignore[import-untyped]
 
 
 class NotificationPriority(Enum):
@@ -92,8 +93,8 @@ class EnhancedNotificationService:
         self.notification_history: list[dict[str, Any]] = []
         self.failed_deliveries: list[dict[str, Any]] = []
 
-        # Initialize template engine with autoescape enabled for security
-        self.template_env = jinja2.Environment(
+        # Initialize template engine with sandboxing and autoescape enabled for security
+        self.template_env = SandboxedEnvironment(
             loader=jinja2.DictLoader(self._load_templates()),
             autoescape=jinja2.select_autoescape(
                 enabled_extensions=("html", "xml", "jinja2"), default_for_string=True
@@ -262,6 +263,38 @@ class EnhancedNotificationService:
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    def _sanitize_template_value(self, value: Any) -> Any:
+        """Limit template context to inert JSON-like values."""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+
+        if isinstance(value, dict):
+            return {str(key): self._sanitize_template_value(item) for key, item in value.items()}
+
+        if isinstance(value, (list, tuple, set)):
+            return [self._sanitize_template_value(item) for item in value]
+
+        return f"<{type(value).__name__}>"
+
+    def _render_template(self, message: NotificationMessage) -> str:
+        """Render a notification template using a sandboxed, sanitized context."""
+        if not message.template_vars:
+            return message.content
+
+        template_name = str(message.template_vars.get("template", "default"))
+        if template_name == "default":
+            return message.content
+
+        if template_name not in self.template_env.list_templates():
+            raise ValueError(f"Unknown notification template: {template_name}")
+
+        context = {
+            str(key): self._sanitize_template_value(value)
+            for key, value in message.template_vars.items()
+            if key != "template"
+        }
+        return self.template_env.get_template(template_name).render(**context)
 
     def _load_templates(self) -> dict[str, str]:
         """Load message templates."""
@@ -543,12 +576,7 @@ System status: {{ system_status }}
                 )
 
             # Create text content
-            text_content = message.content
-            if message.template_vars:
-                template = self.template_env.get_template(
-                    message.template_vars.get("template", "default")
-                )
-                text_content = template.render(**message.template_vars)
+            text_content = self._render_template(message)
 
             msg.attach(MIMEText(text_content, "plain"))
 
@@ -610,12 +638,7 @@ System status: {{ system_status }}
             }
 
             # Format content for Slack
-            content = message.content
-            if message.template_vars:
-                template = self.template_env.get_template(
-                    message.template_vars.get("template", "default")
-                )
-                content = template.render(**message.template_vars)
+            content = self._render_template(message)
 
             slack_message = {
                 "username": slack_config.get("username", "Music Discovery Bot"),
@@ -677,12 +700,7 @@ System status: {{ system_status }}
         try:
             webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
             # Format content for Discord
-            content = message.content
-            if message.template_vars:
-                template = self.template_env.get_template(
-                    message.template_vars.get("template", "default")
-                )
-                content = template.render(**message.template_vars)
+            content = self._render_template(message)
 
             # Discord message format
             discord_message = {
@@ -766,10 +784,7 @@ System status: {{ system_status }}
 
             # Apply template if specified
             if message.template_vars:
-                template = self.template_env.get_template(
-                    message.template_vars.get("template", "default")
-                )
-                payload["formatted_content"] = template.render(**message.template_vars)
+                payload["formatted_content"] = self._render_template(message)
 
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
             timeout = webhook_config.get("timeout", 30)
@@ -807,12 +822,7 @@ System status: {{ system_status }}
 
             symbol = priority_symbols.get(message.priority, "📢")
 
-            content = message.content
-            if message.template_vars:
-                template = self.template_env.get_template(
-                    message.template_vars.get("template", "default")
-                )
-                content = template.render(**message.template_vars)
+            content = self._render_template(message)
 
             print(f"\n{'='*80}")
             print(f"{symbol} {message.title} ({message.priority.value.upper()})")

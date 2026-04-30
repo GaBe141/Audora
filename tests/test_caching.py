@@ -1,10 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
+
 import time
 
-from core.caching import (
-    LocalCacheBackend,
-)
+from core.caching import LocalCacheBackend, RedisCacheBackend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +122,38 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSerializationSecurity:
+    """Tests for Redis cache serialization safety."""
+
+    def _backend_without_init(self) -> RedisCacheBackend:
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_serializes_json_by_default(self, monkeypatch):
+        monkeypatch.delenv("AUDORA_CACHE_ALLOW_PICKLE", raising=False)
+        backend = self._backend_without_init()
+
+        serialized = backend._serialize({"artist": "Test", "scores": [1, 2, 3]})
+        envelope = json.loads(serialized.decode("utf-8"))
+        payload = json.loads(base64.b64decode(envelope["payload"]).decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert payload["format"] == "json"
+        assert backend._deserialize(serialized) == {"artist": "Test", "scores": [1, 2, 3]}
+
+    def test_rejects_legacy_pickle_without_explicit_opt_in(self, monkeypatch):
+        monkeypatch.delenv("AUDORA_CACHE_ALLOW_PICKLE", raising=False)
+        backend = self._backend_without_init()
+        payload = pickle.dumps({"unsafe": "legacy"})
+        signature = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
