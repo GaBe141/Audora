@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
 import time
 
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,36 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression coverage for safe Redis payload serialization."""
+
+    def test_serializes_json_compatible_values_without_pickle(self):
+        backend = object.__new__(RedisCacheBackend)
+        serialized = backend._serialize({"artist": "A", "scores": [1, 2, 3]})
+
+        envelope = json.loads(serialized.decode("utf-8"))
+        assert envelope["type"] == "json"
+        assert backend._deserialize(serialized) == {"artist": "A", "scores": [1, 2, 3]}
+
+    def test_rejects_legacy_pickle_payloads(self):
+        backend = object.__new__(RedisCacheBackend)
+        assert backend._deserialize(b"\x80\x04legacy-pickle") is None
+
+    def test_rejects_unsupported_object_types(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError, match="Unsupported Redis cache value type"):
+            backend._serialize(object())
+
+    def test_cache_keys_use_sha256(self):
+        manager = CacheManager(
+            backend=LocalCacheBackend(max_size=10),
+            key_prefix="audora_test",
+        )
+        args_digest = hashlib.sha256(json.dumps((1, 2), sort_keys=True).encode()).hexdigest()
+
+        cache_key = manager._build_cache_key("prefix", (1, 2), {})
+
+        assert cache_key == f"prefix:{args_digest}"
