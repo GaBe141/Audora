@@ -131,14 +131,14 @@ class TestRedisSafeSerialization:
 
     @staticmethod
     def _patch_redis(redis_client):
+        fake_redis = types.SimpleNamespace(
+            ConnectionError=ConnectionError,
+            Redis=MagicMock(return_value=redis_client),
+        )
         return (
             patch("core.caching.REDIS_AVAILABLE", True),
-            patch("core.caching.ConnectionPool", create=True),
-            patch(
-                "core.caching.redis",
-                types.SimpleNamespace(Redis=MagicMock(return_value=redis_client)),
-                create=True,
-            ),
+            patch("core.caching.ConnectionPool", MagicMock(), create=True),
+            patch("core.caching.redis", fake_redis, create=True),
         )
 
     def test_redis_serializes_json_without_pickle(self):
