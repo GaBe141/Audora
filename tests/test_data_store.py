@@ -107,3 +107,24 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportToCsvSecurity:
+    """Test export path restrictions."""
+
+    def test_export_to_csv_rejects_path_outside_export_dir(self, data_store, tmp_path, monkeypatch):
+        monkeypatch.setenv("AUDORA_EXPORT_DIR", str(tmp_path / "exports"))
+        with pytest.raises(ValueError, match="Export path must be inside"):
+            data_store.export_to_csv("trends", str(tmp_path / "outside.csv"))
+
+    def test_export_to_csv_writes_inside_export_dir(
+        self, data_store, sample_trends, tmp_path, monkeypatch
+    ):
+        export_dir = tmp_path / "exports"
+        monkeypatch.setenv("AUDORA_EXPORT_DIR", str(export_dir))
+        data_store.save_trends_bulk(sample_trends)
+
+        export_path = data_store.export_to_csv("trends", str(export_dir / "trends.csv"))
+
+        assert export_path == str((export_dir / "trends.csv").resolve())
+        assert (export_dir / "trends.csv").exists()

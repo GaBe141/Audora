@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
-"""Security validation and configuration setup for Spotify Insights."""
+"""Security validation and configuration setup for Audora."""
 
 import sys
-from pathlib import Path
 
-# Add src to path for imports
-src_path = Path(__file__).resolve().parent / "src"
-sys.path.insert(0, str(src_path))
-
-# Import after path modification
-from src.config import SecureConfig  # noqa: E402
+from core.config import SecureConfig
 
 
 def main():
     """Main security validation and setup routine."""
-    print("🔐 Spotify Insights - Security Configuration Validator")
+    print("Audora - Security Configuration Validator")
     print("=" * 60)
 
     # Initialize config manager
@@ -24,46 +18,46 @@ def main():
     config.setup_interactive()
 
     print("\n" + "=" * 60)
-    print("🔍 Configuration Validation")
+    print("Configuration Validation")
     print("=" * 60)
 
     # Validate all configurations
     status = config.validate_all_configs()
 
-    print("\n📊 Configuration Status:")
+    print("\nConfiguration Status:")
     print(f"{'Service':<15} {'Status':<12} {'Details'}")
     print("-" * 50)
 
     # Spotify status
     if status["spotify"]["configured"]:
         scopes = status["spotify"].get("scopes", [])
-        print(f"{'Spotify':<15} {'✅ Ready':<12} {len(scopes)} scopes configured")
+        print(f"{'Spotify':<15} {'Ready':<12} {len(scopes)} scopes configured")
         if len(scopes) > 3:
             print(f"{'':>27} Full access enabled")
     else:
         error = status["spotify"]["error"]
-        print(f"{'Spotify':<15} {'❌ Error':<12} {error}")
+        print(f"{'Spotify':<15} {'Error':<12} {error}")
 
     # Last.fm status
     if status["lastfm"]["configured"]:
-        print(f"{'Last.fm':<15} {'✅ Ready':<12} Global trends available")
+        print(f"{'Last.fm':<15} {'Ready':<12} Global trends available")
     else:
         error = status["lastfm"]["error"]
         if "not configured" in error:
-            print(f"{'Last.fm':<15} {'⚠️  Optional':<12} {error}")
+            print(f"{'Last.fm':<15} {'Optional':<12} {error}")
         else:
-            print(f"{'Last.fm':<15} {'❌ Error':<12} {error}")
+            print(f"{'Last.fm':<15} {'Error':<12} {error}")
 
     # AudioDB status
     if status["audiodb"]["configured"]:
         tier = status["audiodb"].get("tier", "unknown")
-        print(f"{'AudioDB':<15} {'✅ Ready':<12} {tier.title()} tier access")
+        print(f"{'AudioDB':<15} {'Ready':<12} {tier.title()} tier access")
     else:
         error = status["audiodb"]["error"]
-        print(f"{'AudioDB':<15} {'❌ Error':<12} {error}")
+        print(f"{'AudioDB':<15} {'Error':<12} {error}")
 
     print("\n" + "=" * 60)
-    print("🛡️  Security Checklist")
+    print("Security Checklist")
     print("=" * 60)
 
     # Security checklist
@@ -72,32 +66,32 @@ def main():
 
     # Check .env file exists
     if env_file.exists():
-        security_checks.append(("✅", ".env file exists"))
+        security_checks.append(("OK", ".env file exists"))
 
         # Check file permissions (Unix-like systems)
         if hasattr(env_file, "stat") and not sys.platform.startswith("win"):
             file_mode = oct(env_file.stat().st_mode)[-3:]
             if file_mode == "600":
-                security_checks.append(("✅", "File permissions are secure (600)"))
+                security_checks.append(("OK", "File permissions are secure (600)"))
             else:
                 security_checks.append(
-                    ("⚠️", f"File permissions too open ({file_mode}) - consider chmod 600")
+                    ("WARN", f"File permissions too open ({file_mode}) - consider chmod 600")
                 )
         else:
-            security_checks.append(("ℹ️", "File permissions check skipped (Windows)"))
+            security_checks.append(("INFO", "File permissions check skipped (Windows)"))
     else:
-        security_checks.append(("❌", ".env file missing"))
+        security_checks.append(("ERROR", ".env file missing"))
 
     # Check .gitignore
     gitignore_file = config.project_root / ".gitignore"
     if gitignore_file.exists():
         gitignore_content = gitignore_file.read_text(encoding="utf-8")
         if ".env" in gitignore_content:
-            security_checks.append(("✅", ".env files excluded from git"))
+            security_checks.append(("OK", ".env files excluded from git"))
         else:
-            security_checks.append(("⚠️", ".env not in .gitignore - credentials may be exposed"))
+            security_checks.append(("WARN", ".env not in .gitignore - credentials may be exposed"))
     else:
-        security_checks.append(("⚠️", ".gitignore missing"))
+        security_checks.append(("WARN", ".gitignore missing"))
 
     # Check for credential files in current directory
     credential_patterns = ["env_data", "*_keys", "*_secrets", "credentials.*"]
@@ -117,38 +111,38 @@ def main():
 
     if found_credentials:
         security_checks.append(
-            ("⚠️", f"Found potential credential files: {', '.join(found_credentials)}")
+            ("WARN", f"Found potential credential files: {', '.join(found_credentials)}")
         )
     else:
-        security_checks.append(("✅", "No exposed credential files found"))
+        security_checks.append(("OK", "No exposed credential files found"))
 
     for icon, message in security_checks:
         print(f"{icon} {message}")
 
     print("\n" + "=" * 60)
-    print("🚀 Next Steps")
+    print("Next Steps")
     print("=" * 60)
 
     if status["spotify"]["configured"]:
-        print("✅ Ready to run Spotify analysis!")
-        print("   Try: python -m src.main")
+        print("Ready to run Spotify analysis!")
+        print("   Try: python main.py --mode single")
 
         if status["lastfm"]["configured"]:
-            print("✅ Ready for global trend comparison!")
-            print("   Try: python -m src.lastfm_main")
+            print("Ready for global trend comparison!")
+            print("   Try: python -m core.lastfm_main")
         else:
-            print("💡 Optional: Configure Last.fm for global trend analysis")
+            print("Optional: Configure Last.fm for global trend analysis")
     else:
-        print("🔧 Configuration needed:")
+        print("Configuration needed:")
         print("   1. Add your Spotify API credentials to .env")
         print("   2. Get credentials from: https://developer.spotify.com/dashboard")
         print("   3. Re-run this script to validate")
 
-    print("\n📚 Security Best Practices:")
-    print("   • Never commit .env files to version control")
-    print("   • Regenerate API keys if they are ever exposed")
-    print("   • Use restrictive file permissions (chmod 600) on Unix systems")
-    print("   • Regularly audit your .gitignore file")
+    print("\nSecurity Best Practices:")
+    print("   - Never commit .env files to version control")
+    print("   - Regenerate API keys if they are ever exposed")
+    print("   - Use restrictive file permissions (chmod 600) on Unix systems")
+    print("   - Regularly audit your .gitignore file")
 
     # Return exit code based on Spotify config (required)
     return 0 if status["spotify"]["configured"] else 1

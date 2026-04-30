@@ -4,7 +4,9 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
+import ipaddress
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,9 +15,17 @@ import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+_FALSE_ENV_VALUES = {"0", "false", "no", "off"}
+
+
+def _admin_token_configured() -> bool:
+    return bool(os.getenv("AUDORA_GUI_ADMIN_TOKEN"))
+
 
 app = dash.Dash(
     __name__,
@@ -47,6 +57,13 @@ _dashboard_tab = dbc.Tab(
     tab_id="tab-dashboard",
     children=[
         dcc.Interval(id="auto-refresh", interval=30_000, n_intervals=0),
+        dbc.Alert(
+            "Admin actions require local access.",
+            id="admin-security-alert",
+            color="warning",
+            className="py-2 small",
+            is_open=True,
+        ),
         dbc.Row([
             dbc.Col(_stat_card("stat-tracks", "Unique Tracks (7d)"), width=4),
             dbc.Col(_stat_card("stat-score", "Avg Viral Score"), width=4),
@@ -345,6 +362,7 @@ app.layout = dbc.Container(
 
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
+    _require_admin_action_allowed()
     try:
         proc = subprocess.Popen(
             args,
@@ -362,6 +380,30 @@ def _run_command(args: list[str]) -> tuple[str, str]:
         return "Done (timeout)", "(process timed out)"
     except Exception as e:
         return "Error", str(e)
+
+
+def _is_loopback_request() -> bool:
+    """Return whether the current Dash callback request originated locally."""
+    try:
+        return ipaddress.ip_address(request.remote_addr or "").is_loopback
+    except ValueError:
+        return False
+
+
+def _require_admin_action_allowed() -> None:
+    """Restrict GUI mutating/admin actions to local requests or token auth."""
+    if os.getenv("AUDORA_GUI_ENABLE_ADMIN_ACTIONS", "1").strip().lower() in _FALSE_ENV_VALUES:
+        raise PermissionError("GUI admin actions are disabled by AUDORA_GUI_ENABLE_ADMIN_ACTIONS")
+    if _is_loopback_request():
+        return
+
+    configured_token = os.getenv("AUDORA_GUI_ADMIN_TOKEN")
+    provided_token = request.headers.get("X-Audora-Admin-Token", "")
+    if configured_token and provided_token == configured_token:
+        return
+    if configured_token:
+        raise PermissionError("Remote GUI admin actions require X-Audora-Admin-Token")
+    raise PermissionError("GUI admin actions are only allowed from localhost by default")
 
 
 def _get_data_store():
@@ -392,16 +434,19 @@ def run_action(
     _validate_clicks,
     demo_value,
 ):
-    triggered = ctx.triggered_id
-    if triggered == "btn-discovery":
-        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
-    if triggered == "btn-demo":
-        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
-    if triggered == "btn-setup":
-        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
-    if triggered == "btn-validate":
-        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--validate"])
-    raise dash.exceptions.PreventUpdate
+    try:
+        triggered = ctx.triggered_id
+        if triggered == "btn-discovery":
+            return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
+        if triggered == "btn-demo":
+            return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
+        if triggered == "btn-setup":
+            return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
+        if triggered == "btn-validate":
+            return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--validate"])
+        raise dash.exceptions.PreventUpdate
+    except PermissionError as e:
+        return "Blocked", str(e)
 
 
 @app.callback(
@@ -586,6 +631,7 @@ def export_csv(_n, table_data):
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
     try:
+        _require_admin_action_allowed()
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
@@ -621,6 +667,7 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         if not url:
             return "No URL"
         try:
+            _require_admin_action_allowed()
             import asyncio
             from core.notification_service import (
                 EnhancedNotificationService,

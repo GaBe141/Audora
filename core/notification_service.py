@@ -84,6 +84,14 @@ class EnhancedNotificationService:
     - Delivery confirmation
     - Analytics and reporting
     """
+    _SENSITIVE_CONFIG_KEYS = {
+        "authorization",
+        "api_key",
+        "api_secret",
+        "password",
+        "secret",
+        "token",
+    }
 
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
@@ -181,6 +189,18 @@ class EnhancedNotificationService:
 
         return default_config
 
+    def _remove_persistent_secrets(self, value: Any) -> Any:
+        """Return a config copy with secrets omitted before disk persistence."""
+        if isinstance(value, dict):
+            return {
+                key: self._remove_persistent_secrets(item)
+                for key, item in value.items()
+                if key.lower() not in self._SENSITIVE_CONFIG_KEYS
+            }
+        if isinstance(value, list):
+            return [self._remove_persistent_secrets(item) for item in value]
+        return value
+
     def save_config(self, path: str = "config/notification_config.json") -> None:
         """Persist the current channel configuration to a JSON file.
 
@@ -192,7 +212,9 @@ class EnhancedNotificationService:
         # Only save channel-specific sections (not internal runtime state)
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = self._remove_persistent_secrets(
+            {k: self.config[k] for k in saveable_keys if k in self.config}
+        )
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
