@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+from unittest.mock import Mock
+
+import pandas as pd
+import pytest
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +125,69 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ("arg",), {"kw": "value"})
+
+        parts = key.split(":")
+        assert parts[0] == "prefix"
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+
+
+class TestRedisCacheSerialization:
+    """Security-focused tests for Redis cache serialization."""
+
+    def _backend_without_init(self):
+        return RedisCacheBackend.__new__(RedisCacheBackend)
+
+    def test_json_serialization_roundtrip(self):
+        backend = self._backend_without_init()
+        value = {"track": "song", "score": 0.98, "tags": ["viral"]}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+        envelope = json.loads(serialized.decode("utf-8"))
+        assert envelope["type"] == "json"
+
+    def test_bytes_serialization_roundtrip(self):
+        backend = self._backend_without_init()
+
+        assert backend._deserialize(backend._serialize(b"audora")) == b"audora"
+
+    def test_dataframe_serialization_roundtrip(self):
+        backend = self._backend_without_init()
+        frame = pd.DataFrame({"track": ["one", "two"], "score": [1, 2]})
+
+        restored = backend._deserialize(backend._serialize(frame))
+
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_pickle_payload_without_loading(self):
+        backend = self._backend_without_init()
+
+        assert backend._deserialize(b"\x80\x04}q\x00.") is None
+
+    def test_rejects_unsupported_object_types(self):
+        backend = self._backend_without_init()
+
+        with pytest.raises(TypeError, match="JSON-serializable"):
+            backend._serialize(object())
+
+    def test_deletes_malformed_redis_payload_on_get(self):
+        backend = self._backend_without_init()
+        backend._client = Mock()
+        backend._client.get.return_value = b"not-json"
+
+        assert backend.get("bad-key") is None
+        backend._client.delete.assert_called_once_with("bad-key")
+
+    def test_cache_manager_set_ignores_unsupported_redis_value(self):
+        backend = self._backend_without_init()
+        backend._client = Mock()
+
+        manager = CacheManager(backend=backend)
+        manager.set("unsupported", object())
+
+        backend._client.set.assert_not_called()
