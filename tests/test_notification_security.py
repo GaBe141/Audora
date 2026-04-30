@@ -2,7 +2,7 @@
 
 import pytest
 
-from core.notification_service import EnhancedNotificationService
+from core.notification_service import EnhancedNotificationService, NotificationMessage
 
 
 class TestWebhookUrlValidation:
@@ -23,7 +23,76 @@ class TestWebhookUrlValidation:
         with pytest.raises(ValueError, match="private or restricted"):
             svc._validate_webhook_url("https://10.0.0.1/webhook")
 
-    def test_allows_private_ip_when_explicitly_enabled(self):
+    def test_rejects_private_ip_even_when_env_flag_is_set(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "true")
         svc = EnhancedNotificationService()
-        url = "https://10.0.0.1/webhook"
-        assert svc._validate_webhook_url(url, allow_private=True) == url
+        with pytest.raises(ValueError, match="private or restricted"):
+            svc._validate_webhook_url("https://10.0.0.1/webhook")
+
+
+class _MockResponse:
+    def __init__(self, status=200):
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def text(self):
+        return ""
+
+
+class _MockSession:
+    post_calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def post(self, *args, **kwargs):
+        self.post_calls.append((args, kwargs))
+        return _MockResponse()
+
+
+class TestWebhookTransportSecurity:
+    """Validate outbound webhook transport hardening."""
+
+    @pytest.mark.asyncio
+    async def test_slack_post_disables_redirects(self, monkeypatch):
+        _MockSession.post_calls = []
+        monkeypatch.setattr("core.notification_service.aiohttp.ClientSession", _MockSession)
+        svc = EnhancedNotificationService()
+        svc.config["slack"]["webhook_url"] = "https://example.com/slack"
+
+        result = await svc._send_slack(NotificationMessage(title="t", content="c"))
+
+        assert result["success"] is True
+        assert _MockSession.post_calls[0][1]["allow_redirects"] is False
+
+    @pytest.mark.asyncio
+    async def test_discord_post_disables_redirects(self, monkeypatch):
+        _MockSession.post_calls = []
+        monkeypatch.setattr("core.notification_service.aiohttp.ClientSession", _MockSession)
+        svc = EnhancedNotificationService()
+        svc.config["discord"]["webhook_url"] = "https://example.com/discord"
+
+        result = await svc._send_discord(NotificationMessage(title="t", content="c"))
+
+        assert result["success"] is True
+        assert _MockSession.post_calls[0][1]["allow_redirects"] is False
+
+    @pytest.mark.asyncio
+    async def test_custom_webhook_post_disables_redirects(self, monkeypatch):
+        _MockSession.post_calls = []
+        monkeypatch.setattr("core.notification_service.aiohttp.ClientSession", _MockSession)
+        svc = EnhancedNotificationService()
+        svc.config["webhook"]["url"] = "https://example.com/webhook"
+
+        result = await svc._send_webhook(NotificationMessage(title="t", content="c"))
+
+        assert result["success"] is True
+        assert _MockSession.post_calls[0][1]["allow_redirects"] is False
