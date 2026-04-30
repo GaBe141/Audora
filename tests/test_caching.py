@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +125,71 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis cache payload serialization safety."""
+
+    def _backend(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_json_compatible_value_round_trips(self):
+        backend = self._backend()
+        value = {"track": "Song", "score": 98, "tags": ("viral", "pop")}
+
+        restored = backend._deserialize(backend._serialize(value))
+
+        assert restored == {"track": "Song", "score": 98, "tags": ["viral", "pop"]}
+
+    def test_bytes_round_trip(self):
+        backend = self._backend()
+
+        restored = backend._deserialize(backend._serialize(b"audio-bytes"))
+
+        assert restored == b"audio-bytes"
+
+    def test_dataframe_round_trip(self):
+        pd = pytest.importorskip("pandas")
+        backend = self._backend()
+        df = pd.DataFrame([{"track": "Song", "score": 98}])
+
+        restored = backend._deserialize(backend._serialize(df))
+
+        pd.testing.assert_frame_equal(restored, df)
+
+    def test_rejects_legacy_or_malformed_payload_without_unpickling(self):
+        backend = self._backend()
+
+        assert backend._deserialize(b"not-json") is None
+        assert backend._deserialize(json.dumps({"v": 1, "payload": "legacy"}).encode()) is None
+
+    def test_rejects_unsigned_payload(self):
+        backend = self._backend()
+        payload = json.dumps({"type": "json", "data": {"safe": True}}).encode()
+        envelope = {
+            "v": 2,
+            "alg": "HMAC-SHA256",
+            "sig": "invalid",
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        assert backend._deserialize(json.dumps(envelope).encode()) is None
+
+    def test_rejects_unsupported_object_type(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            backend._serialize(object())
+
+    def test_valid_signature_for_json_payload(self):
+        backend = self._backend()
+        serialized = backend._serialize({"safe": True})
+        envelope = json.loads(serialized.decode("utf-8"))
+        payload = base64.b64decode(envelope["payload"].encode("ascii"), validate=True)
+        expected_sig = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+
+        assert envelope["v"] == 2
+        assert envelope["alg"] == "HMAC-SHA256"
+        assert hmac.compare_digest(envelope["sig"], expected_sig)
