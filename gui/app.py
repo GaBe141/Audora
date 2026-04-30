@@ -588,21 +588,28 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
     try:
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
+        allow_private = svc._allow_private_webhooks()
         if slack_url:
-            svc.config["slack"]["webhook_url"] = slack_url
+            svc.config["slack"]["webhook_url"] = svc._validate_webhook_url(
+                slack_url, allow_private=False
+            )
         if discord_url:
-            svc.config["discord"]["webhook_url"] = discord_url
+            svc.config["discord"]["webhook_url"] = svc._validate_webhook_url(
+                discord_url, allow_private=False
+            )
         if webhook_url:
-            svc.config["webhook"]["url"] = webhook_url
+            svc.config["webhook"]["url"] = svc._validate_webhook_url(
+                webhook_url, allow_private=allow_private
+            )
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
         if smtp_port:
             svc.config["email"]["port"] = int(smtp_port)
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
-        if smtp_pass:
-            svc.config["email"]["password"] = smtp_pass
         svc.save_config()
+        if smtp_pass:
+            return "Saved. SMTP passwords must be provided via SMTP_PASSWORD and were not written to disk."
         return "Saved"
     except Exception as e:
         return f"Error: {e}"
@@ -629,6 +636,8 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
                 NotificationPriority,
             )
             svc = EnhancedNotificationService()
+            allow_private = svc._allow_private_webhooks() if channel_key == "webhook" else False
+            url = svc._validate_webhook_url(url, allow_private=allow_private)
             svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
             channel = getattr(NotificationChannel, channel_enum_name)
             msg = NotificationMessage(

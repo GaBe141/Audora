@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
+import pickle
+
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,43 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security tests for Redis cache payload serialization."""
+
+    def _backend_without_connection(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_serializes_json_without_pickle(self):
+        backend = self._backend_without_connection()
+        value = {"artist": "Example", "score": 99, "tags": ["pop"]}
+
+        serialized = backend._serialize(value)
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["payload"] == {"format": "json", "value": value}
+        assert backend._deserialize(serialized) == value
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._backend_without_connection()
+        payload = pickle.dumps({"unsafe": "legacy"})
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "ignored",
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_tampered_payload(self):
+        backend = self._backend_without_connection()
+        serialized = backend._serialize({"score": 10})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"]["value"]["score"] = 999
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
