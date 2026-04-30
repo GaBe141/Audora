@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,59 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis cache serialization without unsafe pickle loading."""
+
+    def test_json_round_trip_for_supported_types(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        frame = pd.DataFrame({"track": ["a", "b"], "score": [1.5, 2.5]})
+        value = {
+            "name": "audora",
+            "active": True,
+            "count": 2,
+            "payload": b"safe",
+            "items": (1, "two"),
+            "frame": frame,
+        }
+
+        serialized = backend._serialize(value)
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["format"] == "json"
+        assert "payload" not in envelope
+
+        restored = backend._deserialize(serialized)
+        assert restored["name"] == "audora"
+        assert restored["payload"] == b"safe"
+        assert restored["items"] == (1, "two")
+        pd.testing.assert_frame_equal(restored["frame"], frame)
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        legacy_envelope = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "unused",
+                "payload": "gASVBAAAAAAAAAB9lC4=",
+            }
+        ).encode("utf-8")
+
+        assert backend._deserialize(legacy_envelope) is None
+
+    def test_rejects_unsupported_object_types(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError, match="Unsupported Redis cache value type"):
+            backend._serialize(object())
+
+    def test_cache_key_uses_sha256_digest(self):
+        cache = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+        key = cache._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        digests = key.split(":")[1:]
+
+        assert digests
+        assert all(len(digest) == 64 for digest in digests)

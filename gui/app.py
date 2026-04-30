@@ -600,9 +600,9 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
             svc.config["email"]["port"] = int(smtp_port)
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
-        if smtp_pass:
-            svc.config["email"]["password"] = smtp_pass
         svc.save_config()
+        if smtp_pass:
+            return "Saved. SMTP passwords are not stored here; set SMTP_PASSWORD in the environment."
         return "Saved"
     except Exception as e:
         return f"Error: {e}"

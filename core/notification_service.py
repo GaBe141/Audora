@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -17,12 +18,14 @@ from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from enum import Enum
+from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+from jinja2.sandbox import SandboxedEnvironment  # type: ignore[import-untyped]
 
 
 class NotificationPriority(Enum):
@@ -93,7 +96,7 @@ class EnhancedNotificationService:
         self.failed_deliveries: list[dict[str, Any]] = []
 
         # Initialize template engine with autoescape enabled for security
-        self.template_env = jinja2.Environment(
+        self.template_env = SandboxedEnvironment(
             loader=jinja2.DictLoader(self._load_templates()),
             autoescape=jinja2.select_autoescape(
                 enabled_extensions=("html", "xml", "jinja2"), default_for_string=True
@@ -189,10 +192,20 @@ class EnhancedNotificationService:
         """
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        # Only save channel-specific sections (not internal runtime state) and
+        # never persist secrets loaded from the environment.
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
+        to_save = self._redact_config_for_save(
+            {k: self.config[k] for k in saveable_keys if k in self.config}
+        )
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -201,6 +214,29 @@ class EnhancedNotificationService:
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _redact_config_for_save(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Return a copy of config with credential-bearing values removed."""
+        redacted = json.loads(json.dumps(config))
+
+        email_config = redacted.get("email")
+        if isinstance(email_config, dict):
+            email_config.pop("password", None)
+
+        webhook_config = redacted.get("webhook")
+        if isinstance(webhook_config, dict):
+            headers = webhook_config.get("headers")
+            if isinstance(headers, dict):
+                for header in list(headers):
+                    if header.lower() in {"authorization", "proxy-authorization", "x-api-key"}:
+                        headers.pop(header, None)
+
+        sms_config = redacted.get("sms")
+        if isinstance(sms_config, dict):
+            sms_config.pop("api_key", None)
+            sms_config.pop("api_secret", None)
+
+        return redacted
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
@@ -233,6 +269,8 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
@@ -262,6 +300,23 @@ class EnhancedNotificationService:
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    def _render_template(self, message: NotificationMessage) -> str:
+        """Render a whitelisted notification template for a message."""
+        if not message.template_vars:
+            return message.content
+
+        template_name = message.template_vars.get("template")
+        if not isinstance(template_name, str):
+            raise ValueError("Notification template name must be a string")
+
+        if template_name not in self.template_env.list_templates():
+            raise ValueError(f"Unknown notification template: {template_name}")
+
+        template_vars = {
+            key: value for key, value in message.template_vars.items() if key != "template"
+        }
+        return self.template_env.get_template(template_name).render(**template_vars)
 
     def _load_templates(self) -> dict[str, str]:
         """Load message templates."""
@@ -543,17 +598,12 @@ System status: {{ system_status }}
                 )
 
             # Create text content
-            text_content = message.content
-            if message.template_vars:
-                template = self.template_env.get_template(
-                    message.template_vars.get("template", "default")
-                )
-                text_content = template.render(**message.template_vars)
+            text_content = self._render_template(message)
 
             msg.attach(MIMEText(text_content, "plain"))
 
             # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            html_content = escape(text_content).replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
             # Add attachments
@@ -570,17 +620,23 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
-            # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            if (
+                email_config.get("username")
+                and email_config.get("password")
+                and not email_config.get("use_tls", True)
+            ):
+                return {"success": False, "error": "Refusing SMTP authentication without TLS"}
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+            with smtplib.SMTP(
+                email_config["smtp_server"], email_config.get("port", 587), timeout=30
+            ) as server:
+                if email_config.get("use_tls", True):
+                    server.starttls(context=ssl.create_default_context())
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"
@@ -610,12 +666,7 @@ System status: {{ system_status }}
             }
 
             # Format content for Slack
-            content = message.content
-            if message.template_vars:
-                template = self.template_env.get_template(
-                    message.template_vars.get("template", "default")
-                )
-                content = template.render(**message.template_vars)
+            content = self._render_template(message)
 
             slack_message = {
                 "username": slack_config.get("username", "Music Discovery Bot"),
@@ -650,7 +701,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -677,12 +728,7 @@ System status: {{ system_status }}
         try:
             webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
             # Format content for Discord
-            content = message.content
-            if message.template_vars:
-                template = self.template_env.get_template(
-                    message.template_vars.get("template", "default")
-                )
-                content = template.render(**message.template_vars)
+            content = self._render_template(message)
 
             # Discord message format
             discord_message = {
@@ -717,7 +763,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -766,10 +812,7 @@ System status: {{ system_status }}
 
             # Apply template if specified
             if message.template_vars:
-                template = self.template_env.get_template(
-                    message.template_vars.get("template", "default")
-                )
-                payload["formatted_content"] = template.render(**message.template_vars)
+                payload["formatted_content"] = self._render_template(message)
 
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
             timeout = webhook_config.get("timeout", 30)
@@ -777,7 +820,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
@@ -807,12 +854,7 @@ System status: {{ system_status }}
 
             symbol = priority_symbols.get(message.priority, "📢")
 
-            content = message.content
-            if message.template_vars:
-                template = self.template_env.get_template(
-                    message.template_vars.get("template", "default")
-                )
-                content = template.render(**message.template_vars)
+            content = self._render_template(message)
 
             print(f"\n{'='*80}")
             print(f"{symbol} {message.title} ({message.priority.value.upper()})")
