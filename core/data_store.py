@@ -5,6 +5,7 @@ Handles trending data, viral predictions, and cross-platform analysis.
 
 import json
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -78,6 +79,7 @@ class EnhancedMusicDataStore:
         self.db_path = db_path
         self.backup_dir = Path(backup_dir)
         self.backup_dir.mkdir(exist_ok=True)
+        self.export_dir = Path(os.getenv("AUDORA_EXPORT_DIR", "data/exports")).resolve()
         self.logger = logging.getLogger(__name__)
 
         # Initialize cache
@@ -958,13 +960,17 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
+            export_path = Path(filepath).resolve()
+            if not export_path.is_relative_to(self.export_dir):
+                raise ValueError(f"Export path must be within {self.export_dir}")
+
             # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            export_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(export_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {export_path}")
 
-        return filepath
+        return str(export_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""

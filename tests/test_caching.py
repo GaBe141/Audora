@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +86,49 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+
+class TestRedisCacheSerialization:
+    """Security tests for Redis cache payload serialization."""
+
+    def test_json_serializable_values_round_trip(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        payload = {"track": "Example", "scores": [1, 2.5], "active": True, "meta": None}
+        serialized = backend._serialize(payload)
+
+        assert backend._deserialize(serialized) == payload
+        envelope = json.loads(serialized.decode("utf-8"))
+        assert envelope["fmt"] == "json"
+        assert envelope["v"] == 2
+
+    def test_rejects_legacy_pickle_envelope_without_loading(self, monkeypatch):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        legacy_payload = pickle.dumps({"unsafe": True}, protocol=pickle.HIGHEST_PROTOCOL)
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": hmac.new(backend._signing_key, legacy_payload, hashlib.sha256).hexdigest(),
+            "payload": base64.b64encode(legacy_payload).decode("ascii"),
+        }
+
+        def fail_if_called(_payload):
+            raise AssertionError("pickle.loads must not be called")
+
+        monkeypatch.setattr(pickle, "loads", fail_if_called)
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_tampered_json_payload(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        serialized = backend._serialize({"safe": True})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"] = base64.b64encode(b'{"safe":false}').decode("ascii")
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
 
 
 class TestCachedDecorator:

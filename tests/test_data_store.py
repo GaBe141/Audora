@@ -107,3 +107,22 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestCsvExportSecurity:
+    """Test export path restrictions for CSV exports."""
+
+    def test_export_to_csv_allows_paths_under_export_dir(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        export_path = data_store.export_dir / "trends.csv"
+
+        result = data_store.export_to_csv("trends", str(export_path))
+
+        assert result == str(export_path)
+        assert export_path.exists()
+
+    def test_export_to_csv_rejects_paths_outside_export_dir(self, data_store):
+        outside_path = data_store.export_dir.parent / "outside.csv"
+
+        with pytest.raises(ValueError, match="Export path must be within"):
+            data_store.export_to_csv("trends", str(outside_path))
