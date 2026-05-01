@@ -4,6 +4,7 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
@@ -23,6 +24,12 @@ from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+
+
+WEBHOOK_TIMEOUT_SECONDS = 10
+WEBHOOK_MAX_TIMEOUT_SECONDS = 30
+SLACK_WEBHOOK_HOSTS = frozenset({"hooks.slack.com"})
+DISCORD_WEBHOOK_HOSTS = frozenset({"discord.com", "discordapp.com"})
 
 
 class NotificationPriority(Enum):
@@ -254,6 +261,23 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _webhook_timeout(self, configured_timeout: Any = None) -> aiohttp.ClientTimeout:
+        """Return a bounded timeout for outbound webhook calls."""
+        try:
+            timeout = float(configured_timeout or WEBHOOK_TIMEOUT_SECONDS)
+        except (TypeError, ValueError):
+            timeout = WEBHOOK_TIMEOUT_SECONDS
+
+        timeout = max(1.0, min(timeout, WEBHOOK_MAX_TIMEOUT_SECONDS))
+        return aiohttp.ClientTimeout(total=timeout)
+
+    def _webhook_session(self, configured_timeout: Any = None) -> aiohttp.ClientSession:
+        """Create a webhook session that cannot follow redirects to internal networks."""
+        return aiohttp.ClientSession(
+            timeout=self._webhook_timeout(configured_timeout),
+            raise_for_status=False,
+        )
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -552,8 +576,8 @@ System status: {{ system_status }}
 
             msg.attach(MIMEText(text_content, "plain"))
 
-            # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            # Add HTML version with escaped content to avoid script injection in email clients.
+            html_content = html.escape(text_content).replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
             # Add attachments
@@ -649,8 +673,8 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                self._webhook_session() as session,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -716,8 +740,8 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                self._webhook_session() as session,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -772,12 +796,15 @@ System status: {{ system_status }}
                 payload["formatted_content"] = template.render(**message.template_vars)
 
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
-            timeout = webhook_config.get("timeout", 30)
+            timeout = webhook_config.get("timeout")
 
             async with (
-                aiohttp.ClientSession() as session,
+                self._webhook_session(timeout) as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
