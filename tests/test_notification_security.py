@@ -118,7 +118,7 @@ class TestNotificationTransportSecurity:
         assert captured_kwargs["allow_redirects"] is False
         assert result == {"success": False, "error": "Redirect responses are not allowed"}
 
-    def test_smtp_starttls_uses_validating_ssl_context(self):
+    def test_smtp_starttls_uses_validating_ssl_context(self, monkeypatch):
         contexts = []
 
         class FakeSMTP:

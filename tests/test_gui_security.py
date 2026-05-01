@@ -1,6 +1,8 @@
 """Security tests for sensitive Dash GUI callbacks."""
 
-from gui import app as gui_app
+import importlib
+
+gui_app = importlib.import_module("gui.app")
 
 
 class TestGuiLocalRequestGuard:
