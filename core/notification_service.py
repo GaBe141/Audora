@@ -8,8 +8,8 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta

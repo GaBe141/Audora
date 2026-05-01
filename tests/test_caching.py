@@ -7,7 +7,6 @@ import pandas as pd
 import pytest
 
 from core.caching import (
-    CacheManager,
     LocalCacheBackend,
     RedisCacheBackend,
 )
@@ -136,12 +135,15 @@ class TestRedisCacheSerialization:
     """Regression tests for Redis cache serialization safety."""
 
     def _backend(self):
-        with patch("core.caching.REDIS_AVAILABLE", True), patch("core.caching.ConnectionPool"):
-            with patch("core.caching.redis.Redis") as redis_cls:
-                client = MagicMock()
-                client.ping.return_value = True
-                redis_cls.return_value = client
-                backend = RedisCacheBackend()
+        with (
+            patch("core.caching.REDIS_AVAILABLE", True),
+            patch("core.caching.ConnectionPool"),
+            patch("core.caching.redis.Redis") as redis_cls,
+        ):
+            client = MagicMock()
+            client.ping.return_value = True
+            redis_cls.return_value = client
+            backend = RedisCacheBackend()
         return backend, client
 
     def test_json_compatible_values_round_trip(self):

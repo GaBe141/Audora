@@ -1,5 +1,6 @@
 """Security tests for notification webhook URL validation."""
 
+import asyncio
 import ssl
 from unittest.mock import MagicMock, patch
 
@@ -73,11 +74,10 @@ class _MockSession:
         return _MockResponse(status=302, body="redirect")
 
 
-@pytest.mark.asyncio
 class TestWebhookTransportSecurity:
     """Validate outbound notification transport hardening."""
 
-    async def test_custom_webhook_disables_and_rejects_redirects(self):
+    def test_custom_webhook_disables_and_rejects_redirects(self):
         svc = EnhancedNotificationService()
         svc.config["webhook"]["url"] = "https://example.com/webhook"
         post_calls = []
@@ -92,12 +92,12 @@ class TestWebhookTransportSecurity:
             patch.object(svc, "_validate_webhook_url", return_value="https://example.com/webhook"),
             patch.object(aiohttp, "ClientSession", return_value=_MockSession(post_calls)),
         ):
-            result = await svc._send_webhook(message)
+            result = asyncio.run(svc._send_webhook(message))
 
         assert result == {"success": False, "error": "Webhook redirects are not allowed"}
         assert post_calls[0]["allow_redirects"] is False
 
-    async def test_slack_disables_redirects(self):
+    def test_slack_disables_redirects(self):
         svc = EnhancedNotificationService()
         svc.config["slack"]["webhook_url"] = "https://example.com/slack"
         post_calls = []
@@ -112,12 +112,12 @@ class TestWebhookTransportSecurity:
             patch.object(svc, "_validate_webhook_url", return_value="https://example.com/slack"),
             patch.object(aiohttp, "ClientSession", return_value=_MockSession(post_calls)),
         ):
-            result = await svc._send_slack(message)
+            result = asyncio.run(svc._send_slack(message))
 
         assert result == {"success": False, "error": "Webhook redirects are not allowed"}
         assert post_calls[0]["allow_redirects"] is False
 
-    async def test_discord_disables_redirects(self):
+    def test_discord_disables_redirects(self):
         svc = EnhancedNotificationService()
         svc.config["discord"]["webhook_url"] = "https://example.com/discord"
         post_calls = []
@@ -132,7 +132,7 @@ class TestWebhookTransportSecurity:
             patch.object(svc, "_validate_webhook_url", return_value="https://example.com/discord"),
             patch.object(aiohttp, "ClientSession", return_value=_MockSession(post_calls)),
         ):
-            result = await svc._send_discord(message)
+            result = asyncio.run(svc._send_discord(message))
 
         assert result == {"success": False, "error": "Webhook redirects are not allowed"}
         assert post_calls[0]["allow_redirects"] is False
@@ -141,8 +141,7 @@ class TestWebhookTransportSecurity:
 class TestSmtpTransportSecurity:
     """Validate SMTP credentials are only sent over verified TLS."""
 
-    @pytest.mark.asyncio
-    async def test_refuses_smtp_auth_without_tls(self):
+    def test_refuses_smtp_auth_without_tls(self):
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -161,14 +160,13 @@ class TestSmtpTransportSecurity:
         )
 
         with patch("core.notification_service.smtplib.SMTP") as smtp:
-            result = await svc._send_email(message)
+            result = asyncio.run(svc._send_email(message))
 
         smtp.assert_not_called()
         assert result["success"] is False
         assert "without TLS" in result["error"]
 
-    @pytest.mark.asyncio
-    async def test_starttls_uses_verified_ssl_context(self):
+    def test_starttls_uses_verified_ssl_context(self):
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -188,7 +186,7 @@ class TestSmtpTransportSecurity:
         )
 
         with patch("core.notification_service.smtplib.SMTP", return_value=server):
-            result = await svc._send_email(message)
+            result = asyncio.run(svc._send_email(message))
 
         assert result["success"] is True
         context = server.starttls.call_args.kwargs["context"]
