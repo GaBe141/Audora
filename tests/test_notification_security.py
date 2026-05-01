@@ -2,7 +2,12 @@
 
 import pytest
 
-from core.notification_service import EnhancedNotificationService
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
 
 
 class TestWebhookUrlValidation:
@@ -23,7 +28,52 @@ class TestWebhookUrlValidation:
         with pytest.raises(ValueError, match="private or restricted"):
             svc._validate_webhook_url("https://10.0.0.1/webhook")
 
-    def test_allows_private_ip_when_explicitly_enabled(self):
+    def test_private_ip_cannot_be_bypassed(self):
         svc = EnhancedNotificationService()
-        url = "https://10.0.0.1/webhook"
-        assert svc._validate_webhook_url(url, allow_private=True) == url
+        with pytest.raises(ValueError, match="private or restricted"):
+            svc._validate_webhook_url("https://10.0.0.1/webhook")
+
+    @pytest.mark.asyncio
+    async def test_custom_webhook_disables_redirects(self, monkeypatch):
+        captured_kwargs = {}
+
+        class FakeResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, *args, **kwargs):
+                captured_kwargs.update(kwargs)
+                return FakeResponse()
+
+        svc = EnhancedNotificationService()
+        svc.config["webhook"]["url"] = "https://example.com/webhook"
+        monkeypatch.setattr("core.notification_service.aiohttp.ClientSession", FakeSession)
+        monkeypatch.setattr(
+            svc,
+            "_validate_webhook_url",
+            lambda url: url,
+        )
+
+        message = NotificationMessage(
+            title="Test",
+            content="Body",
+            priority=NotificationPriority.LOW,
+            channels=[NotificationChannel.WEBHOOK],
+        )
+
+        result = await svc._send_webhook(message)
+
+        assert result["success"] is True
+        assert captured_kwargs["allow_redirects"] is False
