@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
-from integrations.musicbrainz_integration import MusicBrainzAPI
+from integrations.musicbrainz_integration import MusicBrainzAPI, REQUEST_TIMEOUT_SECONDS
 
 
 class TestMusicBrainzAPISuccess:
@@ -23,6 +23,8 @@ class TestMusicBrainzAPISuccess:
         }
         with patch.object(api.session, "get", return_value=mock_response):
             result = api.search_artist("Test Artist")
+        api.session.get.assert_called_once()
+        assert api.session.get.call_args.kwargs["timeout"] == REQUEST_TIMEOUT_SECONDS
         assert result is not None
         assert result["name"] == "Test Artist"
         assert result["id"] == "mbid-123"

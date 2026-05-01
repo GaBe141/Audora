@@ -1,5 +1,6 @@
 """AudioDB API integration for rich artist profiles and comprehensive music metadata."""
 
+import os
 import time
 from typing import Any
 
@@ -9,6 +10,7 @@ import requests
 # Note: config import is optional for standalone execution
 
 BASE_URL = "https://www.theaudiodb.com/api/v1/json"
+REQUEST_TIMEOUT_SECONDS = 10
 
 
 class AudioDBAPI:
@@ -41,7 +43,7 @@ class AudioDBAPI:
             url = f"{BASE_URL}/123/{endpoint}"  # Free API key is 123
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -245,14 +247,7 @@ class AudioDBAPI:
 def get_audiodb_client() -> AudioDBAPI:
     """Get AudioDB API client with secure configuration."""
     try:
-        # Try to load configuration if available
-        import os
-        import sys
-        from pathlib import Path
-
-        # Add core directory to path to find config
-        sys.path.append(str(Path(__file__).parent.parent / "core"))
-        from config import SecureConfig
+        from core.config import SecureConfig
 
         # Initialize config manager but don't store unused variable
         SecureConfig()
@@ -261,8 +256,6 @@ def get_audiodb_client() -> AudioDBAPI:
         return AudioDBAPI(api_key)
     except ImportError:
         # Fallback for standalone execution
-        import os
-
         api_key = os.getenv("AUDIODB_API_KEY", "123")  # Default to free key
         return AudioDBAPI(api_key)
     except Exception:
