@@ -1,10 +1,10 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
 
-from core.caching import (
-    LocalCacheBackend,
-)
+from core.caching import LocalCacheBackend, RedisCacheBackend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +118,42 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerializationSecurity:
+    """Security regression tests for Redis serialization format handling."""
+
+    def test_serializes_json_by_default(self, monkeypatch):
+        monkeypatch.delenv("AUDORA_CACHE_ALLOW_PICKLE", raising=False)
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        backend._allow_pickle = backend._pickle_enabled()
+
+        serialized = backend._serialize({"artist": "Example", "score": 99})
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["fmt"] == "json"
+        assert backend._deserialize(serialized) == {"artist": "Example", "score": 99}
+
+    def test_rejects_pickle_payload_by_default(self, monkeypatch):
+        monkeypatch.delenv("AUDORA_CACHE_ALLOW_PICKLE", raising=False)
+        writer = object.__new__(RedisCacheBackend)
+        writer._signing_key = b"test-signing-key"
+        writer._allow_pickle = True
+        serialized = writer._serialize({"legacy": True})
+
+        reader = object.__new__(RedisCacheBackend)
+        reader._signing_key = b"test-signing-key"
+        reader._allow_pickle = reader._pickle_enabled()
+
+        assert reader._deserialize(serialized) is None
+
+    def test_allows_pickle_only_when_explicitly_enabled(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_ALLOW_PICKLE", "1")
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        backend._allow_pickle = backend._pickle_enabled()
+        serialized = backend._serialize({"legacy": True})
+
+        assert pickle.loads(pickle.dumps({"sanity": True})) == {"sanity": True}
+        assert backend._deserialize(serialized) == {"legacy": True}
