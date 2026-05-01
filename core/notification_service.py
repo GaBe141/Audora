@@ -4,12 +4,14 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -23,6 +25,49 @@ from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+
+
+@dataclass(frozen=True)
+class WebhookTarget:
+    """A validated webhook URL and the public addresses it resolved to."""
+
+    url: str
+    hostname: str
+    port: int
+    resolved_addresses: tuple[tuple[int, str, int, int], ...]
+
+
+class PinnedWebhookResolver(aiohttp.abc.AbstractResolver):
+    """Resolver that reuses already-vetted addresses to prevent DNS rebinding."""
+
+    def __init__(self, target: WebhookTarget):
+        self.target = target
+
+    async def resolve(
+        self,
+        host: str,
+        port: int = 0,
+        family: int = socket.AF_INET,
+    ) -> list[dict[str, Any]]:
+        if host != self.target.hostname:
+            raise socket.gaierror(f"Unexpected webhook hostname: {host}")
+
+        resolved_port = port or self.target.port
+        return [
+            {
+                "hostname": self.target.hostname,
+                "host": ip,
+                "port": resolved_port,
+                "family": address_family,
+                "proto": proto,
+                "flags": flags,
+            }
+            for address_family, ip, _resolved_port, proto, flags in self.target.resolved_addresses
+            if family in (socket.AF_UNSPEC, address_family)
+        ]
+
+    async def close(self) -> None:
+        """No resolver resources to release."""
 
 
 class NotificationPriority(Enum):
