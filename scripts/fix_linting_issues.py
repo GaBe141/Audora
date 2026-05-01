@@ -3,7 +3,7 @@ Automated Fix Script for Audora Codebase Issues
 Fixes type hints, imports, and code quality issues identified by linters.
 """
 
-import subprocess  # nosec B404 - commands are fixed argument lists, never shell strings.
+import subprocess  # nosec B404
 import sys
 
 
