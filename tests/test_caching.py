@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -58,6 +60,46 @@ class TestLocalCacheBackend:
         assert backend.get("d") == 4
         present = sum(1 for k in ("a", "b", "c") if backend.get(k) is not None)
         assert present == 2
+
+
+class TestRedisSerializationSafety:
+    """Validate Redis cache serialization does not execute unsafe payloads."""
+
+    def test_serializes_json_without_pickle_bytes(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-key"
+
+        serialized = backend._serialize({"artist": "Example", "score": 91})
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["payload"] == {
+            "type": "json",
+            "value": {"artist": "Example", "score": 91},
+        }
+        assert b"pickle" not in serialized.lower()
+        assert backend._deserialize(serialized) == {"artist": "Example", "score": 91}
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-key"
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "ignored",
+            "payload": "gASVCgAAAAAAAAB9lIwBeJRLAXMu",
+        }
+
+        assert backend._deserialize(json.dumps(legacy_envelope).encode("utf-8")) is None
+
+    def test_rejects_tampered_payload_signature(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-key"
+        serialized = backend._serialize({"artist": "Example"})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"]["value"]["artist"] = "Attacker"
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
 
 
 class TestCacheManager:
