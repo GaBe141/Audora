@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,50 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerializationSecurity:
+    """Regression tests for safe Redis cache serialization."""
+
+    def _backend(self):
+        return object.__new__(RedisCacheBackend)
+
+    def test_json_round_trip_uses_safe_envelope(self):
+        backend = self._backend()
+
+        serialized = backend._serialize({"artist": "Example", "score": 99})
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["type"] == "json"
+        assert backend._deserialize(serialized) == {"artist": "Example", "score": 99}
+
+    def test_bytes_round_trip_uses_base64_payload(self):
+        backend = self._backend()
+
+        serialized = backend._serialize(b"binary-data")
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["type"] == "bytes"
+        assert backend._deserialize(serialized) == b"binary-data"
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        backend = self._backend()
+        legacy_payload = json.dumps(
+            {"v": 1, "alg": "HMAC-SHA256", "sig": "ignored", "payload": "gASV"}
+        ).encode("utf-8")
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_unsupported_objects_are_not_serialized(self):
+        backend = self._backend()
+
+        class Unsupported:
+            pass
+
+        try:
+            backend._serialize(Unsupported())
+        except TypeError as exc:
+            assert "Unsupported cache value type" in str(exc)
+        else:
+            raise AssertionError("Unsupported object was serialized")
