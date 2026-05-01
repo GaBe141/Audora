@@ -1,9 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -58,6 +61,39 @@ class TestLocalCacheBackend:
         assert backend.get("d") == 4
         present = sum(1 for k in ("a", "b", "c") if backend.get(k) is not None)
         assert present == 2
+
+
+class TestRedisSerializationSecurity:
+    """Regression tests for safe Redis cache serialization."""
+
+    def test_json_payload_round_trips_without_pickle(self, monkeypatch):
+        monkeypatch.delenv("AUDORA_CACHE_ALLOW_PICKLE", raising=False)
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        serialized = backend._serialize({"track": "Song", "score": 98})
+        assert serialized is not None
+
+        envelope = json.loads(serialized.decode("utf-8"))
+        assert envelope["fmt"] == "json"
+        assert backend._deserialize(serialized) == {"track": "Song", "score": 98}
+
+    def test_pickle_payload_rejected_by_default(self, monkeypatch):
+        monkeypatch.delenv("AUDORA_CACHE_ALLOW_PICKLE", raising=False)
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        payload = pickle.dumps({"danger": True}, protocol=pickle.HIGHEST_PROTOCOL)
+        serialized = backend._build_envelope(payload, "pickle")
+
+        assert backend._deserialize(serialized) is None
+
+    def test_non_json_value_skips_cache_write_by_default(self, monkeypatch):
+        monkeypatch.delenv("AUDORA_CACHE_ALLOW_PICKLE", raising=False)
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        assert backend._serialize({"items": {1, 2, 3}}) is None
 
 
 class TestCacheManager:
