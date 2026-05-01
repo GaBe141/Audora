@@ -4,8 +4,6 @@ import json
 import pickle
 import time
 
-import pytest
-
 from core.caching import (
     LocalCacheBackend,
     RedisCacheBackend,

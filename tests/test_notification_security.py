@@ -1,6 +1,5 @@
 """Security tests for notification rendering and transport hardening."""
 
-import socket
 import ssl
 from unittest.mock import MagicMock, patch
 
