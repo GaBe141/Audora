@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,54 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheSecurity:
+    """Regression tests for cache serialization and key safety."""
+
+    def test_cache_key_uses_sha256_digest(self):
+        manager = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+
+        cache_key = manager._build_cache_key("prefix", ("artist",), {"region": "US"})
+
+        parts = cache_key.split(":")
+        assert len(parts[1]) == hashlib.sha256().digest_size * 2
+        assert len(parts[2]) == hashlib.sha256().digest_size * 2
+
+    def test_redis_serializes_json_without_pickle(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        serialized = backend._serialize({"track": "Example", "score": 98})
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope == {
+            "v": 2,
+            "type": "json",
+            "payload": {"track": "Example", "score": 98},
+        }
+        assert backend._deserialize(serialized) == {"track": "Example", "score": 98}
+
+    def test_redis_serializes_bytes_without_pickle(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        serialized = backend._serialize(b"audio-bytes")
+
+        assert backend._deserialize(serialized) == b"audio-bytes"
+
+    def test_redis_rejects_legacy_pickle_payload(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        assert backend._deserialize(b"\x80\x04cos\nsystem\n.") is None
+
+    def test_redis_rejects_unsupported_object(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        class Unsupported:
+            pass
+
+        try:
+            backend._serialize(Unsupported())
+        except TypeError as exc:
+            assert "JSON-serializable" in str(exc)
+        else:
+            raise AssertionError("Unsupported objects must not be serialized")
