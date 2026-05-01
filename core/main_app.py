@@ -6,9 +6,9 @@ Integrates all social media APIs for Gen Z/Alpha music trend analysis.
 import asyncio
 import json
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
+from core.utils import resolve_output_path
 from integrations.api_config import SocialAPIManager
 from integrations.extended_platforms import ExtendedSocialDiscoveryEngine
 from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
@@ -343,7 +343,7 @@ class ComprehensiveMusicDiscoveryApp:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"data/comprehensive_discovery_report_{timestamp}.json"
 
-        filepath = Path(filename)
+        filepath = resolve_output_path(filename, base_dir="data", allowed_suffixes={".json"})
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
         with open(filepath, "w", encoding="utf-8") as f:

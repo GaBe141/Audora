@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+from datetime import date, datetime
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -58,6 +63,51 @@ class TestLocalCacheBackend:
         assert backend.get("d") == 4
         present = sum(1 for k in ("a", "b", "c") if backend.get(k) is not None)
         assert present == 2
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis payload serialization safety."""
+
+    def test_serializes_json_without_pickle_opcodes(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-key"
+
+        serialized = backend._serialize(
+            {
+                "name": "Track",
+                "score": 98.5,
+                "seen_at": datetime(2026, 5, 1, 17, 0, 0),
+                "release_date": date(2026, 5, 1),
+            }
+        )
+
+        envelope = json.loads(serialized.decode("utf-8"))
+        assert envelope["serializer"] == "json"
+        assert envelope["v"] == 2
+        assert b"\x80" not in serialized
+        assert backend._deserialize(serialized)["seen_at"] == datetime(2026, 5, 1, 17, 0, 0)
+
+    def test_rejects_unsupported_object_types(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-key"
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            backend._serialize(object())
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-key"
+
+        legacy_envelope = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "ignored",
+                "payload": "gASVBQAAAAAAAAB9lC4=",
+            }
+        ).encode("utf-8")
+
+        assert backend._deserialize(legacy_envelope) is None
 
 
 class TestCacheManager:

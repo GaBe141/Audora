@@ -2,11 +2,43 @@
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_output_path(
+    path: Path | str,
+    base_dir: Path | str | None = None,
+    allowed_suffixes: set[str] | None = None,
+) -> Path:
+    """Resolve a write path and require it to stay under an allowed output directory."""
+    root = Path(base_dir or os.getenv("AUDORA_OUTPUT_DIR", Path.cwd())).resolve()
+    raw_path = Path(path)
+
+    if raw_path.is_absolute():
+        output_path = raw_path
+    else:
+        cwd_relative = (Path.cwd() / raw_path).resolve()
+        if cwd_relative == root or root in cwd_relative.parents:
+            output_path = cwd_relative
+        else:
+            output_path = root / raw_path
+
+    resolved_path = output_path.resolve()
+    try:
+        resolved_path.relative_to(root)
+    except ValueError as e:
+        raise ValueError(f"Output path must stay within {root}") from e
+
+    if allowed_suffixes and resolved_path.suffix.lower() not in allowed_suffixes:
+        allowed = ", ".join(sorted(allowed_suffixes))
+        raise ValueError(f"Output path must use one of these suffixes: {allowed}")
+
+    return resolved_path
 
 # Re-export for convenience
 try:
@@ -71,7 +103,7 @@ def write_json(
     Raises:
         Exception: If writing fails
     """
-    path = Path(path)
+    path = resolve_output_path(path)
     try:
         if create_dirs:
             path.parent.mkdir(parents=True, exist_ok=True)

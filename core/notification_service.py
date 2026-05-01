@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import aiohttp
+from aiohttp.abc import AbstractResolver
 import jinja2  # type: ignore[import-untyped]
 
 
@@ -70,6 +71,35 @@ class NotificationMessage:
     data: dict[str, Any] | None = None
     attachments: list[str] | None = None
     template_vars: dict[str, Any] | None = None
+
+
+class _PinnedWebhookResolver(AbstractResolver):
+    """Resolve a validated webhook host to the IPs checked before connection."""
+
+    def __init__(self, hostname: str, addresses: list[dict[str, Any]]):
+        self._hostname = hostname
+        self._addresses = addresses
+
+    async def resolve(
+        self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    ) -> list[dict[str, Any]]:
+        if host != self._hostname:
+            raise OSError(f"Unexpected webhook host: {host}")
+
+        return [
+            {
+                "hostname": host,
+                "host": address["host"],
+                "port": port,
+                "family": address["family"],
+                "proto": address["proto"],
+                "flags": socket.AI_NUMERICHOST,
+            }
+            for address in self._addresses
+        ]
+
+    async def close(self) -> None:
+        return None
 
 
 class EnhancedNotificationService:
@@ -226,8 +256,38 @@ class EnhancedNotificationService:
         except ValueError:
             return True
 
-    def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
-        """Validate outbound webhook URL to reduce SSRF risk."""
+    def _resolve_webhook_addresses(
+        self, hostname: str, port: int, *, allow_private: bool
+    ) -> list[dict[str, Any]]:
+        """Resolve and validate webhook target addresses."""
+        addresses: list[dict[str, Any]] = []
+        seen_ips = set()
+        try:
+            # Validate all resolved addresses to avoid DNS-based bypass.
+            for family, socktype, proto, _canonname, sockaddr in socket.getaddrinfo(
+                hostname, port, proto=socket.IPPROTO_TCP
+            ):
+                ip = sockaddr[0]
+                if ip in seen_ips:
+                    continue
+                if not allow_private and self._is_restricted_ip(ip):
+                    raise ValueError(
+                        "Webhook URL resolves to a private or restricted network address"
+                    )
+                seen_ips.add(ip)
+                addresses.append({"host": ip, "family": family, "proto": proto})
+        except socket.gaierror as e:
+            raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
+
+        if not addresses:
+            raise ValueError(f"Could not resolve webhook hostname: {hostname}")
+
+        return addresses
+
+    def _validate_webhook_url(
+        self, url: str, *, allow_private: bool = False
+    ) -> tuple[str, str, list[dict[str, Any]]]:
+        """Validate outbound webhook URL and return pinned DNS results."""
         parsed = urlparse(url.strip())
         if parsed.scheme != "https":
             raise ValueError("Webhook URL must use HTTPS")
@@ -238,22 +298,21 @@ class EnhancedNotificationService:
         if hostname.lower() == "localhost":
             raise ValueError("Localhost webhook URLs are not allowed")
 
-        resolved_ips = set()
-        try:
-            # Validate all resolved addresses to avoid DNS-based bypass.
-            for info in socket.getaddrinfo(hostname, parsed.port or 443, proto=socket.IPPROTO_TCP):
-                resolved_ips.add(info[4][0])
-        except socket.gaierror as e:
-            raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
+        addresses = self._resolve_webhook_addresses(
+            hostname, parsed.port or 443, allow_private=allow_private
+        )
 
-        if not allow_private:
-            for ip in resolved_ips:
-                if self._is_restricted_ip(ip):
-                    raise ValueError(
-                        "Webhook URL resolves to a private or restricted network address"
-                    )
+        return url, hostname, addresses
 
-        return url
+    def _webhook_connector(
+        self, url: str, *, allow_private: bool = False
+    ) -> tuple[str, aiohttp.TCPConnector]:
+        """Validate a webhook URL and pin the connection to the checked IPs."""
+        validated_url, hostname, addresses = self._validate_webhook_url(
+            url, allow_private=allow_private
+        )
+        resolver = _PinnedWebhookResolver(hostname, addresses)
+        return validated_url, aiohttp.TCPConnector(resolver=resolver)
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -600,7 +659,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Slack webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            webhook_url, connector = self._webhook_connector(webhook_url, allow_private=False)
             # Create Slack message format
             color_map = {
                 NotificationPriority.LOW: "good",
@@ -649,7 +708,7 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(connector=connector) as session,
                 session.post(webhook_url, json=slack_message) as response,
             ):
                 if response.status == 200:
@@ -675,7 +734,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Discord webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            webhook_url, connector = self._webhook_connector(webhook_url, allow_private=False)
             # Format content for Discord
             content = message.content
             if message.template_vars:
@@ -716,7 +775,7 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(connector=connector) as session,
                 session.post(webhook_url, json=discord_message) as response,
             ):
                 if response.status in [200, 204]:
@@ -752,7 +811,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
-            url = self._validate_webhook_url(
+            url, connector = self._webhook_connector(
                 url, allow_private=self._allow_private_webhooks()
             )
             # Prepare payload
@@ -775,7 +834,7 @@ System status: {{ system_status }}
             timeout = webhook_config.get("timeout", 30)
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(connector=connector) as session,
                 session.post(
                     url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
                 ) as response,
