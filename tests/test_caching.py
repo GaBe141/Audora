@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
 
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,41 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_build_cache_key_uses_sha256_digest(self):
+        cache = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+        key = cache._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        _, args_digest, kwargs_digest = key.split(":")
+
+        assert len(args_digest) == 64
+        assert len(kwargs_digest) == 64
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for safe Redis payload serialization."""
+
+    def test_serialize_deserialize_json_value_without_pickle(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        value = {"track": "Safe Song", "score": 91}
+        serialized = backend._serialize(value)
+
+        assert pickle.dumps(value) not in serialized
+        assert backend._deserialize(serialized) == value
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        assert backend._deserialize(pickle.dumps({"unsafe": True})) is None
+
+    def test_rejects_unsupported_object_type(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        class Unsupported:
+            pass
+
+        with pytest.raises(TypeError):
+            backend._serialize(Unsupported())
