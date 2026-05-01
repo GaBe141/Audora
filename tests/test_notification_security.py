@@ -1,5 +1,6 @@
 """Security tests for notification transport hardening."""
 
+import asyncio
 import ssl
 from email.mime.text import MIMEText
 
@@ -59,8 +60,7 @@ class TestWebhookUrlValidation:
         assert target.url == "https://example.com/webhook"
         assert target.resolved_addresses == ((2, "93.184.216.34", 443, 6, 0),)
 
-    @pytest.mark.asyncio
-    async def test_pinned_resolver_reuses_validated_ip(self, monkeypatch):
+    def test_pinned_resolver_reuses_validated_ip(self, monkeypatch):
         svc = EnhancedNotificationService()
 
         monkeypatch.setattr(
@@ -70,7 +70,7 @@ class TestWebhookUrlValidation:
         target = svc._validate_webhook_target("https://example.com/webhook")
         resolver = PinnedWebhookResolver(target)
 
-        resolved = await resolver.resolve("example.com", 443)
+        resolved = asyncio.run(resolver.resolve("example.com", 443))
 
         assert resolved == [
             {
@@ -87,8 +87,7 @@ class TestWebhookUrlValidation:
 class TestNotificationDeliverySecurity:
     """Validate security-sensitive notification send behavior."""
 
-    @pytest.mark.asyncio
-    async def test_custom_webhook_uses_pinned_connector_and_disables_redirects(
+    def test_custom_webhook_uses_pinned_connector_and_disables_redirects(
         self, monkeypatch
     ):
         svc = EnhancedNotificationService()
@@ -130,12 +129,14 @@ class TestNotificationDeliverySecurity:
 
         monkeypatch.setattr(aiohttp, "ClientSession", FakeSession)
 
-        result = await svc._send_webhook(
-            NotificationMessage(
-                title="test",
-                content="body",
-                priority=NotificationPriority.LOW,
-                channels=[NotificationChannel.WEBHOOK],
+        result = asyncio.run(
+            svc._send_webhook(
+                NotificationMessage(
+                    title="test",
+                    content="body",
+                    priority=NotificationPriority.LOW,
+                    channels=[NotificationChannel.WEBHOOK],
+                )
             )
         )
 
@@ -144,8 +145,7 @@ class TestNotificationDeliverySecurity:
         assert captured["allow_redirects"] is False
         assert isinstance(captured["connector"]._resolver, PinnedWebhookResolver)
 
-    @pytest.mark.asyncio
-    async def test_email_html_body_escapes_untrusted_content(self, monkeypatch):
+    def test_email_html_body_escapes_untrusted_content(self, monkeypatch):
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -171,12 +171,14 @@ class TestNotificationDeliverySecurity:
 
         monkeypatch.setattr("core.notification_service.smtplib.SMTP", FakeSMTP)
 
-        result = await svc._send_email(
-            NotificationMessage(
-                title="alert",
-                content='<img src=x onerror="alert(1)">',
-                priority=NotificationPriority.LOW,
-                channels=[NotificationChannel.EMAIL],
+        result = asyncio.run(
+            svc._send_email(
+                NotificationMessage(
+                    title="alert",
+                    content='<img src=x onerror="alert(1)">',
+                    priority=NotificationPriority.LOW,
+                    channels=[NotificationChannel.EMAIL],
+                )
             )
         )
 
@@ -189,8 +191,7 @@ class TestNotificationDeliverySecurity:
         assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in html_parts[0].get_payload()
         assert "<img src=x" not in html_parts[0].get_payload()
 
-    @pytest.mark.asyncio
-    async def test_email_starttls_uses_verified_ssl_context(self, monkeypatch):
+    def test_email_starttls_uses_verified_ssl_context(self, monkeypatch):
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -218,12 +219,14 @@ class TestNotificationDeliverySecurity:
 
         monkeypatch.setattr("core.notification_service.smtplib.SMTP", FakeSMTP)
 
-        result = await svc._send_email(
-            NotificationMessage(
-                title="alert",
-                content="body",
-                priority=NotificationPriority.LOW,
-                channels=[NotificationChannel.EMAIL],
+        result = asyncio.run(
+            svc._send_email(
+                NotificationMessage(
+                    title="alert",
+                    content="body",
+                    priority=NotificationPriority.LOW,
+                    channels=[NotificationChannel.EMAIL],
+                )
             )
         )
 
