@@ -10,11 +10,12 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,7 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
+        # Fallback to process-local random key to reject tampered cache entries.
         # This keeps the cache safe by default, with only a reduced cross-process hit rate.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
@@ -186,9 +187,40 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _to_json_safe(self, value: Any) -> Any:
+        """Convert supported cache values into a JSON-serializable structure."""
+        if isinstance(value, pd.DataFrame):
+            return {
+                "__audora_type__": "pandas_dataframe",
+                "value": json.loads(value.to_json(orient="table", date_format="iso")),
+            }
+
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError) as e:
+            raise TypeError(
+                f"Redis cache value of type {type(value).__name__} is not JSON serializable"
+            ) from e
+
+        return value
+
+    def _from_json_safe(self, value: Any) -> Any:
+        """Restore supported cache values from their JSON-safe representation."""
+        if isinstance(value, dict) and value.get("__audora_type__") == "pandas_dataframe":
+            encoded_df = value.get("value")
+            if not isinstance(encoded_df, dict):
+                raise ValueError("Invalid cached DataFrame payload")
+            return pd.read_json(json.dumps(encoded_df), orient="table")
+
+        return value
+
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value as signed JSON with integrity protection."""
+        payload = json.dumps(
+            self._to_json_safe(value),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
             "v": 1,
@@ -223,7 +255,7 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return self._from_json_safe(json.loads(payload.decode("utf-8")))
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None

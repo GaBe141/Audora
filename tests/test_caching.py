@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +125,45 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis cache payload serialization without requiring Redis."""
+
+    def _backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_serializes_json_values_without_pickle(self):
+        backend = self._backend()
+        value = {"artist": "Taylor Swift", "score": 98.5, "tags": ["pop", "viral"]}
+
+        serialized = backend._serialize(value)
+        assert backend._deserialize(serialized) == value
+
+    def test_rejects_signed_non_json_payload(self):
+        backend = self._backend()
+        payload = b"not-json"
+        signature = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_round_trips_dataframes_through_json_table_payload(self):
+        backend = self._backend()
+        frame = pd.DataFrame(
+            [
+                {"track_name": "Track One", "artist": "Artist A", "score": 90.0},
+                {"track_name": "Track Two", "artist": "Artist B", "score": 72.5},
+            ]
+        )
+
+        restored = backend._deserialize(backend._serialize(frame))
+
+        pd.testing.assert_frame_equal(restored, frame)

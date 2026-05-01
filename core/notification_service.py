@@ -181,6 +181,27 @@ class EnhancedNotificationService:
 
         return default_config
 
+    _PERSISTED_SECRET_KEYS = {
+        "api_key",
+        "api_secret",
+        "authorization",
+        "password",
+        "url",
+        "webhook_url",
+    }
+
+    def _without_persisted_secrets(self, value: Any) -> Any:
+        """Return config data with secrets removed before writing to disk."""
+        if isinstance(value, dict):
+            return {
+                key: self._without_persisted_secrets(nested)
+                for key, nested in value.items()
+                if key.lower() not in self._PERSISTED_SECRET_KEYS
+            }
+        if isinstance(value, list):
+            return [self._without_persisted_secrets(item) for item in value]
+        return value
+
     def save_config(self, path: str = "config/notification_config.json") -> None:
         """Persist the current channel configuration to a JSON file.
 
@@ -190,9 +211,20 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
+        to_save = {
+            k: self._without_persisted_secrets(self.config[k])
+            for k in saveable_keys
+            if k in self.config
+        }
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
