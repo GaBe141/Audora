@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+import csv
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,24 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestCsvExportSecurity:
+    """Test CSV export hardening."""
+
+    def test_export_to_csv_neutralizes_formula_cells(
+        self, data_store, sample_trends, tmp_path
+    ):
+        malicious = sample_trends[0]
+        malicious.track_name = "=HYPERLINK(\"https://attacker.example\")"
+        malicious.artist = "@attacker"
+        data_store.save_trends_bulk([malicious])
+
+        output_path = tmp_path / "trends.csv"
+        data_store.export_to_csv("trends", str(output_path))
+
+        with output_path.open(newline="", encoding="utf-8") as csv_file:
+            row = next(csv.DictReader(csv_file))
+
+        assert row["track_name"].startswith("'=")
+        assert row["artist"].startswith("'@")

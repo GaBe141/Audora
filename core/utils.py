@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 # Re-export for convenience
 try:
@@ -103,9 +104,33 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    write_safe_csv(df, filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
+
+
+def neutralize_csv_formula_value(value: Any) -> Any:
+    """Prefix spreadsheet formulas so exported CSV cells are treated as text."""
+    if isinstance(value, str) and value.startswith(CSV_FORMULA_PREFIXES):
+        return f"'{value}"
+    return value
+
+
+def neutralize_csv_formulas(df: Any) -> Any:
+    """Return a copy of a DataFrame with formula-leading text cells neutralized."""
+    if not HAS_PANDAS:
+        return df
+
+    sanitized_df = df.copy()
+    text_columns = sanitized_df.select_dtypes(include=["object", "string"]).columns
+    for column in text_columns:
+        sanitized_df[column] = sanitized_df[column].map(neutralize_csv_formula_value)
+    return sanitized_df
+
+
+def write_safe_csv(df: Any, path_or_buf: Any, **kwargs: Any) -> Any:
+    """Write CSV after neutralizing formula-leading string cells."""
+    return neutralize_csv_formulas(df).to_csv(path_or_buf, **kwargs)
 
 
 def get_timestamp_filename(prefix: str = "", suffix: str = "") -> str:
