@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +125,45 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheSecurity:
+    """Regression tests for non-executable Redis cache serialization."""
+
+    def test_cache_key_uses_sha256_digest(self):
+        cache = CacheManager(backend=LocalCacheBackend())
+        key = cache._build_cache_key("prefix", ("artist",), {"region": "global"})
+        digest_parts = key.split(":")[1:]
+
+        assert digest_parts
+        assert all(len(part) == 64 for part in digest_parts)
+
+    def test_redis_serializer_round_trips_json_bytes_and_dataframes(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        json_value = {"track": "Song", "score": 91, "tags": ["pop"]}
+        assert backend._deserialize(backend._serialize(json_value)) == json_value
+
+        bytes_value = b"\x00audora\xff"
+        assert backend._deserialize(backend._serialize(bytes_value)) == bytes_value
+
+        df = pd.DataFrame([{"track": "Song", "score": 91}, {"track": "Other", "score": 88}])
+        pd.testing.assert_frame_equal(backend._deserialize(backend._serialize(df)), df)
+
+    def test_redis_serializer_rejects_unsupported_objects(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError, match="Unsupported Redis cache value type"):
+            backend._serialize(object())
+
+    def test_redis_deserializer_rejects_legacy_pickle_payload(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        legacy_payload = pickle.dumps({"unsafe": "legacy"})
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_redis_deserializer_rejects_unknown_payload_type(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = json.dumps({"v": 1, "type": "pickle", "payload": "..."}).encode()
+
+        assert backend._deserialize(payload) is None
