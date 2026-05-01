@@ -5,6 +5,7 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import io
 import json
 import logging
 import time
@@ -232,7 +233,7 @@ class RedisCacheBackend(CacheBackend):
                 return None
             import pandas as pd
 
-            return pd.read_json(data, orient="split")
+            return pd.read_json(io.StringIO(data), orient="split")
 
         logger.warning("Rejected cache entry with unsupported type: %s", value_type)
         return None
