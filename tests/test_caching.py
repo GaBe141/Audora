@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,37 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis cache serialization without requiring a Redis server."""
+
+    def _backend(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_json_round_trip_for_supported_values(self):
+        backend = self._backend()
+        value = {
+            "artist": "Test Artist",
+            "scores": [1, 2.5, True, None],
+            "metadata": {"platform": "spotify"},
+        }
+
+        encoded = backend._serialize(value)
+
+        assert backend._deserialize(encoded) == value
+
+    def test_rejects_legacy_or_unsigned_payloads(self):
+        backend = self._backend()
+
+        assert backend._deserialize(b"not-json") is None
+        assert backend._deserialize(json.dumps({"v": 1, "payload": "legacy"}).encode()) is None
+
+    def test_rejects_tampered_payload_signature(self):
+        backend = self._backend()
+        envelope = json.loads(backend._serialize({"safe": True}).decode("utf-8"))
+        envelope["payload"] = json.dumps({"type": "scalar", "value": "tampered"})
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None

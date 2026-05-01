@@ -315,6 +315,25 @@ def get_date_string(fmt: str = "%Y-%m-%d") -> str:
 
 
 # Report generation helpers
+def build_safe_output_path(output_dir: Path | str, filename: str | Path) -> Path:
+    """Build a file path constrained to a trusted output directory."""
+    output_path = Path(output_dir).resolve()
+    filename_path = Path(filename)
+
+    provided_path = filename_path.resolve() if filename_path.is_absolute() else filename_path.resolve()
+    if provided_path.is_relative_to(output_path):
+        return provided_path
+
+    if filename_path.is_absolute() or any(part == ".." for part in filename_path.parts):
+        raise ValueError(f"Unsafe output filename: {filename}")
+
+    filepath = (output_path / filename_path).resolve()
+    if not filepath.is_relative_to(output_path):
+        raise ValueError(f"Unsafe output filename: {filename}")
+
+    return filepath
+
+
 def save_report(
     data: dict[str, Any],
     filename: str | None = None,
@@ -346,10 +365,10 @@ def save_report(
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{timestamp_str}.json"
 
-    # Create full path
-    output_path = Path(output_dir)
+    # Create full path inside the trusted output directory.
+    output_path = Path(output_dir).resolve()
     output_path.mkdir(parents=True, exist_ok=True)
-    filepath = output_path / filename
+    filepath = build_safe_output_path(output_path, filename)
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:

@@ -4,15 +4,16 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
-import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
+from datetime import date, datetime
+from decimal import Decimal
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
@@ -133,6 +134,8 @@ class LocalCacheBackend(CacheBackend):
 class RedisCacheBackend(CacheBackend):
     """Redis cache backend with connection pooling."""
 
+    _ENCODING = "audora-json"
+
     def __init__(
         self,
         host: str = "localhost",
@@ -178,7 +181,7 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
+        # Fallback to process-local random key to prevent cross-process tampering.
         # This keeps the cache safe by default, with only a reduced cross-process hit rate.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
@@ -187,46 +190,144 @@ class RedisCacheBackend(CacheBackend):
         return os.urandom(32)
 
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value to signed JSON with integrity protection."""
+        payload = json.dumps(
+            self._encode_cache_value(value),
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "encoding": self._ENCODING,
             "sig": signature,
-            "payload": base64.b64encode(payload).decode("ascii"),
+            "payload": payload.decode("utf-8"),
         }
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
     def _deserialize(self, value: bytes) -> Any | None:
-        """Deserialize cache value only after signature verification."""
+        """Deserialize a cache value only after signature verification."""
         try:
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
+                or envelope.get("encoding") != self._ENCODING
                 or "sig" not in envelope
                 or "payload" not in envelope
             ):
                 logger.warning("Rejected cache entry with invalid serialization envelope")
                 return None
 
-            payload_b64 = envelope["payload"]
-            if not isinstance(payload_b64, str):
+            payload_text = envelope["payload"]
+            if not isinstance(payload_text, str):
                 logger.warning("Rejected cache entry with non-string payload")
                 return None
 
-            payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            payload = payload_text.encode("utf-8")
             expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return self._decode_cache_value(json.loads(payload.decode("utf-8")))
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
+
+    def _encode_cache_value(self, value: Any) -> dict[str, Any]:
+        """Encode supported cache values into JSON-only tagged data."""
+        if value is None or isinstance(value, bool | int | float | str):
+            return {"type": "scalar", "value": value}
+
+        if isinstance(value, Decimal):
+            return {"type": "decimal", "value": str(value)}
+
+        if isinstance(value, datetime):
+            return {"type": "datetime", "value": value.isoformat()}
+
+        if isinstance(value, date):
+            return {"type": "date", "value": value.isoformat()}
+
+        if isinstance(value, list):
+            return {"type": "list", "value": [self._encode_cache_value(item) for item in value]}
+
+        if isinstance(value, tuple):
+            return {"type": "tuple", "value": [self._encode_cache_value(item) for item in value]}
+
+        if isinstance(value, set):
+            return {
+                "type": "set",
+                "value": [self._encode_cache_value(item) for item in sorted(value, key=repr)],
+            }
+
+        if isinstance(value, dict):
+            return {
+                "type": "dict",
+                "value": [
+                    [self._encode_cache_value(key), self._encode_cache_value(item)]
+                    for key, item in value.items()
+                ],
+            }
+
+        pandas_dataframe = self._get_pandas_dataframe_type()
+        if pandas_dataframe is not None and isinstance(value, pandas_dataframe):
+            return {"type": "pandas_dataframe", "value": value.to_json(orient="split", date_format="iso")}
+
+        raise TypeError(f"Unsupported cache value type for Redis JSON serialization: {type(value)!r}")
+
+    def _decode_cache_value(self, encoded: Any) -> Any:
+        """Decode JSON-only tagged cache data into supported Python values."""
+        if not isinstance(encoded, dict) or "type" not in encoded:
+            raise ValueError("Invalid encoded cache value")
+
+        value_type = encoded["type"]
+        value = encoded.get("value")
+
+        if value_type == "scalar":
+            return value
+        if value_type == "decimal":
+            return Decimal(str(value))
+        if value_type == "datetime":
+            return datetime.fromisoformat(str(value))
+        if value_type == "date":
+            return date.fromisoformat(str(value))
+        if value_type == "list":
+            return [self._decode_cache_value(item) for item in value]
+        if value_type == "tuple":
+            return tuple(self._decode_cache_value(item) for item in value)
+        if value_type == "set":
+            return {self._decode_cache_value(item) for item in value}
+        if value_type == "dict":
+            return {
+                self._decode_cache_value(key): self._decode_cache_value(item)
+                for key, item in value
+            }
+        if value_type == "pandas_dataframe":
+            pandas_module = self._get_pandas_module()
+            if pandas_module is None:
+                raise ImportError("pandas is required to deserialize cached DataFrames")
+            return pandas_module.read_json(io.StringIO(str(value)), orient="split")
+
+        raise ValueError(f"Unknown encoded cache value type: {value_type!r}")
+
+    @staticmethod
+    def _get_pandas_module() -> Any | None:
+        """Import pandas lazily so Redis caching works without a hard dependency."""
+        try:
+            import pandas as pd
+
+            return pd
+        except ImportError:
+            return None
+
+    @classmethod
+    def _get_pandas_dataframe_type(cls) -> Any | None:
+        """Return pandas.DataFrame when pandas is installed."""
+        pandas_module = cls._get_pandas_module()
+        return None if pandas_module is None else pandas_module.DataFrame
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
@@ -337,7 +438,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
