@@ -57,14 +57,23 @@ class TestWebhookUrlValidation:
         assert svc._webhook_timeout(999).total == WEBHOOK_MAX_TIMEOUT_SECONDS
         assert svc._webhook_timeout("not-a-number").total == 10
 
-    def test_webhook_session_disables_automatic_raise_for_status(self):
+    def test_webhook_session_disables_automatic_raise_for_status(self, monkeypatch):
         svc = EnhancedNotificationService()
+
+        class FakeClientSession:
+            def __init__(self, **kwargs):
+                self.raise_for_status = kwargs["raise_for_status"]
+                self.timeout = kwargs["timeout"]
+
+        monkeypatch.setattr(
+            "core.notification_service.aiohttp.ClientSession",
+            FakeClientSession,
+        )
+
         session = svc._webhook_session()
 
-        try:
-            assert session.raise_for_status is False
-        finally:
-            asyncio.run(session.close())
+        assert session.raise_for_status is False
+        assert session.timeout.total == 10
 
 
 class TestWebhookDeliverySecurity:
