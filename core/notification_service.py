@@ -4,12 +4,14 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import copy
 import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -189,18 +191,45 @@ class EnhancedNotificationService:
         """
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        # Only save channel-specific sections (not internal runtime state), and
+        # omit secrets that should be provided via environment variables.
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
+        to_save = {k: copy.deepcopy(self.config[k]) for k in saveable_keys if k in self.config}
+        self._redact_persisted_secrets(to_save)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _redact_persisted_secrets(self, config: dict[str, Any]) -> None:
+        """Remove secret material before writing notification config to disk."""
+        secret_paths = [
+            ("email", "password"),
+            ("webhook", "headers", "Authorization"),
+            ("sms", "api_key"),
+            ("sms", "api_secret"),
+        ]
+        for path in secret_paths:
+            cursor: Any = config
+            for key in path[:-1]:
+                if not isinstance(cursor, dict):
+                    cursor = None
+                    break
+                cursor = cursor.get(key)
+            if isinstance(cursor, dict):
+                cursor.pop(path[-1], None)
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
@@ -570,17 +599,24 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
-            # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            port = int(email_config.get("port", 587))
+            use_tls = email_config.get("use_tls", True)
+            context = ssl.create_default_context()
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+            if port == 465 and use_tls:
+                server = smtplib.SMTP_SSL(email_config["smtp_server"], port, context=context)
+            else:
+                server = smtplib.SMTP(email_config["smtp_server"], port)
+                if use_tls:
+                    server.starttls(context=context)
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
+            try:
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
+            finally:
+                server.quit()
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"
