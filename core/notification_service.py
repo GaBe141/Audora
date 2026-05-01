@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -23,6 +24,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+from jinja2.sandbox import SandboxedEnvironment  # type: ignore[import-untyped]
 
 
 class NotificationPriority(Enum):
@@ -92,9 +94,10 @@ class EnhancedNotificationService:
         self.notification_history: list[dict[str, Any]] = []
         self.failed_deliveries: list[dict[str, Any]] = []
 
-        # Initialize template engine with autoescape enabled for security
-        self.template_env = jinja2.Environment(
-            loader=jinja2.DictLoader(self._load_templates()),
+        self._templates = self._load_templates()
+        # Initialize a sandboxed template engine with autoescape enabled for security.
+        self.template_env = SandboxedEnvironment(
+            loader=jinja2.DictLoader(self._templates),
             autoescape=jinja2.select_autoescape(
                 enabled_extensions=("html", "xml", "jinja2"), default_for_string=True
             ),
@@ -202,15 +205,6 @@ class EnhancedNotificationService:
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
 
-    def _allow_private_webhooks(self) -> bool:
-        """Whether private network webhook targets are allowed."""
-        return os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
         try:
@@ -225,6 +219,19 @@ class EnhancedNotificationService:
             )
         except ValueError:
             return True
+
+    def _allow_private_webhooks(self) -> bool:
+        """Whether private webhook targets are explicitly allowed for local development."""
+        environment = os.getenv("AUDORA_ENV", "production").strip().lower()
+        if environment not in {"local", "development", "dev", "test"}:
+            return False
+
+        return os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
         """Validate outbound webhook URL to reduce SSRF risk."""
@@ -254,6 +261,16 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _render_template(self, template_vars: dict[str, Any]) -> str:
+        """Render an allowlisted notification template with sandboxed Jinja."""
+        template_name = template_vars.get("template", "default")
+        if not isinstance(template_name, str) or template_name not in self._templates:
+            raise ValueError("Unknown notification template")
+
+        context = {key: value for key, value in template_vars.items() if key != "template"}
+        template = self.template_env.get_template(template_name)
+        return template.render(**context)
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -545,10 +562,7 @@ System status: {{ system_status }}
             # Create text content
             text_content = message.content
             if message.template_vars:
-                template = self.template_env.get_template(
-                    message.template_vars.get("template", "default")
-                )
-                text_content = template.render(**message.template_vars)
+                text_content = self._render_template(message.template_vars)
 
             msg.attach(MIMEText(text_content, "plain"))
 
@@ -570,17 +584,22 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
-            # Send email
+            username = email_config.get("username")
+            password = email_config.get("password")
+            if (username or password) and not email_config.get("use_tls", True):
+                raise ValueError("Refusing to send SMTP credentials without TLS")
+
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            try:
+                if email_config.get("use_tls", True):
+                    server.starttls(context=ssl.create_default_context())
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+                if username and password:
+                    server.login(username, password)
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
-
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
+            finally:
+                server.quit()
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"
@@ -612,10 +631,7 @@ System status: {{ system_status }}
             # Format content for Slack
             content = message.content
             if message.template_vars:
-                template = self.template_env.get_template(
-                    message.template_vars.get("template", "default")
-                )
-                content = template.render(**message.template_vars)
+                content = self._render_template(message.template_vars)
 
             slack_message = {
                 "username": slack_config.get("username", "Music Discovery Bot"),
@@ -650,7 +666,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -679,10 +695,7 @@ System status: {{ system_status }}
             # Format content for Discord
             content = message.content
             if message.template_vars:
-                template = self.template_env.get_template(
-                    message.template_vars.get("template", "default")
-                )
-                content = template.render(**message.template_vars)
+                content = self._render_template(message.template_vars)
 
             # Discord message format
             discord_message = {
@@ -717,7 +730,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -766,10 +779,7 @@ System status: {{ system_status }}
 
             # Apply template if specified
             if message.template_vars:
-                template = self.template_env.get_template(
-                    message.template_vars.get("template", "default")
-                )
-                payload["formatted_content"] = template.render(**message.template_vars)
+                payload["formatted_content"] = self._render_template(message.template_vars)
 
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
             timeout = webhook_config.get("timeout", 30)
@@ -777,7 +787,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:

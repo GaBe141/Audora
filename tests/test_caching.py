@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -58,6 +63,42 @@ class TestLocalCacheBackend:
         assert backend.get("d") == 4
         present = sum(1 for k in ("a", "b", "c") if backend.get(k) is not None)
         assert present == 2
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis serialization safety."""
+
+    def test_serialize_json_value_uses_safe_envelope(self):
+        payload = {"artist": "A", "score": 99, "tags": ["viral"]}
+        serialized = RedisCacheBackend._serialize(payload)
+
+        envelope = json.loads(serialized.decode("utf-8"))
+        assert envelope == {"v": 2, "type": "json", "payload": payload}
+        assert RedisCacheBackend._deserialize(serialized) == payload
+
+    def test_serialize_bytes_round_trips_without_pickle(self):
+        serialized = RedisCacheBackend._serialize(b"binary\x00payload")
+
+        envelope = json.loads(serialized.decode("utf-8"))
+        assert envelope["type"] == "bytes"
+        assert RedisCacheBackend._deserialize(serialized) == b"binary\x00payload"
+
+    def test_rejects_legacy_or_malformed_payloads(self):
+        assert RedisCacheBackend._deserialize(b"not-json") is None
+        assert RedisCacheBackend._deserialize(json.dumps({"v": 1, "payload": "legacy"}).encode()) is None
+
+    def test_rejects_unserializable_objects(self):
+        class UnsafeObject:
+            pass
+
+        assert RedisCacheBackend._serialize(UnsafeObject()) is None
+
+    def test_rejects_pickle_payload_without_loading(self):
+        class Exploit:
+            def __reduce__(self):
+                return (print, ("pickle payload should not be loaded",))
+
+        assert RedisCacheBackend._deserialize(pickle.dumps(Exploit())) is None
 
 
 class TestCacheManager:
