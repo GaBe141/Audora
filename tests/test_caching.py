@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
 import time
+from unittest.mock import MagicMock, patch
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -81,6 +86,12 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_build_cache_key_uses_sha256_digest(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", ("arg",), {"kw": "value"})
+        digests = key.split(":")[1:]
+        assert digests
+        assert all(len(digest) == 64 for digest in digests)
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +129,58 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache serialization safety."""
+
+    def _backend(self):
+        with (
+            patch("core.caching.REDIS_AVAILABLE", True),
+            patch("core.caching.ConnectionPool"),
+            patch("core.caching.redis.Redis") as redis_cls,
+        ):
+            client = MagicMock()
+            client.ping.return_value = True
+            redis_cls.return_value = client
+            backend = RedisCacheBackend()
+        return backend, client
+
+    def test_json_compatible_values_round_trip(self):
+        backend, _client = self._backend()
+        value = {"artist": "Example", "scores": [1, 2, 3], "active": True}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_bytes_round_trip(self):
+        backend, _client = self._backend()
+        value = b"\x00audora\xff"
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_dataframe_round_trip(self):
+        backend, _client = self._backend()
+        value = pd.DataFrame({"track": ["one", "two"], "score": [1.5, 2.5]})
+
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        pd.testing.assert_frame_equal(restored, value)
+
+    def test_rejects_legacy_pickle_payload_without_loading(self):
+        backend, client = self._backend()
+        legacy_payload = b"\x80\x04\x95\x16\x00\x00\x00\x00\x00\x00\x00}\x94\x8c\x06unsafe\x94\x8c\x06legacy\x94s."
+        client.get.return_value = legacy_payload
+
+        assert backend.get("audora:key") is None
+        client.delete.assert_called_once_with("audora:key")
+
+    def test_rejects_unsupported_objects_on_set(self):
+        backend, _client = self._backend()
+
+        with pytest.raises(TypeError, match="Unsupported Redis cache value type"):
+            backend._serialize(object())
