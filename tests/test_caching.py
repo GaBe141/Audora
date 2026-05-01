@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +126,42 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for non-executable Redis cache serialization."""
+
+    def _backend_without_connection(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._backend_without_connection()
+        payload = pickle.dumps({"unsafe": "payload"}, protocol=pickle.HIGHEST_PROTOCOL)
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest(),
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        assert backend._deserialize(json.dumps(legacy_envelope).encode("utf-8")) is None
+
+    def test_json_round_trip_preserves_common_values(self):
+        backend = self._backend_without_connection()
+        value = {
+            "tuple": ("artist", 42),
+            "set": {"spotify", "lastfm"},
+            "list": [1, True, None],
+        }
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_json_round_trip_preserves_dataframe(self):
+        backend = self._backend_without_connection()
+        df = pd.DataFrame({"track": ["A", "B"], "score": [1.5, 2.5]})
+
+        restored = backend._deserialize(backend._serialize(df))
+
+        pd.testing.assert_frame_equal(restored, df)
