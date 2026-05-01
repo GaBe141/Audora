@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Security validation and configuration setup for Spotify Insights."""
+"""Security validation and configuration setup for Audora."""
 
 import sys
 from pathlib import Path
 
-# Add src to path for imports
-src_path = Path(__file__).resolve().parent / "src"
-sys.path.insert(0, str(src_path))
+# Add project root to path for package imports when this script is run directly.
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
 
 # Import after path modification
-from src.config import SecureConfig  # noqa: E402
+from core.config import SecureConfig  # noqa: E402
 
 
 def main():
     """Main security validation and setup routine."""
-    print("🔐 Spotify Insights - Security Configuration Validator")
+    print("🔐 Audora - Security Configuration Validator")
     print("=" * 60)
 
     # Initialize config manager
