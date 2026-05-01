@@ -150,7 +150,7 @@ class TestNotificationTransportSecurity:
         result = await svc._send_email(message)
 
         assert result["success"] is False
-        assert "Refusing to authenticate" in result["error"]
+        assert "Refusing to send SMTP credentials without TLS" in result["error"]
 
     @pytest.mark.asyncio
     async def test_email_starttls_uses_verified_context(self, message):
