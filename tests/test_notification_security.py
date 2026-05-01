@@ -134,7 +134,8 @@ class TestNotificationTransportSecurity:
         assert result["error"].startswith("Redirect responses are not allowed")
         assert _RedirectingClientSession.last_post_kwargs["allow_redirects"] is False
 
-    def test_email_rejects_plaintext_auth(self, message):
+    @pytest.mark.asyncio
+    async def test_email_rejects_plaintext_auth(self, message):
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -146,12 +147,13 @@ class TestNotificationTransportSecurity:
             }
         )
 
-        result = svc._send_email(message)
+        result = await svc._send_email(message)
 
         assert result["success"] is False
         assert "Refusing to authenticate" in result["error"]
 
-    def test_email_starttls_uses_verified_context(self, message):
+    @pytest.mark.asyncio
+    async def test_email_starttls_uses_verified_context(self, message):
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -165,7 +167,7 @@ class TestNotificationTransportSecurity:
 
         smtp = MagicMock()
         with patch("core.notification_service.smtplib.SMTP", return_value=smtp):
-            result = svc._send_email(message)
+            result = await svc._send_email(message)
 
         assert result["success"] is True
         context = smtp.starttls.call_args.kwargs["context"]
