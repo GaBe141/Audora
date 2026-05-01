@@ -4,9 +4,15 @@ import base64
 import hashlib
 import hmac
 import json
+import pickle
 import time
 
-from core.caching import LocalCacheBackend, RedisCacheBackend
+import pandas as pd
+
+from core.caching import (
+    LocalCacheBackend,
+    RedisCacheBackend,
+)
 
 
 class TestLocalCacheBackend:
@@ -123,33 +129,39 @@ class TestCachedDecorator:
 
 
 class TestRedisCacheSerialization:
-    """Tests for secure Redis serialization helpers."""
+    """Tests for non-executable Redis cache serialization."""
 
-    def test_rejects_legacy_envelope_version(self):
+    def _backend_without_connection(self):
         backend = object.__new__(RedisCacheBackend)
         backend._signing_key = b"test-signing-key"
-        legacy_payload = b"legacy-payload"
-        sig = hmac.new(backend._signing_key, legacy_payload, hashlib.sha256).hexdigest()
-        envelope = {
+        return backend
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._backend_without_connection()
+        payload = pickle.dumps({"unsafe": "payload"}, protocol=pickle.HIGHEST_PROTOCOL)
+        legacy_envelope = {
             "v": 1,
             "alg": "HMAC-SHA256",
-            "sig": sig,
-            "payload": base64.b64encode(legacy_payload).decode("ascii"),
+            "sig": hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest(),
+            "payload": base64.b64encode(payload).decode("ascii"),
         }
-        serialized = json.dumps(envelope).encode("utf-8")
-        assert backend._deserialize(serialized) is None
 
-    def test_round_trip_json_safe_values(self):
-        backend = object.__new__(RedisCacheBackend)
-        backend._signing_key = b"test-signing-key"
+        assert backend._deserialize(json.dumps(legacy_envelope).encode("utf-8")) is None
+
+    def test_json_round_trip_preserves_common_values(self):
+        backend = self._backend_without_connection()
         value = {
-            "track": "Song A",
-            "counts": [1, 2, 3],
-            "shape": ("artist", "album"),
-            "tags": {"new", "viral"},
+            "tuple": ("artist", 42),
+            "set": {"spotify", "lastfm"},
+            "list": [1, True, None],
         }
 
-        serialized = backend._serialize(value)
-        decoded = backend._deserialize(serialized)
+        assert backend._deserialize(backend._serialize(value)) == value
 
-        assert decoded == value
+    def test_json_round_trip_preserves_dataframe(self):
+        backend = self._backend_without_connection()
+        df = pd.DataFrame({"track": ["A", "B"], "score": [1.5, 2.5]})
+
+        restored = backend._deserialize(backend._serialize(df))
+
+        pd.testing.assert_frame_equal(restored, df)

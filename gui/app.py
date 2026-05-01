@@ -4,8 +4,9 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
+import asyncio
 import hmac
-import json
+import io
 import os
 import subprocess
 import sys
@@ -13,11 +14,19 @@ from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
 
+from core.data_store import EnhancedMusicDataStore
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
 
 app = dash.Dash(
     __name__,
@@ -219,16 +228,13 @@ _settings_tab = dbc.Tab(
             dbc.Col(dbc.Input(id="input-smtp-host", placeholder="smtp.example.com"), width=4),
             dbc.Col(dbc.Input(id="input-smtp-port", placeholder="587", type="number", value=587), width=2),
             dbc.Col(dbc.Input(id="input-smtp-user", placeholder="username"), width=3),
-            dbc.Col(dbc.Input(id="input-smtp-pass", placeholder="password", type="password"), width=3),
-        ], className="mb-2"),
-        dbc.Row([
             dbc.Col(
                 dbc.Input(
                     id="input-admin-token",
-                    placeholder="Admin token (required to save/test channels)",
+                    placeholder="admin token",
                     type="password",
                 ),
-                width=6,
+                width=3,
             ),
         ], className="mb-2"),
         dbc.Row([
@@ -387,9 +393,17 @@ def _run_command(args: list[str]) -> tuple[str, str]:
 
 def _get_data_store():
     """Return an EnhancedMusicDataStore pointed at the default DB path."""
-    from core.data_store import EnhancedMusicDataStore
     db_path = PROJECT_ROOT / "data" / "enhanced_music_trends.db"
     return EnhancedMusicDataStore(str(db_path))
+
+
+def _validate_admin_token(provided_token: str | None) -> None:
+    """Validate the admin token required for sensitive GUI actions."""
+    configured_token = os.getenv("AUDORA_GUI_ADMIN_TOKEN", "").strip()
+    if not configured_token:
+        raise PermissionError("AUDORA_GUI_ADMIN_TOKEN must be set to use admin actions")
+    if provided_token != configured_token:
+        raise PermissionError("Invalid admin token")
 
 
 # ---------------------------------------------------------------------------
@@ -581,8 +595,6 @@ def search_history(_n, platform, min_score, days, artist_filter):
 def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
-    import io
-    import pandas as pd
     df = pd.DataFrame(table_data)
     buf = io.StringIO()
     df.to_csv(buf, index=False)
@@ -602,26 +614,13 @@ def export_csv(_n, table_data):
     State("input-smtp-host", "value"),
     State("input-smtp-port", "value"),
     State("input-smtp-user", "value"),
-    State("input-smtp-pass", "value"),
     State("input-admin-token", "value"),
     prevent_initial_call=True,
 )
-def save_settings(
-    _n,
-    slack_url,
-    discord_url,
-    webhook_url,
-    smtp_host,
-    smtp_port,
-    smtp_user,
-    smtp_pass,
-    admin_token,
-):
+def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, admin_token):
     if not _is_sensitive_action_authorized(admin_token):
         return "Unauthorized: set AUDORA_GUI_ADMIN_TOKEN and provide a valid token."
-
     try:
-        from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
             svc.config["slack"]["webhook_url"] = slack_url
@@ -635,13 +634,10 @@ def save_settings(
             svc.config["email"]["port"] = int(smtp_port)
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
-        # Do not persist SMTP passwords from the web UI.
-        if smtp_pass:
-            svc.config["email"]["password"] = os.getenv("SMTP_PASSWORD", "")
         svc.save_config()
-        if smtp_pass:
-            return "Saved (SMTP password is sourced from SMTP_PASSWORD env var only)."
         return "Saved"
+    except PermissionError as e:
+        return f"Unauthorized: {e}"
     except Exception as e:
         return f"Error: {e}"
 
@@ -662,13 +658,6 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         if not url:
             return "No URL"
         try:
-            import asyncio
-            from core.notification_service import (
-                EnhancedNotificationService,
-                NotificationChannel,
-                NotificationMessage,
-                NotificationPriority,
-            )
             svc = EnhancedNotificationService()
             svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
             channel = getattr(NotificationChannel, channel_enum_name)
@@ -680,6 +669,8 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
             )
             asyncio.run(svc.send_notification(msg))
             return "OK"
+        except PermissionError as e:
+            return f"Unauthorized: {e}"
         except Exception as e:
             return f"Fail: {e}"
 

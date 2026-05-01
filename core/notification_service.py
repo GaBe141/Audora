@@ -8,8 +8,8 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -189,28 +189,27 @@ class EnhancedNotificationService:
         """
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
-        # Never persist plaintext credentials to disk.
-        if "email" in to_save and isinstance(to_save["email"], dict):
-            to_save["email"] = dict(to_save["email"])
-            to_save["email"]["password"] = ""
-        if "sms" in to_save and isinstance(to_save["sms"], dict):
-            to_save["sms"] = dict(to_save["sms"])
-            to_save["sms"]["api_key"] = ""
-            to_save["sms"]["api_secret"] = ""
-        if "webhook" in to_save and isinstance(to_save["webhook"], dict):
-            to_save["webhook"] = dict(to_save["webhook"])
-            headers = dict(to_save["webhook"].get("headers", {}))
-            headers.pop("Authorization", None)
-            to_save["webhook"]["headers"] = headers
+        # Only save channel-specific sections (not internal runtime state), and
+        # never persist secrets that should be supplied from the environment.
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
+        to_save = {
+            k: self._redact_saved_config_section(k, self.config[k])
+            for k in saveable_keys
+            if k in self.config
+        }
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -226,6 +225,27 @@ class EnhancedNotificationService:
                 "AUDORA_ALLOW_PRIVATE_WEBHOOKS is ignored; private webhook targets are disabled."
             )
         return False
+
+    def _redact_saved_config_section(self, section: str, value: Any) -> Any:
+        """Return a copy of a config section with persisted secrets removed."""
+        if not isinstance(value, dict):
+            return value
+
+        redacted = dict(value)
+        if section == "email":
+            redacted["password"] = ""
+        elif section == "sms":
+            redacted["api_key"] = ""
+            redacted["api_secret"] = ""
+        elif section == "webhook":
+            headers = redacted.get("headers")
+            if isinstance(headers, dict):
+                redacted["headers"] = {
+                    key: header_value
+                    for key, header_value in headers.items()
+                    if key.lower() != "authorization"
+                }
+        return redacted
 
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
@@ -262,12 +282,11 @@ class EnhancedNotificationService:
         except socket.gaierror as e:
             raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
 
-        if not allow_private:
-            for ip in resolved_ips:
-                if self._is_restricted_ip(ip):
-                    raise ValueError(
-                        "Webhook URL resolves to a private or restricted network address"
-                    )
+        for ip in resolved_ips:
+            if self._is_restricted_ip(ip):
+                raise ValueError(
+                    "Webhook URL resolves to a private or restricted network address"
+                )
 
         return url
 
@@ -915,8 +934,6 @@ System status: {{ system_status }}
 
 # Example usage and testing
 if __name__ == "__main__":
-    import asyncio
-
     async def test_notifications():
         """Test the notification system."""
 
