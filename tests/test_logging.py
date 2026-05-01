@@ -8,6 +8,7 @@ from core.logging_config import (
     ColoredConsoleFormatter,
     JSONFormatter,
     LogContext,
+    RedactingFormatter,
     get_logger,
     setup_logging,
 )
@@ -68,6 +69,34 @@ class TestJSONFormatter:
         assert data["exception"]["type"] == "ValueError"
         assert "test error" in (data["exception"].get("message") or "")
 
+    def test_format_redacts_sensitive_values(self):
+        formatter = JSONFormatter()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="Using token secret-token-123 and password=s3cr3t",
+            args=(),
+            exc_info=None,
+        )
+        record.funcName = "f"
+        record.module = "m"
+        record.thread = 0
+        record.threadName = "Main"
+        record.api_key = "api-key-123"
+        record.extra_fields = {"nested": {"client_secret": "super-secret"}}
+        output = formatter.format(record)
+        data = json.loads(output)
+        serialized = json.dumps(data)
+
+        assert "secret-token-123" not in serialized
+        assert "s3cr3t" not in serialized
+        assert "api-key-123" not in serialized
+        assert "super-secret" not in serialized
+        assert data["api_key"] == "[REDACTED]"
+        assert data["nested"]["client_secret"] == "[REDACTED]"
+
 
 class TestColoredConsoleFormatter:
     """Tests for ColoredConsoleFormatter - at least message and level appear."""
@@ -87,6 +116,41 @@ class TestColoredConsoleFormatter:
         output = formatter.format(record)
         assert "Test message" in output
         assert "INFO" in output
+
+    def test_format_redacts_sensitive_values(self):
+        formatter = ColoredConsoleFormatter(fmt="%(levelname)s - %(message)s", datefmt="")
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="Authorization: Bearer secret-token-123",
+            args=(),
+            exc_info=None,
+        )
+        record.getMessage = lambda: "Authorization: Bearer secret-token-123"
+        output = formatter.format(record)
+        assert "secret-token-123" not in output
+        assert "[REDACTED]" in output
+
+
+class TestRedactingFormatter:
+    """Tests for plain-text formatter redaction."""
+
+    def test_format_redacts_sensitive_values(self):
+        formatter = RedactingFormatter(fmt="%(levelname)s - %(message)s", datefmt="")
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="password=s3cr3t",
+            args=(),
+            exc_info=None,
+        )
+        output = formatter.format(record)
+        assert "s3cr3t" not in output
+        assert "[REDACTED]" in output
 
 
 class TestLogContext:

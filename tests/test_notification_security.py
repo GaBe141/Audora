@@ -27,3 +27,13 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_rejects_embedded_credentials(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="embedded credentials"):
+            svc._validate_webhook_url("https://user:pass@example.com/webhook")
+
+    def test_request_timeout_is_bounded(self):
+        svc = EnhancedNotificationService()
+        assert svc._get_request_timeout(0).total == 1.0
+        assert svc._get_request_timeout(120).total == 60.0

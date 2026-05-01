@@ -4,12 +4,63 @@ This module provides JSON-formatted logging with proper handlers for
 file and console output, improving observability and debugging capabilities.
 """
 
+import copy
 import json
 import logging
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+SENSITIVE_FIELD_PATTERN = re.compile(
+    r"(api[_-]?key|authorization|bearer|client[_-]?secret|credential|password|refresh[_-]?token|secret|token)",
+    re.IGNORECASE,
+)
+SENSITIVE_VALUE_PATTERN = re.compile(
+    r"(?i)(authorization\s*[:=]\s*bearer\s+)[A-Za-z0-9._~+/\-]+=*|"
+    r"(bearer\s+)[A-Za-z0-9._~+/\-]+=*|"
+    r"((?:api[_-]?key|authorization|client[_-]?secret|password|refresh[_-]?token|secret|token)\s+)"
+    r"([^\s,;\"']+)|"
+    r"([A-Za-z0-9_.-]*(?:api[_-]?key|authorization|client[_-]?secret|password|"
+    r"refresh[_-]?token|secret|token)[A-Za-z0-9_.-]*\s*[:=]\s*)([^\s,;\"']+)"
+)
+REDACTED = "[REDACTED]"
+
+
+def _redact_sensitive_match(match: re.Match[str]) -> str:
+    """Preserve credential prefixes while removing secret values."""
+    if match.group(1):
+        return f"{match.group(1)}{REDACTED}"
+    if match.group(2):
+        return f"{match.group(2)}{REDACTED}"
+    if match.group(3):
+        return f"{match.group(3)}{REDACTED}"
+    return f"{match.group(5)}{REDACTED}"
+
+
+def _redact_sensitive_data(value: Any) -> Any:
+    """Redact credentials from structured log data before emission."""
+    if isinstance(value, dict):
+        redacted = {}
+        for key, nested_value in value.items():
+            key_text = str(key)
+            if SENSITIVE_FIELD_PATTERN.search(key_text):
+                redacted[key] = REDACTED
+            else:
+                redacted[key] = _redact_sensitive_data(nested_value)
+        return redacted
+
+    if isinstance(value, list):
+        return [_redact_sensitive_data(item) for item in value]
+
+    if isinstance(value, tuple):
+        return tuple(_redact_sensitive_data(item) for item in value)
+
+    if isinstance(value, str):
+        return SENSITIVE_VALUE_PATTERN.sub(_redact_sensitive_match, value)
+
+    return value
 
 
 class JSONFormatter(logging.Formatter):
@@ -32,7 +83,7 @@ class JSONFormatter(logging.Formatter):
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": _redact_sensitive_data(record.getMessage()),
             "module": record.module,
             "function": record.funcName,
             "line": record.lineno,
@@ -44,13 +95,15 @@ class JSONFormatter(logging.Formatter):
         if record.exc_info:
             log_data["exception"] = {
                 "type": record.exc_info[0].__name__ if record.exc_info[0] else None,
-                "message": str(record.exc_info[1]) if record.exc_info[1] else None,
-                "traceback": self.formatException(record.exc_info),
+                "message": (
+                    _redact_sensitive_data(str(record.exc_info[1])) if record.exc_info[1] else None
+                ),
+                "traceback": _redact_sensitive_data(self.formatException(record.exc_info)),
             }
 
         # Add custom fields from 'extra' parameter
         if hasattr(record, "extra_fields"):
-            log_data.update(record.extra_fields)
+            log_data.update(_redact_sensitive_data(record.extra_fields))
 
         # Add any other custom attributes
         for key, value in record.__dict__.items():
@@ -79,14 +132,28 @@ class JSONFormatter(logging.Formatter):
                 "extra_fields",
             ]:
                 try:
-                    log_data[key] = value
+                    if SENSITIVE_FIELD_PATTERN.search(str(key)):
+                        log_data[key] = REDACTED
+                    else:
+                        log_data[key] = _redact_sensitive_data(value)
                 except (TypeError, ValueError):
-                    log_data[key] = str(value)
+                    log_data[key] = _redact_sensitive_data(str(value))
 
         return json.dumps(log_data, default=str)
 
 
-class ColoredConsoleFormatter(logging.Formatter):
+class RedactingFormatter(logging.Formatter):
+    """Format log records after redacting credential-like values."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        safe_record = copy.copy(record)
+        safe_record.msg = _redact_sensitive_data(record.getMessage())
+        safe_record.args = ()
+        safe_record.getMessage = lambda: str(safe_record.msg)
+        return super().format(safe_record)
+
+
+class ColoredConsoleFormatter(RedactingFormatter):
     """Format log records with colors for console output.
 
     This formatter adds ANSI color codes for different log levels,
@@ -113,11 +180,16 @@ class ColoredConsoleFormatter(logging.Formatter):
         Returns:
             Colored log string
         """
-        color = self.COLORS.get(record.levelname, self.RESET)
-        record.levelname = f"{color}{self.BOLD}{record.levelname}{self.RESET}"
-        record.name = f"{self.BOLD}{record.name}{self.RESET}"
+        safe_record = copy.copy(record)
+        safe_record.msg = _redact_sensitive_data(record.getMessage())
+        safe_record.args = ()
+        safe_record.getMessage = lambda: str(safe_record.msg)
 
-        return super().format(record)
+        color = self.COLORS.get(safe_record.levelname, self.RESET)
+        safe_record.levelname = f"{color}{self.BOLD}{safe_record.levelname}{self.RESET}"
+        safe_record.name = f"{self.BOLD}{safe_record.name}{self.RESET}"
+
+        return logging.Formatter.format(self, safe_record)
 
 
 def setup_logging(
@@ -178,7 +250,7 @@ def setup_logging(
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
         else:
-            console_formatter = logging.Formatter(
+            console_formatter = RedactingFormatter(
                 fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
@@ -199,7 +271,7 @@ def setup_logging(
             main_handler.setFormatter(JSONFormatter())
         else:
             main_handler.setFormatter(
-                logging.Formatter(
+                RedactingFormatter(
                     fmt="%(asctime)s - %(name)s - %(levelname)s - "
                     "%(module)s:%(funcName)s:%(lineno)d - %(message)s",
                     datefmt="%Y-%m-%d %H:%M:%S",
@@ -217,7 +289,7 @@ def setup_logging(
             error_handler.setFormatter(JSONFormatter())
         else:
             error_handler.setFormatter(
-                logging.Formatter(
+                RedactingFormatter(
                     fmt="%(asctime)s - %(name)s - %(levelname)s - "
                     "%(module)s:%(funcName)s:%(lineno)d - %(message)s\n"
                     "Exception: %(exc_info)s",
@@ -312,6 +384,7 @@ __all__ = [
     "setup_logging",
     "get_logger",
     "JSONFormatter",
+    "RedactingFormatter",
     "ColoredConsoleFormatter",
     "LogContext",
 ]
