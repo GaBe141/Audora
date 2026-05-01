@@ -4,9 +4,7 @@ Integrates all social media APIs for Gen Z/Alpha music trend analysis.
 """
 
 import asyncio
-import json
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from core.utils import save_report
