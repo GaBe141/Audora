@@ -21,10 +21,10 @@ class TestMusicBrainzAPISuccess:
                 },
             ],
         }
-        with patch.object(api.session, "get", return_value=mock_response):
+        with patch.object(api.session, "get", return_value=mock_response) as mock_get:
             result = api.search_artist("Test Artist")
-        api.session.get.assert_called_once()
-        assert api.session.get.call_args.kwargs["timeout"] == REQUEST_TIMEOUT_SECONDS
+        mock_get.assert_called_once()
+        assert mock_get.call_args.kwargs["timeout"] == REQUEST_TIMEOUT_SECONDS
         assert result is not None
         assert result["name"] == "Test Artist"
         assert result["id"] == "mbid-123"
