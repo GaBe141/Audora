@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -58,6 +63,67 @@ class TestLocalCacheBackend:
         assert backend.get("d") == 4
         present = sum(1 for k in ("a", "b", "c") if backend.get(k) is not None)
         assert present == 2
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache safe serialization."""
+
+    def test_round_trips_json_value_without_pickle(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = {"artist": "Audora", "scores": [1, 2, 3], "active": True}
+
+        serialized = backend._serialize(payload)
+
+        assert serialized is not None
+        assert backend._deserialize(serialized) == payload
+
+    def test_round_trips_bytes_value(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = b"\x00audora\xff"
+
+        serialized = backend._serialize(payload)
+
+        assert serialized is not None
+        assert backend._deserialize(serialized) == payload
+
+    def test_round_trips_dataframe_value(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        frame = pd.DataFrame({"track": ["A", "B"], "score": [91.5, 88.0]})
+
+        serialized = backend._serialize(frame)
+        assert serialized is not None
+        result = backend._deserialize(serialized)
+
+        pd.testing.assert_frame_equal(result, frame)
+
+    def test_rejects_legacy_pickle_payload_without_execution(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        class Exploit:
+            def __reduce__(self):
+                raise AssertionError("pickle payload was executed")
+
+        legacy_payload = pickle.dumps(Exploit())
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_unsupported_objects_are_not_cached(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        assert backend._serialize(object()) is None
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            b"not-json",
+            b'{"v":1,"type":"pickle","payload":"gASV"}',
+            b'{"v":2,"type":"json","payload":{}}',
+        ],
+    )
+    def test_invalid_payloads_are_marked_for_deletion(self, stored):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        assert backend._serialized_value_is_invalid(stored) is True
 
 
 class TestCacheManager:
