@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import pickle
 import time
 
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,64 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSerializationSecurity:
+    """Tests for Redis cache serialization without unsafe pickle loading."""
+
+    def test_serializes_json_compatible_values(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = {"artist": "Example", "scores": [1, 2, 3], "active": True}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_serializes_bytes_values(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = b"\x00audora-cache"
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = pickle.dumps({"unsafe": "legacy"}, protocol=pickle.HIGHEST_PROTOCOL)
+
+        assert backend._deserialize(payload) is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError):
+            backend._serialize(object())
+
+    def test_rejects_unknown_envelope_type(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        envelope = b'{"v":2,"type":"pickle","payload":"AAAA"}'
+
+        assert backend._deserialize(envelope) is None
+
+    def test_deserialize_does_not_call_pickle_loads(self, monkeypatch):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        envelope = {
+            "v": 2,
+            "type": "bytes",
+            "payload": base64.b64encode(b"safe").decode("ascii"),
+        }
+
+        def fail_pickle_loads(_payload):
+            raise AssertionError("pickle.loads must not be used for Redis cache data")
+
+        monkeypatch.setattr(pickle, "loads", fail_pickle_loads)
+
+        assert backend._deserialize(__import__("json").dumps(envelope).encode("utf-8")) == b"safe"
+
+    def test_cache_key_uses_sha256_hashes(self):
+        cache = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+        key = cache._build_cache_key("prefix", ("arg",), {"kw": "value"})
+
+        hashes = key.split(":")[1:]
+        assert len(hashes) == 2
+        assert all(len(part) == 64 for part in hashes)
