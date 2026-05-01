@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,55 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache serialization hardening."""
+
+    def _backend_without_connection(self) -> RedisCacheBackend:
+        return RedisCacheBackend.__new__(RedisCacheBackend)
+
+    def test_json_serialization_round_trip(self):
+        backend = self._backend_without_connection()
+        payload = {"artist": "Test Artist", "scores": [1, 2, 3]}
+
+        serialized = backend._serialize(payload)
+
+        assert backend._deserialize(serialized) == payload
+
+    def test_bytes_serialization_round_trip(self):
+        backend = self._backend_without_connection()
+        payload = b"\x00audora-cache"
+
+        serialized = backend._serialize(payload)
+
+        assert backend._deserialize(serialized) == payload
+
+    def test_dataframe_serialization_round_trip(self):
+        backend = self._backend_without_connection()
+        payload = pd.DataFrame({"track": ["A", "B"], "score": [91.5, 83.0]})
+
+        serialized = backend._serialize(payload)
+        restored = backend._deserialize(serialized)
+
+        pd.testing.assert_frame_equal(restored, payload)
+
+    def test_legacy_pickle_payload_is_rejected(self):
+        backend = self._backend_without_connection()
+        unsafe_payload = pickle.dumps({"should_not": "load"})
+
+        assert backend._deserialize(unsafe_payload) is None
+
+    def test_unsupported_value_type_is_not_serialized(self):
+        backend = self._backend_without_connection()
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            backend._serialize(object())
+
+    def test_cache_key_uses_sha256_digest(self):
+        manager = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+
+        cache_key = manager._build_cache_key("prefix", ("abc",), {"limit": 10})
+
+        digests = cache_key.split(":")[1:]
+        assert all(len(digest) == 64 for digest in digests)
