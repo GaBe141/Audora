@@ -1,6 +1,5 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
-import pickle
 import time
 
 import pandas as pd
@@ -98,12 +97,12 @@ class TestRedisCacheSerialization:
 
     def test_rejects_legacy_pickle_payload_without_execution(self):
         backend = RedisCacheBackend.__new__(RedisCacheBackend)
-
-        class Exploit:
-            def __reduce__(self):
-                raise AssertionError("pickle payload was executed")
-
-        legacy_payload = pickle.dumps(Exploit())
+        legacy_payload = (
+            b"cos\n"
+            b"system\n"
+            b"(S'echo unsafe pickle payload'\n"
+            b"tR."
+        )
 
         assert backend._deserialize(legacy_payload) is None
 
