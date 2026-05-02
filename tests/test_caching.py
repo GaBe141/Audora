@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,43 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for RedisCacheBackend safe serialization helpers."""
+
+    def _backend_without_connection(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_serializes_json_without_pickle_payload(self):
+        backend = self._backend_without_connection()
+        serialized = backend._serialize({"artist": "Beyonce", "score": 98})
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["format"] == "json"
+        assert envelope["v"] == 2
+        assert b"\x80" not in serialized
+        assert backend._deserialize(serialized) == {"artist": "Beyonce", "score": 98}
+
+    def test_rejects_tampered_payload(self):
+        backend = self._backend_without_connection()
+        envelope = json.loads(backend._serialize({"safe": True}).decode("utf-8"))
+        envelope["payload"] = envelope["payload"][:-2] + "AA"
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_round_trips_dataframe_as_safe_json(self):
+        backend = self._backend_without_connection()
+        frame = pd.DataFrame({"track": ["One", "Two"], "score": [1, 2]})
+
+        result = backend._deserialize(backend._serialize(frame))
+
+        pd.testing.assert_frame_equal(result, frame)
+
+    def test_rejects_unsupported_object_types(self):
+        backend = self._backend_without_connection()
+
+        with pytest.raises(TypeError):
+            backend._serialize(object())
