@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +82,59 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for the Redis cache wire format."""
+
+    def test_serializes_json_without_pickle(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        serialized = backend._serialize({"tracks": ["a", "b"], "score": 95})
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["type"] == "json"
+        assert backend._deserialize(serialized) == {"tracks": ["a", "b"], "score": 95}
+
+    def test_serializes_bytes_as_base64_json(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        serialized = backend._serialize(b"binary-token")
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["type"] == "bytes"
+        assert backend._deserialize(serialized) == b"binary-token"
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "ignored",
+            "payload": "gASVBAAAAAAAAABOLg==",
+        }
+
+        assert backend._deserialize(json.dumps(legacy_envelope).encode("utf-8")) is None
+
+    def test_rejects_non_json_payloads(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        assert backend._deserialize(b"\x80\x04malicious-pickle") is None
+
+    def test_rejects_non_json_serializable_values(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        class Unsupported:
+            pass
+
+        try:
+            backend._serialize({"unsupported": Unsupported()})
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("Expected unsupported cache values to be rejected")
 
 
 class TestCachedDecorator:
