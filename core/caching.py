@@ -171,10 +171,14 @@ class RedisCacheBackend(CacheBackend):
             logger.error(f"Failed to connect to Redis: {e}")
             raise
 
-    def _serialize(self, value: Any) -> bytes:
+    def _serialize(self, value: Any) -> bytes | None:
         """Serialize cache value to a safe JSON envelope."""
-        envelope = self._to_json_envelope(value)
-        return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        try:
+            envelope = self._to_json_envelope(value)
+            return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError) as e:
+            logger.error("Rejected unsupported cache value: %s", e)
+            return None
 
     def _deserialize(self, value: bytes) -> Any | None:
         """Deserialize cache value from a safe JSON envelope."""
@@ -249,6 +253,8 @@ class RedisCacheBackend(CacheBackend):
         """Set value in cache with optional TTL."""
         try:
             serialized = self._serialize(value)
+            if serialized is None:
+                return
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:

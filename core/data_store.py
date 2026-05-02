@@ -73,6 +73,78 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    _BULK_UPDATE_FIELD_ORDER = (
+        "platform",
+        "track_name",
+        "artist",
+        "score",
+        "rank",
+        "region",
+        "trend_date",
+        "first_detected",
+        "metadata",
+        "is_active",
+    )
+    _BULK_UPDATE_SET_CLAUSES = {
+        "platform": "platform = ?",
+        "track_name": "track_name = ?",
+        "artist": "artist = ?",
+        "score": "score = ?",
+        "rank": "rank = ?",
+        "region": "region = ?",
+        "trend_date": "trend_date = ?",
+        "first_detected": "first_detected = ?",
+        "metadata": "metadata = ?",
+        "is_active": "is_active = ?",
+    }
+    _EXPORT_QUERIES = {
+        "trends": "SELECT * FROM trends ORDER BY created_at DESC",
+        "trend_history": "SELECT * FROM trend_history ORDER BY created_at DESC",
+        "viral_predictions": "SELECT * FROM viral_predictions ORDER BY created_at DESC",
+        "cross_platform_correlations": (
+            "SELECT * FROM cross_platform_correlations ORDER BY created_at DESC"
+        ),
+        "artists": "SELECT * FROM artists ORDER BY created_at DESC",
+        "tracks": "SELECT * FROM tracks ORDER BY created_at DESC",
+    }
+    _EXPORT_QUERIES_WITH_DAYS = {
+        "trends": (
+            "SELECT * FROM trends "
+            "WHERE datetime(created_at) >= datetime('now', ?) "
+            "ORDER BY created_at DESC"
+        ),
+        "trend_history": (
+            "SELECT * FROM trend_history "
+            "WHERE datetime(created_at) >= datetime('now', ?) "
+            "ORDER BY created_at DESC"
+        ),
+        "viral_predictions": (
+            "SELECT * FROM viral_predictions "
+            "WHERE datetime(created_at) >= datetime('now', ?) "
+            "ORDER BY created_at DESC"
+        ),
+        "cross_platform_correlations": (
+            "SELECT * FROM cross_platform_correlations "
+            "WHERE datetime(created_at) >= datetime('now', ?) "
+            "ORDER BY created_at DESC"
+        ),
+        "artists": (
+            "SELECT * FROM artists "
+            "WHERE datetime(created_at) >= datetime('now', ?) "
+            "ORDER BY created_at DESC"
+        ),
+        "tracks": (
+            "SELECT * FROM tracks "
+            "WHERE datetime(created_at) >= datetime('now', ?) "
+            "ORDER BY created_at DESC"
+        ),
+    }
+    _QUALITY_COUNT_QUERIES = {
+        "trends": "SELECT COUNT(*) FROM trends",
+        "trend_history": "SELECT COUNT(*) FROM trend_history",
+        "viral_predictions": "SELECT COUNT(*) FROM viral_predictions",
+        "cross_platform_correlations": "SELECT COUNT(*) FROM cross_platform_correlations",
+    }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
@@ -513,36 +585,24 @@ class EnhancedMusicDataStore:
             DataFrame with trending tracks
         """
         with self.get_connection() as conn:
-            # Build dynamic query
-            conditions = [
-                "datetime(trend_date) >= datetime('now', ?)",
-                "score >= ?",
-                "is_active = 1",
-            ]
-            params = [f"-{days} days", min_score]
-
-            if platform:
-                conditions.append("platform = ?")
-                params.append(platform)
-
-            if region:
-                conditions.append("region = ?")
-                params.append(region)
-
-            query = f"""
+            query = """
             SELECT
                 platform, track_name, artist, score, rank, region, trend_date,
                 metadata, first_detected,
                 (SELECT COUNT(*) FROM trend_history th WHERE th.trend_id = t.id) as data_points,
                 (SELECT AVG(velocity) FROM trend_history th WHERE th.trend_id = t.id) as avg_velocity
             FROM trends t
-            WHERE {' AND '.join(conditions)}
+            WHERE datetime(trend_date) >= datetime('now', ?)
+            AND score >= ?
+            AND is_active = 1
+            AND (? IS NULL OR platform = ?)
+            AND (? IS NULL OR region = ?)
             ORDER BY score DESC, trend_date DESC
             LIMIT ?
             """
-            params.append(limit)
+            params = (f"-{days} days", min_score, platform, platform, region, region, limit)
 
-            df = pd.read_sql_query(query, conn, params=tuple(params))
+            df = pd.read_sql_query(query, conn, params=params)
 
             # Parse metadata if it exists
             if not df.empty and "metadata" in df.columns:
@@ -559,27 +619,22 @@ class EnhancedMusicDataStore:
     ) -> pd.DataFrame:
         """Get viral predictions with filtering."""
         with self.get_connection() as conn:
-            conditions = ["confidence >= ?", "datetime(prediction_date) >= datetime('now', ?)"]
-            params = [confidence_threshold, f"-{days} days"]
-
-            if status:
-                conditions.append("status = ?")
-                params.append(status)
-
-            query = f"""
+            query = """
             SELECT
                 track_name, artist, confidence, prediction_date,
                 predicted_peak_date, predicted_peak_score,
                 actual_peak_date, actual_peak_score, accuracy_score, status,
                 prediction_features
             FROM viral_predictions
-            WHERE {' AND '.join(conditions)}
+            WHERE confidence >= ?
+            AND datetime(prediction_date) >= datetime('now', ?)
+            AND (? IS NULL OR status = ?)
             ORDER BY prediction_date DESC, confidence DESC
             LIMIT ?
             """
-            params.append(limit)
+            params = (confidence_threshold, f"-{days} days", status, status, limit)
 
-            df = pd.read_sql_query(query, conn, params=tuple(params))
+            df = pd.read_sql_query(query, conn, params=params)
 
             # Parse prediction features
             if not df.empty and "prediction_features" in df.columns:
@@ -673,25 +728,21 @@ class EnhancedMusicDataStore:
             return cached_result
 
         with self.get_connection() as conn:
-            # Build a query with OR conditions for each pair
-            conditions = []
-            params = []
-
-            for track_name, artist in track_artist_pairs:
-                conditions.append("(track_name LIKE ? AND artist LIKE ?)")
-                params.extend([f"%{track_name}%", f"%{artist}%"])
-
-            query = f"""
+            query = """
             SELECT
                 platform, track_id, track_name, artist, score, rank,
                 region, trend_date, metadata, first_detected
             FROM trends
-            WHERE ({' OR '.join(conditions)})
+            WHERE track_name LIKE ? AND artist LIKE ?
             AND is_active = 1
             ORDER BY score DESC
             """
 
-            df = pd.read_sql_query(query, conn, params=tuple(params))
+            frames = [
+                pd.read_sql_query(query, conn, params=(f"%{track_name}%", f"%{artist}%"))
+                for track_name, artist in track_artist_pairs
+            ]
+            df = pd.concat(frames, ignore_index=True).drop_duplicates()
 
             # Parse metadata
             if not df.empty and "metadata" in df.columns:
@@ -723,18 +774,8 @@ class EnhancedMusicDataStore:
             return cached_result
 
         with self.get_connection() as conn:
-            conditions = [
-                "datetime(trend_date) >= datetime('now', ?)",
-                "is_active = 1",
-            ]
-            params = [f"-{days} days"]
-
-            if platform:
-                conditions.append("platform = ?")
-                params.append(platform)
-
             # Get aggregate stats
-            stats_query = f"""
+            stats_query = """
             SELECT
                 COUNT(DISTINCT track_name || artist) as unique_tracks,
                 COUNT(DISTINCT platform) as platforms,
@@ -742,24 +783,27 @@ class EnhancedMusicDataStore:
                 MAX(score) as max_score,
                 COUNT(*) as total_entries
             FROM trends
-            WHERE {' AND '.join(conditions)}
+            WHERE datetime(trend_date) >= datetime('now', ?)
+            AND is_active = 1
+            AND (? IS NULL OR platform = ?)
             """
+            params = (f"-{days} days", platform, platform)
 
-            stats = pd.read_sql_query(stats_query, conn, params=tuple(params)).to_dict("records")[0]
+            stats = pd.read_sql_query(stats_query, conn, params=params).to_dict("records")[0]
 
             # Get top tracks
-            top_tracks_query = f"""
+            top_tracks_query = """
             SELECT
                 track_name, artist, platform, score, rank
             FROM trends
-            WHERE {' AND '.join(conditions)}
+            WHERE datetime(trend_date) >= datetime('now', ?)
+            AND is_active = 1
+            AND (? IS NULL OR platform = ?)
             ORDER BY score DESC
             LIMIT 10
             """
 
-            top_tracks = pd.read_sql_query(top_tracks_query, conn, params=tuple(params)).to_dict(
-                "records"
-            )
+            top_tracks = pd.read_sql_query(top_tracks_query, conn, params=params).to_dict("records")
 
             result = {
                 "stats": stats,
@@ -798,26 +842,35 @@ class EnhancedMusicDataStore:
         if "metadata" in sanitized_updates and not isinstance(sanitized_updates["metadata"], str):
             sanitized_updates["metadata"] = json.dumps(sanitized_updates["metadata"])
 
-        # Build SET clause
-        set_clauses = [f"{field} = ?" for field in sanitized_updates]
-        params = list(sanitized_updates.values())
-
-        # Add track IDs for WHERE clause
-        placeholders = ",".join("?" * len(track_ids))
-        params.extend(track_ids)
-
         with self.get_connection() as conn:
-            query = f"""
+            query = """
             UPDATE trends
-            SET {', '.join(set_clauses)}, last_updated = CURRENT_TIMESTAMP
-            WHERE track_id IN ({placeholders})
+            SET
+                platform = CASE WHEN ? THEN ? ELSE platform END,
+                track_name = CASE WHEN ? THEN ? ELSE track_name END,
+                artist = CASE WHEN ? THEN ? ELSE artist END,
+                score = CASE WHEN ? THEN ? ELSE score END,
+                rank = CASE WHEN ? THEN ? ELSE rank END,
+                region = CASE WHEN ? THEN ? ELSE region END,
+                trend_date = CASE WHEN ? THEN ? ELSE trend_date END,
+                first_detected = CASE WHEN ? THEN ? ELSE first_detected END,
+                metadata = CASE WHEN ? THEN ? ELSE metadata END,
+                is_active = CASE WHEN ? THEN ? ELSE is_active END,
+                last_updated = CURRENT_TIMESTAMP
+            WHERE track_id = ?
             """
 
             cursor = conn.cursor()
-            cursor.execute(query, params)
+            updated_count = 0
+            for track_id in track_ids:
+                params = []
+                for field in self._BULK_UPDATE_FIELD_ORDER:
+                    params.extend([field in sanitized_updates, sanitized_updates.get(field)])
+                params.append(track_id)
+                cursor.execute(query, params)
+                updated_count += cursor.rowcount
             conn.commit()
 
-            updated_count = cursor.rowcount
             self.logger.info(f"Bulk updated {updated_count} trends")
             return updated_count
 
@@ -945,18 +998,55 @@ class EnhancedMusicDataStore:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
         with self.get_connection() as conn:
+            base_queries = {
+                "trends": "SELECT * FROM trends ORDER BY created_at DESC",
+                "trend_history": "SELECT * FROM trend_history ORDER BY created_at DESC",
+                "viral_predictions": "SELECT * FROM viral_predictions ORDER BY created_at DESC",
+                "cross_platform_correlations": (
+                    "SELECT * FROM cross_platform_correlations ORDER BY created_at DESC"
+                ),
+                "artists": "SELECT * FROM artists ORDER BY created_at DESC",
+                "tracks": "SELECT * FROM tracks ORDER BY created_at DESC",
+            }
+            filtered_queries = {
+                "trends": (
+                    "SELECT * FROM trends "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                ),
+                "trend_history": (
+                    "SELECT * FROM trend_history "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                ),
+                "viral_predictions": (
+                    "SELECT * FROM viral_predictions "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                ),
+                "cross_platform_correlations": (
+                    "SELECT * FROM cross_platform_correlations "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                ),
+                "artists": (
+                    "SELECT * FROM artists "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                ),
+                "tracks": (
+                    "SELECT * FROM tracks "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                ),
+            }
+
             if days:
-                # Use parameterized query for days parameter
-                query = f"""
-                SELECT * FROM {table}
-                WHERE datetime(created_at) >= datetime('now', ?)
-                ORDER BY created_at DESC
-                """
-                df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
+                df = pd.read_sql_query(
+                    filtered_queries[table], conn, params=[f"-{days} days"]
+                )
             else:
-                # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
-                df = pd.read_sql_query(query, conn)
+                df = pd.read_sql_query(base_queries[table], conn)
 
             # Ensure directory exists
             Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
@@ -976,9 +1066,17 @@ class EnhancedMusicDataStore:
             # Whitelist of valid tables to prevent SQL injection
             tables = ["trends", "trend_history", "viral_predictions", "cross_platform_correlations"]
 
+            count_queries = {
+                "trends": "SELECT COUNT(*) FROM trends",
+                "trend_history": "SELECT COUNT(*) FROM trend_history",
+                "viral_predictions": "SELECT COUNT(*) FROM viral_predictions",
+                "cross_platform_correlations": (
+                    "SELECT COUNT(*) FROM cross_platform_correlations"
+                ),
+            }
+
             for table in tables:
-                # Table names are from whitelist, safe to use
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                cursor.execute(count_queries[table])
                 table_stats[table] = cursor.fetchone()[0]
 
             # Data quality checks

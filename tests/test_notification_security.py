@@ -1,5 +1,7 @@
 """Security tests for notification delivery protections."""
 
+import asyncio
+
 import pytest
 
 from core.notification_service import (
@@ -67,8 +69,7 @@ class _FakeSMTP:
 class TestEmailSecurity:
     """Validate SMTP transport security choices."""
 
-    @pytest.mark.asyncio
-    async def test_smtp_auth_requires_tls(self):
+    def test_smtp_auth_requires_tls(self):
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -86,12 +87,11 @@ class TestEmailSecurity:
             channels=[NotificationChannel.EMAIL],
         )
 
-        result = await svc._send_email(message)
+        result = asyncio.run(svc._send_email(message))
 
         assert result == {"success": False, "error": "SMTP authentication requires TLS"}
 
-    @pytest.mark.asyncio
-    async def test_smtp_starttls_uses_default_ssl_context(self, monkeypatch):
+    def test_smtp_starttls_uses_default_ssl_context(self, monkeypatch):
         _FakeSMTP.instances = []
         monkeypatch.setattr("core.notification_service.smtplib.SMTP", _FakeSMTP)
 
@@ -112,7 +112,7 @@ class TestEmailSecurity:
             channels=[NotificationChannel.EMAIL],
         )
 
-        result = await svc._send_email(message)
+        result = asyncio.run(svc._send_email(message))
 
         smtp = _FakeSMTP.instances[0]
         assert result["success"] is True
