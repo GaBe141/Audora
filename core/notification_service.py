@@ -4,12 +4,15 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import copy
+import hashlib
 import ipaddress
 import json
 import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -145,10 +148,7 @@ class EnhancedNotificationService:
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
-                },
+                "headers": {"Content-Type": "application/json"},
                 "timeout": 30,
             },
             "sms": {
@@ -190,9 +190,19 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
+        to_save = copy.deepcopy({k: self.config[k] for k in saveable_keys if k in self.config})
+        webhook_config = to_save.get("webhook")
+        if isinstance(webhook_config, dict) and isinstance(webhook_config.get("headers"), dict):
+            webhook_config["headers"].pop("Authorization", None)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -205,6 +215,15 @@ class EnhancedNotificationService:
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
         return os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _allow_insecure_smtp(self) -> bool:
+        """Whether plaintext SMTP is explicitly allowed for local/test deployments."""
+        return os.getenv("AUDORA_ALLOW_INSECURE_SMTP", "").strip().lower() in {
             "1",
             "true",
             "yes",
@@ -254,6 +273,30 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _safe_error_body(self, body: str, limit: int = 300) -> str:
+        """Return a bounded response body for logs/errors without common secret echoes."""
+        sanitized = body.replace("\r", "\\r").replace("\n", "\\n")
+        token = os.getenv("WEBHOOK_TOKEN", "").strip()
+        if token:
+            sanitized = sanitized.replace(token, "[redacted]")
+        for marker in ("hooks.slack.com/services/", "discord.com/api/webhooks/"):
+            if marker in sanitized:
+                sanitized = sanitized.split(marker, 1)[0] + marker + "[redacted]"
+        if len(sanitized) > limit:
+            return f"{sanitized[:limit]}...[truncated]"
+        return sanitized
+
+    def _webhook_headers(self, configured_headers: dict[str, Any] | None) -> dict[str, str]:
+        """Build webhook headers, resolving bearer token secrets at send time."""
+        headers = {"Content-Type": "application/json"}
+        if configured_headers:
+            headers.update({str(key): str(value) for key, value in configured_headers.items()})
+
+        token = os.getenv("WEBHOOK_TOKEN", "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -509,8 +552,9 @@ System status: {{ system_status }}
 
     def _generate_message_key(self, message: NotificationMessage) -> str:
         """Generate unique key for message deduplication."""
-        # Simple hash based on title and key content
-        content_hash = hash(f"{message.title}:{message.content[:100]}")
+        content_hash = hashlib.sha256(
+            f"{message.title}:{message.content[:100]}".encode("utf-8")
+        ).hexdigest()
         return f"{content_hash}:{message.priority.value}"
 
     def _is_in_cooldown(self, message_key: str, cooldown_minutes: int = 60) -> bool:
@@ -570,11 +614,23 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
-            # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            port = int(email_config.get("port", 587))
+            use_tls = email_config.get("use_tls", True)
+            allow_insecure = self._allow_insecure_smtp()
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+            if port == 465:
+                server = smtplib.SMTP_SSL(
+                    email_config["smtp_server"], port, context=ssl.create_default_context()
+                )
+            else:
+                if not use_tls and not allow_insecure:
+                    return {
+                        "success": False,
+                        "error": "Refusing plaintext SMTP without AUDORA_ALLOW_INSECURE_SMTP",
+                    }
+                server = smtplib.SMTP(email_config["smtp_server"], port)
+                if use_tls:
+                    server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -656,7 +712,7 @@ System status: {{ system_status }}
                     self.logger.info("Slack notification sent successfully")
                     return {"success": True, "status_code": response.status}
                 else:
-                    error_text = await response.text()
+                    error_text = self._safe_error_body(await response.text())
                     self.logger.error(
                         f"Slack notification failed: {response.status} - {error_text}"
                     )
@@ -723,7 +779,7 @@ System status: {{ system_status }}
                     self.logger.info("Discord notification sent successfully")
                     return {"success": True, "status_code": response.status}
                 else:
-                    error_text = await response.text()
+                    error_text = self._safe_error_body(await response.text())
                     self.logger.error(
                         f"Discord notification failed: {response.status} - {error_text}"
                     )
@@ -771,7 +827,7 @@ System status: {{ system_status }}
                 )
                 payload["formatted_content"] = template.render(**message.template_vars)
 
-            headers = webhook_config.get("headers", {"Content-Type": "application/json"})
+            headers = self._webhook_headers(webhook_config.get("headers"))
             timeout = webhook_config.get("timeout", 30)
 
             async with (
@@ -784,7 +840,7 @@ System status: {{ system_status }}
                     self.logger.info(f"Webhook notification sent successfully: {response.status}")
                     return {"success": True, "status_code": response.status}
                 else:
-                    error_text = await response.text()
+                    error_text = self._safe_error_body(await response.text())
                     self.logger.error(
                         f"Webhook notification failed: {response.status} - {error_text}"
                     )
