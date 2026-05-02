@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,41 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSerialization:
+    """Regression coverage for Redis payload safety."""
+
+    def test_serialize_json_roundtrip_without_pickle(self):
+        payload = {"artist": "Audora", "score": 99, "tags": ["pop", "viral"]}
+        encoded = RedisCacheBackend._serialize(payload)
+
+        assert b"pickle" not in encoded.lower()
+        assert RedisCacheBackend._deserialize(encoded) == payload
+
+    def test_serialize_bytes_roundtrip(self):
+        payload = b"\x00audora\xff"
+        encoded = RedisCacheBackend._serialize(payload)
+
+        assert RedisCacheBackend._deserialize(encoded) == payload
+
+    def test_serialize_dataframe_roundtrip(self):
+        df = pd.DataFrame({"track": ["Song A", "Song B"], "score": [91.5, 87.0]})
+        encoded = RedisCacheBackend._serialize(df)
+
+        restored = RedisCacheBackend._deserialize(encoded)
+        pd.testing.assert_frame_equal(restored, df)
+
+    def test_rejects_legacy_pickle_payload(self):
+        legacy_pickle = b"\x80\x04\x95\x0f\x00\x00\x00\x00\x00\x00\x00}\x94\x8c\x04test\x94\x8c\x05value\x94s."
+
+        assert RedisCacheBackend._deserialize(legacy_pickle) is None
+
+    def test_rejects_unsupported_payload_type(self):
+        envelope = json.dumps({"v": 1, "type": "pickle", "payload": "unused"}).encode("utf-8")
+
+        assert RedisCacheBackend._deserialize(envelope) is None
+
+    def test_serialize_rejects_unsupported_objects(self):
+        with pytest.raises(TypeError):
+            RedisCacheBackend._serialize(object())
