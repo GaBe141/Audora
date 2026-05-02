@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +85,45 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for safe Redis cache payload handling."""
+
+    def test_json_compatible_values_round_trip_without_pickle(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = {"artist": "Sofia", "scores": [1, 2, 3], "active": True}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+        assert not serialized.startswith(b"\x80")
+
+    def test_bytes_values_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = b"binary cache payload"
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_dataframe_values_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = pd.DataFrame({"track": ["One", "Two"], "score": [91.5, 88.0]})
+
+        result = backend._deserialize(backend._serialize(value))
+
+        pd.testing.assert_frame_equal(result, value)
+
+    def test_rejects_legacy_pickle_payload_without_executing_it(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        unsafe_payload = pickle.dumps({"legacy": "payload"})
+
+        assert backend._deserialize(unsafe_payload) is None
+
+    def test_rejects_unsupported_object_values(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError, match="not safely serializable"):
+            backend._serialize(object())
 
 
 class TestCachedDecorator:
