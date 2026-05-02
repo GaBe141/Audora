@@ -1,8 +1,11 @@
 """Security tests for notification webhook URL validation."""
 
+import asyncio
+from unittest.mock import patch
+
 import pytest
 
-from core.notification_service import EnhancedNotificationService
+from core.notification_service import EnhancedNotificationService, StaticWebhookResolver
 
 
 class TestWebhookUrlValidation:
@@ -20,10 +23,25 @@ class TestWebhookUrlValidation:
 
     def test_rejects_private_ip_targets_by_default(self):
         svc = EnhancedNotificationService()
-        with pytest.raises(ValueError, match="private or restricted"):
-            svc._validate_webhook_url("https://10.0.0.1/webhook")
+        with (
+            patch.object(svc, "_resolve_webhook_hostname", return_value={"10.0.0.1"}),
+            pytest.raises(ValueError, match="private or restricted"),
+        ):
+            svc._validate_webhook_url("https://example.com/webhook")
 
     def test_allows_private_ip_when_explicitly_enabled(self):
         svc = EnhancedNotificationService()
-        url = "https://10.0.0.1/webhook"
-        assert svc._validate_webhook_url(url, allow_private=True) == url
+        url = "https://example.com/webhook"
+        with patch.object(svc, "_resolve_webhook_hostname", return_value={"10.0.0.1"}):
+            validated_url, hostname, resolved_ips = svc._validate_webhook_destination(
+                url, allow_private=True
+            )
+        assert validated_url == url
+        assert hostname == "example.com"
+        assert resolved_ips == {"10.0.0.1"}
+
+    def test_static_resolver_uses_only_validated_addresses(self):
+        resolver = StaticWebhookResolver("example.com", {"93.184.216.34"})
+        results = asyncio.run(resolver.resolve("example.com", 443))
+
+        assert [result["host"] for result in results] == ["93.184.216.34"]

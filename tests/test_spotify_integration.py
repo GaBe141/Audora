@@ -21,10 +21,12 @@ class TestSpotifyChartsAPISuccess:
         mock_response.raise_for_status = MagicMock()
         mock_response.content = html_with_script
 
-        with patch.object(api.session, "get", return_value=mock_response):
+        with patch.object(api.session, "get", return_value=mock_response) as mock_get:
             df = api.get_top_200_daily(country_code="us", date="2024-01-15")
 
         assert isinstance(df, __import__("pandas").DataFrame)
+        mock_get.assert_called_once()
+        assert mock_get.call_args.kwargs["timeout"] == 10
         if not df.empty:
             assert "track_name" in df.columns or "position" in df.columns
 
