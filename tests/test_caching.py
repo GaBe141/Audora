@@ -1,9 +1,15 @@
-"""Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
+"""Tests for core caching (LocalCacheBackend, RedisCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -58,6 +64,44 @@ class TestLocalCacheBackend:
         assert backend.get("d") == 4
         present = sum(1 for k in ("a", "b", "c") if backend.get(k) is not None)
         assert present == 2
+
+
+class TestRedisCacheBackendSerialization:
+    """Test Redis payload serialization without requiring a live Redis server."""
+
+    def test_serializes_json_values_without_pickle(self):
+        backend = object.__new__(RedisCacheBackend)
+        payload = backend._serialize({"artist": "Nina", "score": 97})
+
+        envelope = json.loads(payload.decode("utf-8"))
+        assert envelope["v"] == 2
+        assert envelope["type"] == "json"
+        assert backend._deserialize(payload) == {"artist": "Nina", "score": 97}
+
+    def test_serializes_bytes_values(self):
+        backend = object.__new__(RedisCacheBackend)
+        payload = backend._serialize(b"audio-bytes")
+
+        assert backend._deserialize(payload) == b"audio-bytes"
+
+    def test_serializes_dataframes_as_typed_json(self):
+        backend = object.__new__(RedisCacheBackend)
+        df = pd.DataFrame([{"track": "Song A", "score": 88}])
+
+        restored = backend._deserialize(backend._serialize(df))
+
+        pd.testing.assert_frame_equal(restored, df)
+
+    def test_rejects_legacy_pickle_payloads(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        assert backend._deserialize(pickle.dumps({"unsafe": "payload"})) is None
+
+    def test_rejects_unsupported_object_types(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError, match="Unsupported Redis cache value type"):
+            backend._serialize(object())
 
 
 class TestCacheManager:
