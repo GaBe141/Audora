@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+from unittest.mock import MagicMock
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,43 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache serialization safety."""
+
+    def _redis_backend_without_connection(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._client = MagicMock()
+        return backend
+
+    def test_deserialize_rejects_legacy_pickle_payload(self):
+        backend = self._redis_backend_without_connection()
+        legacy_payload = pickle.dumps({"should": "not load"})
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_round_trip_json_value(self):
+        backend = self._redis_backend_without_connection()
+        value = {"artist": "Audora", "scores": [1, 2, 3], "active": True}
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_round_trip_bytes_value(self):
+        backend = self._redis_backend_without_connection()
+        value = b"\x00audora\xff"
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_round_trip_dataframe_value(self):
+        backend = self._redis_backend_without_connection()
+        value = pd.DataFrame([{"track": "Song", "score": 99}])
+
+        result = backend._deserialize(backend._serialize(value))
+
+        pd.testing.assert_frame_equal(result, value)
+
+    def test_rejects_unsupported_object_types(self):
+        backend = self._redis_backend_without_connection()
+
+        assert backend._serialize({1, 2, 3}) is None
