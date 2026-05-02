@@ -2,8 +2,12 @@
 
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,39 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis payload serialization without pickle."""
+
+    def test_json_roundtrip(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = {"artists": ["A", "B"], "score": 99}
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_bytes_roundtrip(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = b"binary-cache-value"
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_dataframe_roundtrip(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = pd.DataFrame({"track": ["One", "Two"], "score": [1.5, 2.5]})
+
+        restored = backend._deserialize(backend._serialize(value))
+
+        pd.testing.assert_frame_equal(restored, value)
+
+    def test_unsupported_objects_are_not_serialized(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError):
+            backend._serialize(object())
+
+    def test_rejects_legacy_or_malformed_payloads(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        assert backend._deserialize(b"not-json") is None
+        assert backend._deserialize(b'{"v":1,"payload":"legacy"}') is None
