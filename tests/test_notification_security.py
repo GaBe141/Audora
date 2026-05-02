@@ -1,7 +1,7 @@
 """Security tests for notification transport hardening."""
 
-import json
 import asyncio
+import json
 
 import aiohttp
 import pytest
