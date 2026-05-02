@@ -343,8 +343,14 @@ app.layout = dbc.Container(
 # Helpers
 # ---------------------------------------------------------------------------
 
+ALLOWED_DEMO_MODES = {"statistical", "trending", "multi_source", "platform", "all"}
+
+
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
+    if not all(isinstance(arg, str) for arg in args):
+        return "Error", "Invalid command arguments"
+
     try:
         proc = subprocess.Popen(
             args,
@@ -396,6 +402,8 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
+        if demo_value not in ALLOWED_DEMO_MODES:
+            return "Error", "Invalid demo selection"
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])

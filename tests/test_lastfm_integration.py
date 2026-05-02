@@ -13,6 +13,11 @@ if "integrations.config" not in sys.modules:
 
 from core.exceptions import APIConnectionError, APIResponseError
 from integrations.lastfm_integration import LastFmAPI
+from integrations import lastfm_integration
+
+
+def test_lastfm_base_url_uses_https():
+    assert lastfm_integration.BASE_URL.startswith("https://")
 
 
 class TestLastFmAPISuccess:

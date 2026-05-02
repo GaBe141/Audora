@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,52 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for safe Redis cache serialization."""
+
+    def test_serializes_json_compatible_values(self):
+        backend = object.__new__(RedisCacheBackend)
+        payload = {"artist": "Test Artist", "scores": [1, 2, 3]}
+
+        serialized = backend._serialize(payload)
+
+        assert backend._deserialize(serialized) == payload
+
+    def test_serializes_bytes_without_pickle(self):
+        backend = object.__new__(RedisCacheBackend)
+        payload = b"\x00audora\xff"
+
+        serialized = backend._serialize(payload)
+
+        assert backend._deserialize(serialized) == payload
+
+    def test_serializes_pandas_dataframes_without_pickle(self):
+        backend = object.__new__(RedisCacheBackend)
+        frame = pd.DataFrame({"track": ["A", "B"], "score": [10, 20]})
+
+        serialized = backend._serialize(frame)
+        restored = backend._deserialize(serialized)
+
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        backend = object.__new__(RedisCacheBackend)
+        legacy_payload = json.dumps(
+            {"v": 1, "alg": "HMAC-SHA256", "sig": "abc", "payload": "ZGF0YQ=="}
+        ).encode("utf-8")
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_rejects_pickle_bytes(self):
+        backend = object.__new__(RedisCacheBackend)
+        pickle_like_payload = b"\x80\x04\x95malicious"
+
+        assert backend._deserialize(pickle_like_payload) is None
+
+    def test_rejects_unsupported_object_serialization(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError):
+            backend._serialize(object())
