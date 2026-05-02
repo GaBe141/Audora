@@ -1,10 +1,11 @@
 """Security tests for notification webhook URL validation."""
 
+import asyncio
 from unittest.mock import patch
 
 import pytest
 
-from core.notification_service import EnhancedNotificationService
+from core.notification_service import EnhancedNotificationService, StaticWebhookResolver
 
 
 class TestWebhookUrlValidation:
@@ -39,11 +40,8 @@ class TestWebhookUrlValidation:
         assert hostname == "example.com"
         assert resolved_ips == {"10.0.0.1"}
 
-    def test_builds_connector_with_validated_resolver(self):
-        svc = EnhancedNotificationService()
-        with patch.object(svc, "_resolve_webhook_hostname", return_value={"93.184.216.34"}):
-            url, connector = svc._build_webhook_connector("https://example.com/webhook")
+    def test_static_resolver_uses_only_validated_addresses(self):
+        resolver = StaticWebhookResolver("example.com", {"93.184.216.34"})
+        results = asyncio.run(resolver.resolve("example.com", 443))
 
-        assert url == "https://example.com/webhook"
-        assert connector._resolver.resolved_ips == {"93.184.216.34"}
-        connector.close()
+        assert [result["host"] for result in results] == ["93.184.216.34"]

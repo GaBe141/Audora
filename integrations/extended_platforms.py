@@ -10,6 +10,8 @@ from typing import Any
 import aiohttp
 from social_discovery_engine import Platform, SocialMusicMetrics, ViralStage
 
+DEFAULT_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=15)
+
 
 class RedditMusicAPI:
     """Reddit API integration for music community discovery."""
@@ -33,7 +35,7 @@ class RedditMusicAPI:
         data = {"grant_type": "client_credentials"}
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=DEFAULT_HTTP_TIMEOUT) as session:
                 async with session.post(
                     auth_url, auth=auth, headers=headers, data=data
                 ) as response:
@@ -63,7 +65,7 @@ class RedditMusicAPI:
         params = {"limit": limit, "t": time_filter}
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=DEFAULT_HTTP_TIMEOUT) as session:
                 async with session.get(endpoint, headers=headers, params=params) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -105,7 +107,7 @@ class RedditMusicAPI:
             params = {"q": query, "sort": "relevance", "restrict_sr": "true", "limit": 25}
 
             try:
-                async with aiohttp.ClientSession() as session:
+                async with aiohttp.ClientSession(timeout=DEFAULT_HTTP_TIMEOUT) as session:
                     async with session.get(endpoint, headers=headers, params=params) as response:
                         if response.status == 200:
                             data = await response.json()
@@ -206,7 +208,7 @@ class TumblrMusicAPI:
         params = {"tag": query, "api_key": self.consumer_key, "limit": limit}
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=DEFAULT_HTTP_TIMEOUT) as session:
                 async with session.get(endpoint, params=params) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -229,7 +231,7 @@ class TumblrMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=DEFAULT_HTTP_TIMEOUT) as session:
                 async with session.get(endpoint, params=params) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -297,7 +299,7 @@ class SoundCloudAPI:
             params["genres"] = genre
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=DEFAULT_HTTP_TIMEOUT) as session:
                 async with session.get(endpoint, params=params) as response:
                     if response.status == 200:
                         return await response.json()
@@ -317,7 +319,7 @@ class SoundCloudAPI:
         params = {"client_id": self.client_id, "q": query, "limit": 50}
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=DEFAULT_HTTP_TIMEOUT) as session:
                 async with session.get(endpoint, params=params) as response:
                     if response.status == 200:
                         users = await response.json()
@@ -352,7 +354,7 @@ class DiscordMusicBot:
         headers = {"Authorization": f"Bot {self.bot_token}"}
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=DEFAULT_HTTP_TIMEOUT) as session:
                 async with session.get(endpoint, headers=headers) as response:
                     if response.status == 200:
                         return await response.json()
