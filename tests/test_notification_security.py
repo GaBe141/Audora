@@ -150,7 +150,7 @@ class TestEmailTransportSecurity:
             channels=[NotificationChannel.EMAIL],
         )
 
-        result = svc._send_email(message)
+        result = asyncio.run(svc._send_email(message))
 
         assert result["success"] is False
         assert "requires TLS" in result["error"]
@@ -192,7 +192,7 @@ class TestEmailTransportSecurity:
             channels=[NotificationChannel.EMAIL],
         )
 
-        result = svc._send_email(message)
+        result = asyncio.run(svc._send_email(message))
 
         assert result["success"] is True
         assert FakeSmtp.starttls_context is not None
