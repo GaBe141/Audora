@@ -1,10 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
 
-from core.caching import (
-    LocalCacheBackend,
-)
+import pandas as pd
+import pytest
+
+from core.caching import LocalCacheBackend, RedisCacheBackend
 
 
 class TestLocalCacheBackend:
@@ -80,6 +82,50 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache's non-executable serialization format."""
+
+    def test_json_value_round_trips(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        value = {"artist": "Bowie", "scores": [1, 2, 3], "active": True}
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_bytes_round_trip(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        value = b"\x00audio-bytes\xff"
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_dataframe_round_trips(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        value = pd.DataFrame({"artist": ["A", "B"], "score": [1.5, 2.25]})
+        decoded = backend._deserialize(backend._serialize(value))
+
+        pd.testing.assert_frame_equal(decoded, value)
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        legacy_payload = pickle.dumps({"unsafe": "payload"})
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        class Unsupported:
+            pass
+
+        with pytest.raises(TypeError, match="JSON-serializable"):
+            backend._serialize(Unsupported())
 
 
 class TestCachedDecorator:
