@@ -1,9 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,49 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache safe serialization helpers."""
+
+    def test_json_payload_round_trips_without_pickle(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = {"artist": "SZA", "score": 98, "tags": ["rnb", "viral"]}
+
+        serialized = backend._serialize(value)
+
+        assert b"pickle" not in serialized.lower()
+        assert backend._deserialize(serialized) == value
+
+    def test_bytes_payload_round_trips(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = b"cached-bytes"
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_unsupported_objects_are_not_serialized(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        class Unsupported:
+            pass
+
+        try:
+            backend._serialize(Unsupported())
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("Unsupported objects must not be serialized")
+
+    def test_legacy_binary_payload_is_rejected(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        assert backend._deserialize(b"\x80\x04legacy-pickle") is None
+
+    def test_cache_key_uses_sha256_digest(self):
+        manager = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+
+        key = manager._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        digests = key.split(":")[1:]
+
+        assert len(digests) == 2
+        assert all(len(digest) == 64 for digest in digests)
