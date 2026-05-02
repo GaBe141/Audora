@@ -12,11 +12,14 @@ if "integrations.config" not in sys.modules:
     sys.modules["integrations.config"] = _config_mock
 
 from core.exceptions import APIConnectionError, APIResponseError
-from integrations.lastfm_integration import LastFmAPI
+from integrations.lastfm_integration import BASE_URL, LastFmAPI
 
 
 class TestLastFmAPISuccess:
     """Test successful API responses with mocked session.get."""
+
+    def test_base_url_uses_https(self):
+        assert BASE_URL.startswith("https://")
 
     def test_get_top_artists_global_parses_response(self):
         api = LastFmAPI(api_key="test_key")
@@ -35,13 +38,14 @@ class TestLastFmAPISuccess:
                 ],
             },
         }
-        with patch.object(api.session, "get", return_value=mock_response):
+        with patch.object(api.session, "get", return_value=mock_response) as mock_get:
             df = api.get_top_artists_global(limit=5)
         assert not df.empty
         assert len(df) == 1
         assert df.iloc[0]["name"] == "Artist One"
         assert df.iloc[0]["playcount"] == 100000
         assert "rank" in df.columns
+        assert mock_get.call_args.kwargs["timeout"] == 10
 
     def test_get_top_tracks_global_parses_response(self):
         api = LastFmAPI(api_key="test_key")
