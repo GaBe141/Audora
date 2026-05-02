@@ -4,7 +4,10 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
+import ipaddress
 import json
+import os
+import secrets
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +16,7 @@ import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import abort, request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -23,6 +27,40 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Audora",
 )
+
+
+GUI_AUTH_TOKEN = os.getenv("AUDORA_GUI_TOKEN", "").strip()
+
+
+def _is_loopback_client(remote_addr: str | None) -> bool:
+    """Return True for local browser sessions."""
+    if not remote_addr:
+        return False
+
+    try:
+        return ipaddress.ip_address(remote_addr).is_loopback
+    except ValueError:
+        return False
+
+
+def _request_token() -> str:
+    """Read GUI auth token from supported headers."""
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        return auth_header[7:].strip()
+    return request.headers.get("X-Audora-GUI-Token", "").strip()
+
+
+@app.server.before_request
+def _restrict_remote_gui_access():
+    """Block non-local GUI access unless an explicit token is configured and supplied."""
+    if _is_loopback_client(request.remote_addr):
+        return None
+
+    if GUI_AUTH_TOKEN and secrets.compare_digest(_request_token(), GUI_AUTH_TOKEN):
+        return None
+
+    abort(403)
 
 # ---------------------------------------------------------------------------
 # Layout helpers

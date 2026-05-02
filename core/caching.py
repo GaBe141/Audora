@@ -4,19 +4,26 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
-import base64
 import hashlib
 import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
+from io import StringIO
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
+
+# Optional pandas support for Redis-backed DataFrame cache entries.
+try:
+    import pandas as pd
+
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
 
 # Try to import Redis, fall back to local cache if unavailable
 try:
@@ -188,13 +195,21 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+        payload_format = "json"
+        if HAS_PANDAS and isinstance(value, pd.DataFrame):
+            payload_format = "pandas.dataframe.split"
+            payload = value.to_json(orient="split", date_format="iso")
+        else:
+            payload = json.dumps(value, default=str, separators=(",", ":"))
+
+        payload_bytes = payload.encode("utf-8")
+        signature = hmac.new(self._signing_key, payload_bytes, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "format": payload_format,
             "sig": signature,
-            "payload": base64.b64encode(payload).decode("ascii"),
+            "payload": payload,
         }
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
@@ -204,8 +219,9 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
+                or "format" not in envelope
                 or "sig" not in envelope
                 or "payload" not in envelope
             ):
@@ -217,13 +233,20 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with non-string payload")
                 return None
 
-            payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            payload = payload_b64.encode("utf-8")
             expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            payload_format = envelope["format"]
+            if payload_format == "json":
+                return json.loads(payload_b64)
+            if payload_format == "pandas.dataframe.split" and HAS_PANDAS:
+                return pd.read_json(StringIO(payload_b64), orient="split")
+
+            logger.warning("Rejected cache entry with unsupported payload format: %s", payload_format)
+            return None
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -432,12 +455,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

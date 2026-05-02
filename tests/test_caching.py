@@ -1,9 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +83,37 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        parts = key.split(":")
+        assert parts[0] == "prefix"
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+
+
+class TestRedisCacheSerialization:
+    """Tests for signed Redis cache serialization."""
+
+    def test_serializes_plain_json_without_pickle(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        serialized = backend._serialize({"artist": "Audora", "score": 99})
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["format"] == "json"
+        assert "pickle" not in serialized.decode("utf-8").lower()
+        assert backend._deserialize(serialized) == {"artist": "Audora", "score": 99}
+
+    def test_rejects_tampered_payload(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        envelope = json.loads(backend._serialize({"artist": "Audora"}).decode("utf-8"))
+        envelope["payload"] = '{"artist":"Mallory"}'
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
 
 
 class TestCachedDecorator:
