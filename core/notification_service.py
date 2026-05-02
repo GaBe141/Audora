@@ -8,9 +8,9 @@ import ipaddress
 import json
 import logging
 import os
+import smtplib
 import socket
 import ssl
-import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -573,13 +573,14 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
+            if not email_config.get("use_tls", True) and email_config.get("username") and email_config.get("password"):
+                raise ValueError("SMTP authentication requires TLS")
+
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
                 server.starttls(context=ssl.create_default_context())
-            elif email_config.get("username") and email_config.get("password"):
-                raise ValueError("SMTP authentication requires TLS")
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
