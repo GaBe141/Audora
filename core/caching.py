@@ -6,6 +6,7 @@ fallback to in-memory caching when Redis is unavailable.
 
 import base64
 import hashlib
+import io
 import json
 import logging
 import time
@@ -223,7 +224,7 @@ class RedisCacheBackend(CacheBackend):
                 if not isinstance(payload, str):
                     logger.warning("Rejected DataFrame cache entry with non-string payload")
                     return None
-                return pd.read_json(payload, orient="split")
+                return pd.read_json(io.StringIO(payload), orient="split")
 
             logger.warning("Rejected cache entry with unsupported payload type: %s", payload_type)
             return None
