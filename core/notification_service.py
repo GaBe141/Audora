@@ -9,8 +9,8 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -23,8 +23,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 import aiohttp
-from aiohttp.abc import AbstractResolver
 import jinja2  # type: ignore[import-untyped]
+from aiohttp.abc import AbstractResolver
 
 
 class StaticWebhookResolver(AbstractResolver):
@@ -233,14 +233,21 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -269,7 +276,9 @@ class EnhancedNotificationService:
         except ValueError:
             return True
 
-    def _resolve_webhook_url(self, url: str, *, allow_private: bool = False) -> tuple[str, set[str]]:
+    def _resolve_webhook_url(
+        self, url: str, *, allow_private: bool = False
+    ) -> tuple[str, set[str]]:
         """Validate outbound webhook URL and return the approved IP addresses."""
         parsed = urlparse(url.strip())
         if parsed.scheme != "https":
@@ -886,11 +895,11 @@ System status: {{ system_status }}
                 )
                 content = template.render(**message.template_vars)
 
-            print(f"\n{'='*80}")
+            print(f"\n{'=' * 80}")
             print(f"{symbol} {message.title} ({message.priority.value.upper()})")
-            print(f"{'='*80}")
+            print(f"{'=' * 80}")
             print(content)
-            print(f"{'='*80}\n")
+            print(f"{'=' * 80}\n")
 
             self.logger.info(f"Console notification displayed: {message.title}")
             return {"success": True, "method": "console"}

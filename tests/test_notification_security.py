@@ -4,7 +4,7 @@ import socket
 
 import pytest
 
-from core.notification_service import EnhancedNotificationService, StaticWebhookResolver
+from core.notification_service import EnhancedNotificationService
 
 
 class TestWebhookUrlValidation:
