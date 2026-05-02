@@ -65,6 +65,15 @@ class TestGetTracksWithArtistsBulk:
         df = data_store.get_tracks_with_artists_bulk([])
         assert df.empty
 
+    def test_get_tracks_with_artists_bulk_handles_many_pairs(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        pairs = [("Track One", "Artist A"), ("Track Two", "Artist B"), ("Missing", "Nobody")]
+
+        df = data_store.get_tracks_with_artists_bulk(pairs)
+
+        assert len(df) >= 2
+        assert {"Track One", "Track Two"}.issubset(set(df["track_name"]))
+
 
 class TestGetTrendingSummaryCached:
     """Test get_trending_summary_cached returns same result on second call (cache hit)."""
@@ -107,3 +116,17 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+    def test_update_trends_bulk_handles_multiple_tracks(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        track_ids = [trend.track_id for trend in sample_trends]
+
+        updated = data_store.update_trends_bulk(track_ids, {"score": 88.0})
+
+        assert updated == len(track_ids)
+        with data_store.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT score FROM trends WHERE track_id IN (?, ?) ORDER BY track_id",
+                tuple(track_ids),
+            ).fetchall()
+            assert [row[0] for row in rows] == [88.0, 88.0]
