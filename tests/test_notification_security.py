@@ -1,5 +1,6 @@
 """Security tests for notification webhook URL validation."""
 
+import asyncio
 import socket
 
 import pytest
@@ -55,18 +56,16 @@ class TestWebhookUrlValidation:
         assert target.port == 443
         assert target.resolved_ips == ("93.184.216.34",)
 
-    @pytest.mark.asyncio
-    async def test_pinned_resolver_rejects_unvalidated_hostnames(self):
+    def test_pinned_resolver_rejects_unvalidated_hostnames(self):
         resolver = PinnedWebhookResolver("example.com", 443, ("93.184.216.34",))
 
         with pytest.raises(OSError, match="Unexpected webhook hostname"):
-            await resolver.resolve("localhost", 443)
+            asyncio.run(resolver.resolve("localhost", 443))
 
-    @pytest.mark.asyncio
-    async def test_pinned_resolver_returns_only_pinned_addresses(self):
+    def test_pinned_resolver_returns_only_pinned_addresses(self):
         resolver = PinnedWebhookResolver("example.com", 443, ("93.184.216.34",))
 
-        records = await resolver.resolve("example.com", 443)
+        records = asyncio.run(resolver.resolve("example.com", 443))
 
         assert records == [
             {

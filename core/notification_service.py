@@ -8,8 +8,8 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -253,7 +253,7 @@ class EnhancedNotificationService:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -357,14 +357,16 @@ class EnhancedNotificationService:
             "connector": self._webhook_connector(target),
             "timeout": timeout_config,
         }
-        async with aiohttp.ClientSession(**session_kwargs) as session:
-            async with session.post(
+        async with (
+            aiohttp.ClientSession(**session_kwargs) as session,
+            session.post(
                 target.url,
                 json=payload,
                 headers=headers,
                 allow_redirects=False,
-            ) as response:
-                yield response
+            ) as response,
+        ):
+            yield response
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
