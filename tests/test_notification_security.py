@@ -1,5 +1,7 @@
 """Security tests for notification webhook URL validation."""
 
+import asyncio
+
 import pytest
 
 import core.notification_service as notification_service
@@ -71,8 +73,7 @@ class _FakeSession:
 class TestWebhookTransportSecurity:
     """Validate transport hardening on outbound notification sends."""
 
-    @pytest.mark.asyncio
-    async def test_custom_webhook_does_not_follow_redirects(self, monkeypatch):
+    def test_custom_webhook_does_not_follow_redirects(self, monkeypatch):
         calls = []
         svc = EnhancedNotificationService()
         svc.config["webhook"]["url"] = "https://example.com/webhook"
@@ -89,13 +90,12 @@ class TestWebhookTransportSecurity:
             channels=[NotificationChannel.WEBHOOK],
         )
 
-        result = await svc._send_webhook(message)
+        result = asyncio.run(svc._send_webhook(message))
 
         assert result["success"] is True
         assert calls[0][1]["allow_redirects"] is False
 
-    @pytest.mark.asyncio
-    async def test_slack_does_not_follow_redirects(self, monkeypatch):
+    def test_slack_does_not_follow_redirects(self, monkeypatch):
         calls = []
         svc = EnhancedNotificationService()
         svc.config["slack"]["webhook_url"] = "https://example.com/slack"
@@ -112,13 +112,12 @@ class TestWebhookTransportSecurity:
             channels=[NotificationChannel.SLACK],
         )
 
-        result = await svc._send_slack(message)
+        result = asyncio.run(svc._send_slack(message))
 
         assert result["success"] is True
         assert calls[0][1]["allow_redirects"] is False
 
-    @pytest.mark.asyncio
-    async def test_discord_does_not_follow_redirects(self, monkeypatch):
+    def test_discord_does_not_follow_redirects(self, monkeypatch):
         calls = []
         svc = EnhancedNotificationService()
         svc.config["discord"]["webhook_url"] = "https://example.com/discord"
@@ -134,7 +133,7 @@ class TestWebhookTransportSecurity:
             channels=[NotificationChannel.DISCORD],
         )
 
-        result = await svc._send_discord(message)
+        result = asyncio.run(svc._send_discord(message))
 
         assert result["success"] is True
         assert calls[0][1]["allow_redirects"] is False
@@ -164,8 +163,7 @@ class _FakeSMTP:
 class TestEmailTransportSecurity:
     """Validate SMTP transport hardening."""
 
-    @pytest.mark.asyncio
-    async def test_smtp_starttls_uses_verified_ssl_context(self, monkeypatch):
+    def test_smtp_starttls_uses_verified_ssl_context(self, monkeypatch):
         _FakeSMTP.starttls_context = None
         svc = EnhancedNotificationService()
         svc.config["email"].update(
@@ -184,15 +182,14 @@ class TestEmailTransportSecurity:
             channels=[NotificationChannel.EMAIL],
         )
 
-        result = await svc._send_email(message)
+        result = asyncio.run(svc._send_email(message))
 
         assert result["success"] is True
         assert _FakeSMTP.starttls_context is not None
         assert _FakeSMTP.starttls_context.check_hostname is True
         assert _FakeSMTP.starttls_context.verify_mode == notification_service.ssl.CERT_REQUIRED
 
-    @pytest.mark.asyncio
-    async def test_smtp_auth_requires_tls(self, monkeypatch):
+    def test_smtp_auth_requires_tls(self, monkeypatch):
         _FakeSMTP.login_called = False
         svc = EnhancedNotificationService()
         svc.config["email"].update(
@@ -213,7 +210,7 @@ class TestEmailTransportSecurity:
             channels=[NotificationChannel.EMAIL],
         )
 
-        result = await svc._send_email(message)
+        result = asyncio.run(svc._send_email(message))
 
         assert result["success"] is False
         assert "requires TLS" in result["error"]
