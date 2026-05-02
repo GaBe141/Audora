@@ -22,7 +22,26 @@ from typing import Any
 from urllib.parse import urlparse
 
 import aiohttp
+from aiohttp.abc import AbstractResolver
 import jinja2  # type: ignore[import-untyped]
+
+
+class StaticWebhookResolver(AbstractResolver):
+    """Resolve a webhook host to a pre-validated set of public IP addresses."""
+
+    def __init__(self, hostname: str, resolved_hosts: list[dict[str, Any]]):
+        self.hostname = hostname.lower()
+        self.resolved_hosts = resolved_hosts
+
+    async def resolve(
+        self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    ) -> list[dict[str, Any]]:
+        if host.lower() != self.hostname:
+            raise OSError(f"Unexpected webhook redirect host: {host}")
+        return [{**record, "port": port or record["port"]} for record in self.resolved_hosts]
+
+    async def close(self) -> None:
+        return None
 
 
 class NotificationPriority(Enum):
@@ -226,6 +245,38 @@ class EnhancedNotificationService:
         except ValueError:
             return True
 
+    def _resolve_webhook_hostname(
+        self, hostname: str, port: int, *, allow_private: bool = False
+    ) -> list[dict[str, Any]]:
+        """Resolve and validate webhook targets before any outbound connection."""
+        resolved_hosts: list[dict[str, Any]] = []
+        try:
+            # Validate all resolved addresses to avoid DNS-based bypass.
+            addr_infos = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
+        except socket.gaierror as e:
+            raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
+
+        for family, socktype, proto, _, sockaddr in addr_infos:
+            ip = sockaddr[0]
+            if not allow_private and self._is_restricted_ip(ip):
+                raise ValueError("Webhook URL resolves to a private or restricted network address")
+            resolved_hosts.append(
+                {
+                    "hostname": hostname,
+                    "host": ip,
+                    "port": port,
+                    "family": family,
+                    "proto": proto,
+                    "flags": socket.AI_NUMERICHOST,
+                    "socktype": socktype,
+                }
+            )
+
+        if not resolved_hosts:
+            raise ValueError(f"Could not resolve webhook hostname: {hostname}")
+
+        return resolved_hosts
+
     def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
         """Validate outbound webhook URL to reduce SSRF risk."""
         parsed = urlparse(url.strip())
@@ -238,22 +289,21 @@ class EnhancedNotificationService:
         if hostname.lower() == "localhost":
             raise ValueError("Localhost webhook URLs are not allowed")
 
-        resolved_ips = set()
-        try:
-            # Validate all resolved addresses to avoid DNS-based bypass.
-            for info in socket.getaddrinfo(hostname, parsed.port or 443, proto=socket.IPPROTO_TCP):
-                resolved_ips.add(info[4][0])
-        except socket.gaierror as e:
-            raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
-
-        if not allow_private:
-            for ip in resolved_ips:
-                if self._is_restricted_ip(ip):
-                    raise ValueError(
-                        "Webhook URL resolves to a private or restricted network address"
-                    )
-
+        self._resolve_webhook_hostname(hostname, parsed.port or 443, allow_private=allow_private)
         return url
+
+    def _create_webhook_connector(
+        self, url: str, *, allow_private: bool = False
+    ) -> aiohttp.TCPConnector:
+        """Create a connector pinned to already-vetted webhook addresses."""
+        parsed = urlparse(url.strip())
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError("Webhook URL must include a valid hostname")
+        resolved_hosts = self._resolve_webhook_hostname(
+            hostname, parsed.port or 443, allow_private=allow_private
+        )
+        return aiohttp.TCPConnector(resolver=StaticWebhookResolver(hostname, resolved_hosts))
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -648,9 +698,10 @@ System status: {{ system_status }}
                 if fields:
                     slack_message["attachments"][0]["fields"] = fields
 
+            connector = self._create_webhook_connector(webhook_url, allow_private=False)
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                aiohttp.ClientSession(connector=connector) as session,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -715,9 +766,10 @@ System status: {{ system_status }}
                 if fields:
                     discord_message["embeds"][0]["fields"] = fields
 
+            connector = self._create_webhook_connector(webhook_url, allow_private=False)
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                aiohttp.ClientSession(connector=connector) as session,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -774,10 +826,17 @@ System status: {{ system_status }}
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
             timeout = webhook_config.get("timeout", 30)
 
+            connector = self._create_webhook_connector(
+                url, allow_private=self._allow_private_webhooks()
+            )
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(connector=connector) as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
