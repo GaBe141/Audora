@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,59 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSerialization:
+    """Regression tests for non-executable Redis cache serialization."""
+
+    def test_round_trips_json_compatible_values(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = {"artist": "Example", "score": 98, "tags": ["viral", "new"]}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_round_trips_bytes(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = b"\x00audora-cache"
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_round_trips_dataframes(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = pd.DataFrame(
+            {
+                "track": ["A", "B"],
+                "score": [91, 88],
+            }
+        )
+
+        serialized = backend._serialize(value)
+        result = backend._deserialize(serialized)
+
+        assert isinstance(result, pd.DataFrame)
+        pd.testing.assert_frame_equal(result, value)
+
+    def test_rejects_legacy_pickle_payloads_without_loading(self):
+        backend = object.__new__(RedisCacheBackend)
+        legacy_payload = pickle.dumps({"unsafe": "payload"})
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_rejects_unsupported_object_types(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            backend._serialize(object())
+
+    def test_cache_key_uses_sha256(self):
+        cache = CacheManager(backend=LocalCacheBackend())
+
+        key = cache._build_cache_key("prefix", ("arg",), {"kw": "value"})
+
+        parts = key.split(":")
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
