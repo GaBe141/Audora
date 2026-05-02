@@ -1,5 +1,8 @@
 """Security tests for notification webhook URL validation."""
 
+import socket
+
+import aiohttp
 import pytest
 
 from core.notification_service import EnhancedNotificationService
@@ -27,3 +30,38 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_rejects_embedded_credentials(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="user credentials"):
+            svc._validate_webhook_url("https://user:pass@example.com/webhook")
+
+    @pytest.mark.asyncio
+    async def test_pins_validated_dns_records(self, monkeypatch):
+        svc = EnhancedNotificationService()
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            assert host == "hooks.example.com"
+            assert port == 443
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    ("93.184.216.34", port),
+                )
+            ]
+
+        monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+        target = svc._prepare_webhook_target("https://hooks.example.com/webhook")
+        try:
+            assert target.url == "https://hooks.example.com/webhook"
+            resolver = target.connector._resolver
+            assert not isinstance(resolver, aiohttp.DefaultResolver)
+
+            records = await resolver.resolve("hooks.example.com", 443)
+            assert records[0]["host"] == "93.184.216.34"
+        finally:
+            await target.connector.close()
