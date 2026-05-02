@@ -2,8 +2,12 @@
 
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,46 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache payload safety."""
+
+    def test_redis_serialization_round_trips_json_values(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = {"artist": "A", "score": 99, "tags": ["viral", "pop"]}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_redis_serialization_round_trips_bytes(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = b"binary-cache-value"
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_redis_serialization_round_trips_dataframes(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = pd.DataFrame({"track": ["Song"], "score": [0.95]})
+
+        serialized = backend._serialize(value)
+        result = backend._deserialize(serialized)
+
+        pd.testing.assert_frame_equal(result, value)
+
+    def test_redis_deserialize_rejects_legacy_pickle_payloads(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        assert backend._deserialize(b"\x80\x04\x95legacy-pickle") is None
+
+    def test_redis_serialize_rejects_unsupported_objects(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        class UnsupportedValue:
+            pass
+
+        with pytest.raises(TypeError, match="Unsupported Redis cache value type"):
+            backend._serialize(UnsupportedValue())
