@@ -9,8 +9,8 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -24,8 +24,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 import aiohttp
-from aiohttp.abc import AbstractResolver
 import jinja2  # type: ignore[import-untyped]
+from aiohttp.abc import AbstractResolver
 
 
 class PinnedIPResolver(AbstractResolver):
@@ -231,7 +231,7 @@ class EnhancedNotificationService:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")

@@ -1,7 +1,6 @@
 """Security tests for notification delivery hardening."""
 
 import asyncio
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -41,6 +40,9 @@ class TestWebhookUrlValidation:
         with pytest.raises(ValueError, match="embedded credentials"):
             svc._validate_webhook_url("https://user:pass@example.com/webhook")
 
+    async def _build_webhook_connector(self, svc: EnhancedNotificationService, url: str):
+        return svc._webhook_connector(url)
+
     def test_webhook_connector_pins_validated_dns_results(self, mocker):
         svc = EnhancedNotificationService()
         mocker.patch(
@@ -56,7 +58,9 @@ class TestWebhookUrlValidation:
             ],
         )
 
-        validated_url, connector = svc._webhook_connector("https://example.com/webhook")
+        validated_url, connector = asyncio.run(
+            self._build_webhook_connector(svc, "https://example.com/webhook")
+        )
 
         assert validated_url == "https://example.com/webhook"
         assert connector._resolver.resolved_hosts == {"example.com": [("93.184.216.34", 2)]}
@@ -64,6 +68,33 @@ class TestWebhookUrlValidation:
 
 class TestNotificationDeliverySecurity:
     """Validate secure delivery behavior around email and webhook sending."""
+
+    class _Response:
+        status = 302
+
+        async def text(self):
+            return "redirect"
+
+    class _ResponseContext:
+        async def __aenter__(self):
+            return TestNotificationDeliverySecurity._Response()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class _ClientSessionContext:
+        def __init__(self):
+            self.post_call_kwargs = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        def post(self, *args, **kwargs):
+            self.post_call_kwargs = kwargs
+            return TestNotificationDeliverySecurity._ResponseContext()
 
     def test_webhook_sender_disables_redirects(self, mocker):
         svc = EnhancedNotificationService()
@@ -74,11 +105,8 @@ class TestNotificationDeliverySecurity:
             "_webhook_connector",
             return_value=("https://example.com/webhook", connector),
         )
-        client_session = mocker.patch("core.notification_service.aiohttp.ClientSession")
-        session = client_session.return_value.__aenter__.return_value
-        response = session.post.return_value.__aenter__.return_value
-        response.status = 302
-        response.text = AsyncMock(return_value="redirect")
+        session = self._ClientSessionContext()
+        mocker.patch("core.notification_service.aiohttp.ClientSession", return_value=session)
 
         result = asyncio.run(
             svc._send_webhook(
@@ -92,8 +120,7 @@ class TestNotificationDeliverySecurity:
         )
 
         assert result["success"] is False
-        session.post.assert_called_once()
-        assert session.post.call_args.kwargs["allow_redirects"] is False
+        assert session.post_call_kwargs["allow_redirects"] is False
 
     def test_email_html_body_escapes_notification_content(self, mocker):
         svc = EnhancedNotificationService()
