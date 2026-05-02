@@ -8,6 +8,7 @@ import requests
 
 BASE_URL = "https://musicbrainz.org/ws/2/"
 USER_AGENT = "SpotifyInsights/1.0 (https://github.com/GaBe141/spotify-insights)"
+REQUEST_TIMEOUT_SECONDS = 15
 
 
 class MusicBrainzAPI:
@@ -34,7 +35,9 @@ class MusicBrainzAPI:
         params.update({"fmt": "json"})
 
         try:
-            response = self.session.get(f"{BASE_URL}{endpoint}", params=params)
+            response = self.session.get(
+                f"{BASE_URL}{endpoint}", params=params, timeout=REQUEST_TIMEOUT_SECONDS
+            )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:

@@ -25,6 +25,8 @@ class TestSpotifyChartsAPISuccess:
             df = api.get_top_200_daily(country_code="us", date="2024-01-15")
 
         assert isinstance(df, __import__("pandas").DataFrame)
+        api.session.get.assert_called_once()
+        assert "timeout" in api.session.get.call_args.kwargs
         if not df.empty:
             assert "track_name" in df.columns or "position" in df.columns
 

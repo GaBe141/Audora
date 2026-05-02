@@ -9,6 +9,7 @@ import requests
 # Note: config import is optional for standalone execution
 
 BASE_URL = "https://www.theaudiodb.com/api/v1/json"
+REQUEST_TIMEOUT = 10
 
 
 class AudioDBAPI:
@@ -41,7 +42,7 @@ class AudioDBAPI:
             url = f"{BASE_URL}/123/{endpoint}"  # Free API key is 123
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
