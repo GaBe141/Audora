@@ -1,6 +1,5 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
-import json
 import time
 
 from core.caching import (
