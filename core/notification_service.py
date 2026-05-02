@@ -573,13 +573,13 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
-            # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
-
             if email_config.get("username") and email_config.get("password") and not email_config.get(
                 "use_tls", True
             ):
                 raise ValueError("SMTP authentication requires TLS")
+
+            # Send email
+            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
                 server.starttls(context=ssl.create_default_context())
