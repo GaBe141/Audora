@@ -145,10 +145,11 @@ class EnhancedNotificationService:
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
-                },
+                "headers": {"Content-Type": "application/json"},
+                "auth_token": os.getenv("WEBHOOK_TOKEN", ""),
+                "auth_allowed_hosts": self._parse_host_allowlist(
+                    os.getenv("CUSTOM_WEBHOOK_AUTH_ALLOWED_HOSTS", "")
+                ),
                 "timeout": 30,
             },
             "sms": {
@@ -180,6 +181,10 @@ class EnhancedNotificationService:
                 self.logger.warning(f"Could not load {default_path}: {e}")
 
         return default_config
+
+    def _parse_host_allowlist(self, raw_hosts: str) -> list[str]:
+        """Parse comma-separated host allowlist entries."""
+        return [host.strip().lower() for host in raw_hosts.split(",") if host.strip()]
 
     def save_config(self, path: str = "config/notification_config.json") -> None:
         """Persist the current channel configuration to a JSON file.
@@ -254,6 +259,28 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _headers_for_webhook(self, url: str, webhook_config: dict[str, Any]) -> dict[str, str]:
+        """Return safe headers for a custom webhook request."""
+        parsed = urlparse(url)
+        target_host = (parsed.hostname or "").lower()
+        headers = {
+            str(key): str(value)
+            for key, value in webhook_config.get("headers", {}).items()
+            if value is not None and str(key).lower() != "authorization"
+        }
+        headers.setdefault("Content-Type", "application/json")
+
+        auth_token = str(webhook_config.get("auth_token", "")).strip()
+        allowed_hosts = {
+            str(host).strip().lower()
+            for host in webhook_config.get("auth_allowed_hosts", [])
+            if str(host).strip()
+        }
+        if auth_token and target_host in allowed_hosts:
+            headers["Authorization"] = f"Bearer {auth_token}"
+
+        return headers
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -771,13 +798,20 @@ System status: {{ system_status }}
                 )
                 payload["formatted_content"] = template.render(**message.template_vars)
 
-            headers = webhook_config.get("headers", {"Content-Type": "application/json"})
+            headers = self._headers_for_webhook(url, webhook_config)
             timeout = webhook_config.get("timeout", 30)
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(
+                    raise_for_status=False,
+                    requote_redirect_url=False,
+                ) as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:

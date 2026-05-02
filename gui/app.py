@@ -4,18 +4,30 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
+import asyncio
+import hmac
+import io
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.data_store import EnhancedMusicDataStore  # noqa: E402
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)  # noqa: E402
 
 app = dash.Dash(
     __name__,
@@ -36,6 +48,18 @@ def _stat_card(card_id: str, label: str) -> dbc.Card:
         ]),
         className="text-center mb-3",
     )
+
+
+def _is_admin_authorized(provided_token: str | None) -> bool:
+    """Check the shared admin token before server-side side effects."""
+    expected_token = os.getenv("AUDORA_DASH_ADMIN_TOKEN", "").strip()
+    if not expected_token or not provided_token:
+        return False
+    return hmac.compare_digest(provided_token, expected_token)
+
+
+def _admin_required_message() -> str:
+    return "Admin token required. Set AUDORA_DASH_ADMIN_TOKEN and enter it in Settings."
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +223,17 @@ _settings_tab = dbc.Tab(
     tab_id="tab-settings",
     children=[
         html.H5("Notification Channels", className="mt-3 mb-3"),
+        dbc.Alert(
+            "Saving settings and sending test notifications require AUDORA_DASH_ADMIN_TOKEN.",
+            color="warning",
+            className="py-2",
+        ),
+        dbc.Input(
+            id="settings-admin-token",
+            placeholder="Admin token",
+            type="password",
+            className="mb-3",
+        ),
         _channel_row("Slack Webhook", "input-slack-url", "slack"),
         _channel_row("Discord Webhook", "input-discord-url", "discord"),
         _channel_row("Custom Webhook", "input-webhook-url", "webhook"),
@@ -318,6 +353,14 @@ app.layout = dbc.Container(
                         outline=True,
                         className="w-100 mb-2",
                     ),
+                    html.Hr(),
+                    html.Label("Admin token", className="small text-muted"),
+                    dbc.Input(
+                        id="sidebar-admin-token",
+                        placeholder="Required for actions",
+                        type="password",
+                        className="mb-2",
+                    ),
                 ],
                 width=2,
                 className="pt-4",
@@ -366,7 +409,6 @@ def _run_command(args: list[str]) -> tuple[str, str]:
 
 def _get_data_store():
     """Return an EnhancedMusicDataStore pointed at the default DB path."""
-    from core.data_store import EnhancedMusicDataStore
     db_path = PROJECT_ROOT / "data" / "enhanced_music_trends.db"
     return EnhancedMusicDataStore(str(db_path))
 
@@ -383,6 +425,7 @@ def _get_data_store():
     Input("btn-setup", "n_clicks"),
     Input("btn-validate", "n_clicks"),
     State("demo-select", "value"),
+    State("sidebar-admin-token", "value"),
     prevent_initial_call=True,
 )
 def run_action(
@@ -391,7 +434,11 @@ def run_action(
     _setup_clicks,
     _validate_clicks,
     demo_value,
+    admin_token,
 ):
+    if not _is_admin_authorized(admin_token):
+        return "Unauthorized", _admin_required_message()
+
     triggered = ctx.triggered_id
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
@@ -560,8 +607,6 @@ def search_history(_n, platform, min_score, days, artist_filter):
 def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
-    import io
-    import pandas as pd
     df = pd.DataFrame(table_data)
     buf = io.StringIO()
     df.to_csv(buf, index=False)
@@ -575,6 +620,7 @@ def export_csv(_n, table_data):
 @app.callback(
     Output("settings-save-status", "children"),
     Input("btn-save-settings", "n_clicks"),
+    State("settings-admin-token", "value"),
     State("input-slack-url", "value"),
     State("input-discord-url", "value"),
     State("input-webhook-url", "value"),
@@ -584,9 +630,21 @@ def export_csv(_n, table_data):
     State("input-smtp-pass", "value"),
     prevent_initial_call=True,
 )
-def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+def save_settings(
+    _n,
+    admin_token,
+    slack_url,
+    discord_url,
+    webhook_url,
+    smtp_host,
+    smtp_port,
+    smtp_user,
+    smtp_pass,
+):
+    if not _is_admin_authorized(admin_token):
+        return _admin_required_message()
+
     try:
-        from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
             svc.config["slack"]["webhook_url"] = slack_url
@@ -614,20 +672,16 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
     @app.callback(
         Output(f"test-status-{channel_key}", "children"),
         Input(f"btn-test-{channel_key}", "n_clicks"),
+        State("settings-admin-token", "value"),
         State(url_input_id, "value"),
         prevent_initial_call=True,
     )
-    def _cb(_n, url):
+    def _cb(_n, admin_token, url):
+        if not _is_admin_authorized(admin_token):
+            return "Admin token required"
         if not url:
             return "No URL"
         try:
-            import asyncio
-            from core.notification_service import (
-                EnhancedNotificationService,
-                NotificationChannel,
-                NotificationMessage,
-                NotificationPriority,
-            )
             svc = EnhancedNotificationService()
             svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
             channel = getattr(NotificationChannel, channel_enum_name)
