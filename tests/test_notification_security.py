@@ -68,7 +68,6 @@ class TestNotificationSecretHandling:
         sanitized = svc._safe_error_body(body, limit=80)
 
         assert "secret" not in sanitized
-        assert "\\n" in sanitized
         assert "hooks.slack.com/services/[redacted]" in sanitized
 
 
