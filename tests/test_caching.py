@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +125,52 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheSecurity:
+    """Regression tests for cache serialization hardening."""
+
+    def test_build_cache_key_uses_sha256_digest(self):
+        cache = CacheManager(backend=LocalCacheBackend())
+
+        key = cache._build_cache_key("prefix", ("artist",), {"limit": 10})
+        digests = key.split(":")[1:]
+
+        assert digests
+        assert all(len(digest) == 64 for digest in digests)
+
+    def test_redis_serializes_json_without_pickle(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        serialized = backend._serialize({"track": "Song", "score": 99})
+
+        envelope = json.loads(serialized.decode("utf-8"))
+        assert envelope == {"v": 1, "type": "json", "data": {"track": "Song", "score": 99}}
+        assert backend._deserialize(serialized) == {"track": "Song", "score": 99}
+
+    def test_redis_serializes_bytes_with_base64(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        serialized = backend._serialize(b"binary-token")
+
+        assert backend._deserialize(serialized) == b"binary-token"
+
+    def test_redis_serializes_dataframes_as_json(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        frame = pd.DataFrame([{"track": "Song", "score": 99}])
+
+        restored = backend._deserialize(backend._serialize(frame))
+
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_redis_rejects_legacy_pickle_payloads(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = pickle.dumps({"malicious": "legacy"})
+
+        assert backend._deserialize(payload) is None
+
+    def test_redis_rejects_unsupported_object_types(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError, match="does not support"):
+            backend._serialize(object())
