@@ -14,6 +14,21 @@ from core.notification_service import (
 )
 
 
+class FakeWebhookResponse:
+    def __init__(self, status: int, body: str):
+        self.status = status
+        self._body = body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    async def text(self):
+        return self._body
+
+
 class TestWebhookUrlValidation:
     """Validate SSRF protections for outbound webhooks."""
 

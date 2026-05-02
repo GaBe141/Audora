@@ -78,7 +78,7 @@ class _RestrictedWebhookResolver(aiohttp.abc.AbstractResolver):
 
     def __init__(self, allow_private: bool):
         self._allow_private = allow_private
-        self._resolver = aiohttp.resolver.DefaultResolver()
+        self._resolver: aiohttp.abc.AbstractResolver | None = None
 
     async def resolve(
         self,
@@ -87,6 +87,9 @@ class _RestrictedWebhookResolver(aiohttp.abc.AbstractResolver):
         family: socket.AddressFamily = socket.AF_INET,
     ) -> list[aiohttp.abc.ResolveResult]:
         """Resolve a hostname and validate every address returned by aiohttp."""
+        if self._resolver is None:
+            self._resolver = aiohttp.resolver.DefaultResolver()
+
         results = await self._resolver.resolve(host, port, family)
         if self._allow_private:
             return results
@@ -100,7 +103,8 @@ class _RestrictedWebhookResolver(aiohttp.abc.AbstractResolver):
 
     async def close(self) -> None:
         """Close the underlying resolver."""
-        await self._resolver.close()
+        if self._resolver is not None:
+            await self._resolver.close()
 
 
 def _is_restricted_ip_address(ip: str) -> bool:
