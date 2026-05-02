@@ -26,6 +26,8 @@ class TestMusicBrainzAPISuccess:
         assert result is not None
         assert result["name"] == "Test Artist"
         assert result["id"] == "mbid-123"
+        api.session.get.assert_called_once()
+        assert api.session.get.call_args.kwargs["timeout"] == 10
 
     def test_search_artist_empty_returns_none(self):
         api = MusicBrainzAPI()

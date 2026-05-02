@@ -13,7 +13,8 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
+REQUEST_TIMEOUT_SECONDS = 10
 
 
 class LastFmAPI:
@@ -40,7 +41,9 @@ class LastFmAPI:
         request_params = {"method": method, "api_key": self.api_key, "format": "json", **params}
 
         try:
-            response = self.session.get(BASE_URL, params=request_params, timeout=10)
+            response = self.session.get(
+                BASE_URL, params=request_params, timeout=REQUEST_TIMEOUT_SECONDS
+            )
             response.raise_for_status()
             data = response.json()
 
