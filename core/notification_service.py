@@ -8,8 +8,9 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -190,14 +191,21 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -233,6 +241,8 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
@@ -531,6 +541,11 @@ System status: {{ system_status }}
             return {"success": False, "error": "Email not configured"}
 
         try:
+            if not email_config.get("use_tls", True) and (
+                email_config.get("username") or email_config.get("password")
+            ):
+                raise ValueError("SMTP authentication requires TLS")
+
             msg = MIMEMultipart("alternative")
             msg["From"] = email_config.get("from_address", "music-discovery@example.com")
             msg["To"] = ", ".join(email_config["recipients"])
@@ -574,7 +589,7 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -650,11 +665,17 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
                     return {"success": True, "status_code": response.status}
+                elif 300 <= response.status < 400:
+                    self.logger.error("Slack notification rejected redirect response")
+                    return {
+                        "success": False,
+                        "error": f"Redirects are not allowed: HTTP {response.status}",
+                    }
                 else:
                     error_text = await response.text()
                     self.logger.error(
@@ -717,11 +738,17 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
                     return {"success": True, "status_code": response.status}
+                elif 300 <= response.status < 400:
+                    self.logger.error("Discord notification rejected redirect response")
+                    return {
+                        "success": False,
+                        "error": f"Redirects are not allowed: HTTP {response.status}",
+                    }
                 else:
                     error_text = await response.text()
                     self.logger.error(
@@ -752,9 +779,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
-            url = self._validate_webhook_url(
-                url, allow_private=self._allow_private_webhooks()
-            )
+            url = self._validate_webhook_url(url, allow_private=self._allow_private_webhooks())
             # Prepare payload
             payload = {
                 "title": message.title,
@@ -777,12 +802,22 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
                     self.logger.info(f"Webhook notification sent successfully: {response.status}")
                     return {"success": True, "status_code": response.status}
+                elif 300 <= response.status < 400:
+                    self.logger.error("Webhook notification rejected redirect response")
+                    return {
+                        "success": False,
+                        "error": f"Redirects are not allowed: HTTP {response.status}",
+                    }
                 else:
                     error_text = await response.text()
                     self.logger.error(
