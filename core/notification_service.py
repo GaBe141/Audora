@@ -32,11 +32,13 @@ class RestrictedWebhookResolver(AbstractResolver):
 
     def __init__(self, allow_private: bool = False):
         self.allow_private = allow_private
-        self._resolver = DefaultResolver()
+        self._resolver: DefaultResolver | None = None
 
     async def resolve(
         self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
     ) -> list[ResolveResult]:
+        if self._resolver is None:
+            self._resolver = DefaultResolver()
         resolved_hosts = await self._resolver.resolve(host, port, family)
         if self.allow_private:
             return resolved_hosts
@@ -48,7 +50,8 @@ class RestrictedWebhookResolver(AbstractResolver):
         return resolved_hosts
 
     async def close(self) -> None:
-        await self._resolver.close()
+        if self._resolver is not None:
+            await self._resolver.close()
 
 
 class NotificationPriority(Enum):
