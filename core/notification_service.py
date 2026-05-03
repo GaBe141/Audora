@@ -25,6 +25,40 @@ import aiohttp
 import jinja2  # type: ignore[import-untyped]
 
 
+class _PinnedResolver(aiohttp.abc.AbstractResolver):
+    """Resolve one hostname to pre-vetted IPs for the lifetime of a request."""
+
+    def __init__(self, hostname: str, resolved_ips: set[str]):
+        self.hostname = hostname
+        self.resolved_ips = resolved_ips
+
+    async def resolve(
+        self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    ) -> list[dict[str, Any]]:
+        if host != self.hostname:
+            raise OSError(f"Unexpected webhook hostname: {host}")
+
+        resolved_hosts = []
+        for ip in sorted(self.resolved_ips):
+            parsed_ip = ipaddress.ip_address(ip)
+            ip_family = socket.AF_INET6 if parsed_ip.version == 6 else socket.AF_INET
+            resolved_hosts.append(
+                {
+                    "hostname": host,
+                    "host": ip,
+                    "port": port,
+                    "family": ip_family,
+                    "proto": 0,
+                    "flags": socket.AI_NUMERICHOST,
+                }
+            )
+
+        return resolved_hosts
+
+    async def close(self) -> None:
+        return None
+
+
 class NotificationPriority(Enum):
     """Notification priority levels."""
 
@@ -226,8 +260,8 @@ class EnhancedNotificationService:
         except ValueError:
             return True
 
-    def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
-        """Validate outbound webhook URL to reduce SSRF risk."""
+    def _resolve_webhook_ips(self, url: str, *, allow_private: bool = False) -> set[str]:
+        """Validate an outbound webhook URL and return vetted resolved IPs."""
         parsed = urlparse(url.strip())
         if parsed.scheme != "https":
             raise ValueError("Webhook URL must use HTTPS")
@@ -246,6 +280,9 @@ class EnhancedNotificationService:
         except socket.gaierror as e:
             raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
 
+        if not resolved_ips:
+            raise ValueError(f"Could not resolve webhook hostname: {hostname}")
+
         if not allow_private:
             for ip in resolved_ips:
                 if self._is_restricted_ip(ip):
@@ -253,7 +290,54 @@ class EnhancedNotificationService:
                         "Webhook URL resolves to a private or restricted network address"
                     )
 
+        return resolved_ips
+
+    def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
+        """Validate outbound webhook URL to reduce SSRF risk."""
+        self._resolve_webhook_ips(url, allow_private=allow_private)
         return url
+
+    def _create_pinned_webhook_connector(
+        self, url: str, *, allow_private: bool = False
+    ) -> aiohttp.TCPConnector:
+        """Create a connector that cannot re-resolve a validated webhook host."""
+        hostname = urlparse(url.strip()).hostname
+        if not hostname:
+            raise ValueError("Webhook URL must include a valid hostname")
+
+        resolved_ips = self._resolve_webhook_ips(url, allow_private=allow_private)
+        return aiohttp.TCPConnector(resolver=_PinnedResolver(hostname, resolved_ips))
+
+    def _prepare_webhook_request(
+        self, url: str, *, allow_private: bool = False
+    ) -> tuple[str, aiohttp.TCPConnector]:
+        """Validate a webhook URL and pin request DNS to the vetted addresses."""
+        clean_url = self._validate_webhook_url(url, allow_private=allow_private)
+        connector = self._create_pinned_webhook_connector(clean_url, allow_private=allow_private)
+        return clean_url, connector
+
+    def _allowed_attachment_root(self) -> Path:
+        """Return the only directory email notifications may attach files from."""
+        return Path(
+            os.getenv("AUDORA_NOTIFICATION_ATTACHMENT_DIR", "data/notification_attachments")
+        ).resolve()
+
+    def _validate_attachment_path(self, attachment_path: str) -> Path:
+        """Validate an email attachment path before reading it."""
+        allowed_root = self._allowed_attachment_root()
+        candidate = Path(attachment_path).expanduser().resolve()
+
+        if not candidate.is_file():
+            raise ValueError(f"Attachment does not exist or is not a file: {attachment_path}")
+
+        try:
+            candidate.relative_to(allowed_root)
+        except ValueError as e:
+            raise ValueError(
+                f"Attachment path must be inside allowed directory: {allowed_root}"
+            ) from e
+
+        return candidate
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -559,16 +643,16 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    safe_attachment = self._validate_attachment_path(attachment_path)
+                    with safe_attachment.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {safe_attachment.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
@@ -600,7 +684,9 @@ System status: {{ system_status }}
             return {"success": False, "error": "Slack webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            webhook_url, connector = self._prepare_webhook_request(
+                webhook_url, allow_private=False
+            )
             # Create Slack message format
             color_map = {
                 NotificationPriority.LOW: "good",
@@ -649,7 +735,7 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(connector=connector) as session,
                 session.post(webhook_url, json=slack_message) as response,
             ):
                 if response.status == 200:
@@ -675,7 +761,9 @@ System status: {{ system_status }}
             return {"success": False, "error": "Discord webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            webhook_url, connector = self._prepare_webhook_request(
+                webhook_url, allow_private=False
+            )
             # Format content for Discord
             content = message.content
             if message.template_vars:
@@ -716,7 +804,7 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(connector=connector) as session,
                 session.post(webhook_url, json=discord_message) as response,
             ):
                 if response.status in [200, 204]:
@@ -752,7 +840,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
-            url = self._validate_webhook_url(
+            url, connector = self._prepare_webhook_request(
                 url, allow_private=self._allow_private_webhooks()
             )
             # Prepare payload
@@ -775,7 +863,7 @@ System status: {{ system_status }}
             timeout = webhook_config.get("timeout", 30)
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(connector=connector) as session,
                 session.post(
                     url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
                 ) as response,
