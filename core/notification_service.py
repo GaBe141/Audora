@@ -3,13 +3,12 @@ Enhanced notification service for music discovery alerts.
 Supports multiple channels, smart filtering, and customizable triggers.
 """
 
-import asyncio
 import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -258,7 +257,7 @@ class EnhancedNotificationService:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -310,7 +309,7 @@ class EnhancedNotificationService:
         resolved_hosts: list[dict[str, Any]] = []
         try:
             # Validate all resolved addresses to avoid DNS-based bypass.
-            for family, socktype, proto, _, sockaddr in socket.getaddrinfo(
+            for family, _socktype, proto, _, sockaddr in socket.getaddrinfo(
                 hostname,
                 port,
                 type=socket.SOCK_STREAM,

@@ -13,9 +13,6 @@ import sys
 from ipaddress import ip_address
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
 import dash
 import dash_bootstrap_components as dbc
 import pandas as pd
@@ -29,6 +26,8 @@ from core.notification_service import (
     NotificationMessage,
     NotificationPriority,
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 app = dash.Dash(
     __name__,
