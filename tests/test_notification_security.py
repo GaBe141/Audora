@@ -139,7 +139,6 @@ class TestNotificationTransportSecurity:
         with patch("core.notification_service.smtplib.SMTP", return_value=MagicMock()) as smtp:
             result = asyncio.run(svc._send_email(message))
 
-        smtp.assert_called_once()
-        smtp.return_value.login.assert_not_called()
+        smtp.assert_not_called()
         assert result["success"] is False
         assert "without TLS" in result["error"]

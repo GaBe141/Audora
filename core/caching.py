@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable
 from datetime import date, datetime
 from functools import wraps
+from io import StringIO
 from typing import Any, ParamSpec, TypeVar
 
 import pandas as pd
@@ -286,12 +287,12 @@ class RedisCacheBackend(CacheBackend):
             encoded = value.get("value")
             if not isinstance(encoded, str):
                 raise ValueError("Cache DataFrame payload is invalid")
-            return pd.read_json(encoded, orient="split")
+            return pd.read_json(StringIO(encoded), orient="split")
         if value_type == "pandas_series":
             encoded = value.get("value")
             if not isinstance(encoded, str):
                 raise ValueError("Cache Series payload is invalid")
-            return pd.read_json(encoded, orient="split", typ="series")
+            return pd.read_json(StringIO(encoded), orient="split", typ="series")
 
         raise ValueError(f"Unsupported cache value marker: {value_type}")
 
