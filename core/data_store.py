@@ -73,9 +73,18 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    _ALLOWED_EXPORT_TABLES = {
+        "trends",
+        "trend_history",
+        "viral_predictions",
+        "cross_platform_correlations",
+        "platform_metrics",
+        "data_quality_logs",
+    }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
+        self.project_root = Path(__file__).resolve().parent.parent
         self.backup_dir = Path(backup_dir)
         self.backup_dir.mkdir(exist_ok=True)
         self.logger = logging.getLogger(__name__)
@@ -927,22 +936,33 @@ class EnhancedMusicDataStore:
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
 
+    def _resolve_export_path(self, filepath: str) -> Path:
+        """Resolve export path inside the project's exports directory."""
+        export_dir = (self.project_root / "exports").resolve()
+        candidate = Path(filepath)
+        if not candidate.is_absolute():
+            candidate = export_dir / candidate
+
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(export_dir):
+            raise ValueError("Export path must be inside the project exports directory")
+        if resolved.suffix.lower() != ".csv":
+            raise ValueError("Export path must use a .csv extension")
+
+        return resolved
+
     def export_to_csv(self, table: str, filepath: str, days: int | None = None) -> str:
         """Export table data to CSV.
 
-        Note: Table name is validated against whitelist to prevent SQL injection.
+        Note: Table name and output path are validated to prevent SQL
+        injection and arbitrary file writes.
         """
-        # Whitelist valid table names to prevent SQL injection
-        valid_tables = {
-            "trends",
-            "trend_history",
-            "viral_predictions",
-            "cross_platform_correlations",
-            "artists",
-            "tracks",
-        }
-        if table not in valid_tables:
-            raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
+        if table not in self._ALLOWED_EXPORT_TABLES:
+            raise ValueError(
+                f"Invalid table name: {table}. Must be one of {self._ALLOWED_EXPORT_TABLES}"
+            )
+
+        export_path = self._resolve_export_path(filepath)
 
         with self.get_connection() as conn:
             if days:
@@ -959,12 +979,12 @@ class EnhancedMusicDataStore:
                 df = pd.read_sql_query(query, conn)
 
             # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            export_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(export_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {export_path}")
 
-        return filepath
+        return str(export_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""

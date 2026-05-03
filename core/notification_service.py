@@ -4,6 +4,7 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
@@ -87,6 +88,7 @@ class EnhancedNotificationService:
 
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
+        self.project_root = Path(__file__).resolve().parent.parent
         self.config = self._load_config(config_file)
         self.sent_notifications: dict[str, Any] = {}
         self.notification_history: list[dict[str, Any]] = []
@@ -123,6 +125,8 @@ class EnhancedNotificationService:
             "batch_delay_minutes": 5,
             "retry_attempts": 3,
             "retry_delay_seconds": 30,
+            "attachment_base_dir": str(Path("data/notification_attachments")),
+            "max_attachment_bytes": 10 * 1024 * 1024,
             "email": {
                 "smtp_server": os.getenv("SMTP_SERVER", ""),
                 "port": int(os.getenv("SMTP_PORT", "587")),
@@ -181,6 +185,34 @@ class EnhancedNotificationService:
 
         return default_config
 
+    def _resolve_attachment_path(self, attachment_path: str) -> Path:
+        """Resolve an attachment path inside the configured safe attachment directory."""
+        base_dir = Path(self.config.get("attachment_base_dir", "data/notification_attachments"))
+        if not base_dir.is_absolute():
+            base_dir = self.project_root / base_dir
+        base_dir = base_dir.resolve()
+
+        candidate = Path(attachment_path)
+        if not candidate.is_absolute():
+            candidate = self.project_root / candidate
+
+        try:
+            resolved = candidate.resolve(strict=True)
+        except FileNotFoundError as e:
+            raise ValueError(f"Attachment does not exist: {attachment_path}") from e
+
+        if not resolved.is_file():
+            raise ValueError(f"Attachment is not a file: {attachment_path}")
+
+        if not resolved.is_relative_to(base_dir):
+            raise ValueError("Attachment path must be inside the configured attachment directory")
+
+        max_bytes = int(self.config.get("max_attachment_bytes", 10 * 1024 * 1024))
+        if resolved.stat().st_size > max_bytes:
+            raise ValueError("Attachment exceeds the configured maximum size")
+
+        return resolved
+
     def save_config(self, path: str = "config/notification_config.json") -> None:
         """Persist the current channel configuration to a JSON file.
 
@@ -190,8 +222,17 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+            "attachment_base_dir",
+            "max_attachment_bytes",
+        ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         try:
             with config_path.open("w") as f:
@@ -553,22 +594,22 @@ System status: {{ system_status }}
             msg.attach(MIMEText(text_content, "plain"))
 
             # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            html_content = html.escape(text_content).replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    safe_path = self._resolve_attachment_path(attachment_path)
+                    with safe_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {safe_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
@@ -650,8 +691,15 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=False,
+                ) as response,
             ):
+                if 300 <= response.status < 400:
+                    return {"success": False, "error": "Webhook redirects are not allowed"}
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -717,8 +765,15 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=False,
+                ) as response,
             ):
+                if 300 <= response.status < 400:
+                    return {"success": False, "error": "Webhook redirects are not allowed"}
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -777,9 +832,15 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
+                if 300 <= response.status < 400:
+                    return {"success": False, "error": "Webhook redirects are not allowed"}
                 if 200 <= response.status < 300:
                     self.logger.info(f"Webhook notification sent successfully: {response.status}")
                     return {"success": True, "status_code": response.status}
