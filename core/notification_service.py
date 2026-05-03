@@ -72,6 +72,40 @@ class NotificationMessage:
     template_vars: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class _WebhookTarget:
+    """Validated webhook target with DNS answers pinned for the outbound request."""
+
+    url: str
+    connector: aiohttp.TCPConnector
+
+
+class _PinnedWebhookResolver(aiohttp.abc.AbstractResolver):
+    """aiohttp resolver that reuses already-validated webhook DNS answers."""
+
+    def __init__(self, hostname: str, resolved_hosts: list[dict[str, Any]]):
+        self.hostname = hostname.lower()
+        self.resolved_hosts = resolved_hosts
+
+    async def resolve(
+        self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    ) -> list[dict[str, Any]]:
+        if host.lower() != self.hostname:
+            raise OSError("Unexpected webhook hostname during resolution")
+
+        return [
+            {
+                **resolved_host,
+                "hostname": host,
+                "port": port or resolved_host["port"],
+            }
+            for resolved_host in self.resolved_hosts
+        ]
+
+    async def close(self) -> None:
+        """Resolver has no persistent resources to close."""
+
+
 class EnhancedNotificationService:
     """
     Advanced notification system for music discovery events.
@@ -189,10 +223,7 @@ class EnhancedNotificationService:
         """
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = self._config_for_persistence()
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -201,6 +232,86 @@ class EnhancedNotificationService:
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _persist_notification_secrets(self) -> bool:
+        """Whether notification secrets should be written to disk."""
+        return os.getenv("AUDORA_PERSIST_NOTIFICATION_SECRETS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _config_for_persistence(self) -> dict[str, Any]:
+        """Return config safe to persist without long-lived secrets by default."""
+        if self._persist_notification_secrets():
+            self.logger.warning(
+                "Persisting notification secrets because AUDORA_PERSIST_NOTIFICATION_SECRETS is set"
+            )
+            saveable_keys = [
+                "email",
+                "slack",
+                "discord",
+                "webhook",
+                "sms",
+                "default_channels",
+                "rate_limit_per_hour",
+            ]
+            return {key: self.config[key] for key in saveable_keys if key in self.config}
+
+        safe_config: dict[str, Any] = {
+            "default_channels": self.config.get("default_channels", ["console"]),
+            "rate_limit_per_hour": self.config.get("rate_limit_per_hour", 50),
+        }
+
+        email_config = self.config.get("email", {})
+        safe_config["email"] = {
+            key: email_config.get(key)
+            for key in (
+                "smtp_server",
+                "port",
+                "username",
+                "from_address",
+                "recipients",
+                "use_tls",
+            )
+            if key in email_config
+        }
+
+        slack_config = self.config.get("slack", {})
+        safe_config["slack"] = {
+            key: slack_config.get(key)
+            for key in ("channel", "username", "icon_emoji")
+            if key in slack_config
+        }
+
+        discord_config = self.config.get("discord", {})
+        safe_config["discord"] = {
+            key: discord_config.get(key)
+            for key in ("username", "avatar_url")
+            if key in discord_config
+        }
+
+        webhook_config = self.config.get("webhook", {})
+        headers = webhook_config.get("headers", {})
+        safe_headers = {
+            key: value
+            for key, value in headers.items()
+            if key.lower() not in {"authorization", "x-api-key", "x-auth-token"}
+        }
+        safe_config["webhook"] = {
+            "headers": safe_headers,
+            "timeout": webhook_config.get("timeout", 30),
+        }
+
+        sms_config = self.config.get("sms", {})
+        safe_config["sms"] = {
+            key: sms_config.get(key)
+            for key in ("provider", "from_number", "recipients")
+            if key in sms_config
+        }
+
+        return safe_config
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
@@ -226,8 +337,10 @@ class EnhancedNotificationService:
         except ValueError:
             return True
 
-    def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
-        """Validate outbound webhook URL to reduce SSRF risk."""
+    def _resolve_webhook_target(
+        self, url: str, *, allow_private: bool = False
+    ) -> tuple[str, str, list[dict[str, Any]]]:
+        """Validate outbound webhook URL and return pinned DNS answers."""
         parsed = urlparse(url.strip())
         if parsed.scheme != "https":
             raise ValueError("Webhook URL must use HTTPS")
@@ -238,22 +351,62 @@ class EnhancedNotificationService:
         if hostname.lower() == "localhost":
             raise ValueError("Localhost webhook URLs are not allowed")
 
-        resolved_ips = set()
+        resolved_hosts = []
         try:
-            # Validate all resolved addresses to avoid DNS-based bypass.
-            for info in socket.getaddrinfo(hostname, parsed.port or 443, proto=socket.IPPROTO_TCP):
-                resolved_ips.add(info[4][0])
-        except socket.gaierror as e:
-            raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
-
-        if not allow_private:
-            for ip in resolved_ips:
-                if self._is_restricted_ip(ip):
+            port = parsed.port or 443
+            for family, _, proto, _, sockaddr in socket.getaddrinfo(
+                hostname,
+                port,
+                type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP,
+            ):
+                ip = sockaddr[0]
+                if not allow_private and self._is_restricted_ip(ip):
                     raise ValueError(
                         "Webhook URL resolves to a private or restricted network address"
                     )
 
+                resolved_hosts.append(
+                    {
+                        "host": ip,
+                        "port": port,
+                        "family": family,
+                        "proto": proto,
+                        "flags": 0,
+                    }
+                )
+        except socket.gaierror as e:
+            raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
+
+        if not resolved_hosts:
+            raise ValueError(f"Could not resolve webhook hostname: {hostname}")
+
+        return url, hostname, resolved_hosts
+
+    def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
+        """Validate outbound webhook URL to reduce SSRF risk."""
+        self._resolve_webhook_target(url, allow_private=allow_private)
         return url
+
+    def _prepare_webhook_target(self, url: str, *, allow_private: bool = False) -> _WebhookTarget:
+        """Validate a webhook and pin DNS answers for the following request."""
+        validated_url, hostname, resolved_hosts = self._resolve_webhook_target(
+            url, allow_private=allow_private
+        )
+        connector = aiohttp.TCPConnector(
+            resolver=_PinnedWebhookResolver(hostname, resolved_hosts),
+            ttl_dns_cache=0,
+        )
+        return _WebhookTarget(url=validated_url, connector=connector)
+
+    def _webhook_timeout(self, timeout: Any = 30) -> aiohttp.ClientTimeout:
+        """Return a bounded timeout for outbound webhook requests."""
+        try:
+            total_timeout = float(timeout)
+        except (TypeError, ValueError):
+            total_timeout = 30.0
+        total_timeout = min(max(total_timeout, 1.0), 60.0)
+        return aiohttp.ClientTimeout(total=total_timeout)
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -600,7 +753,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Slack webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            webhook_target = self._prepare_webhook_target(webhook_url, allow_private=False)
             # Create Slack message format
             color_map = {
                 NotificationPriority.LOW: "good",
@@ -649,8 +802,11 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                aiohttp.ClientSession(
+                    connector=webhook_target.connector,
+                    timeout=self._webhook_timeout(),
+                ) as session,
+                session.post(webhook_target.url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -675,7 +831,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Discord webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            webhook_target = self._prepare_webhook_target(webhook_url, allow_private=False)
             # Format content for Discord
             content = message.content
             if message.template_vars:
@@ -716,8 +872,13 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                aiohttp.ClientSession(
+                    connector=webhook_target.connector,
+                    timeout=self._webhook_timeout(),
+                ) as session,
+                session.post(
+                    webhook_target.url, json=discord_message, allow_redirects=False
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -752,7 +913,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
-            url = self._validate_webhook_url(
+            webhook_target = self._prepare_webhook_target(
                 url, allow_private=self._allow_private_webhooks()
             )
             # Prepare payload
@@ -775,9 +936,15 @@ System status: {{ system_status }}
             timeout = webhook_config.get("timeout", 30)
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(
+                    connector=webhook_target.connector,
+                    timeout=self._webhook_timeout(timeout),
+                ) as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    webhook_target.url,
+                    json=payload,
+                    headers=headers,
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
