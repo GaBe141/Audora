@@ -1,4 +1,4 @@
-"""Security tests for notification webhook URL validation."""
+"""Security tests for notification delivery safeguards."""
 
 import pytest
 
@@ -27,3 +27,32 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+
+class TestEmailAttachmentValidation:
+    """Validate that email attachments cannot exfiltrate arbitrary local files."""
+
+    def test_allows_generated_data_attachments(self, tmp_path):
+        svc = EnhancedNotificationService()
+        svc.project_root = tmp_path
+        attachment = tmp_path / "data" / "reports" / "summary.json"
+        attachment.parent.mkdir(parents=True)
+        attachment.write_text("{}", encoding="utf-8")
+
+        assert svc._safe_attachment_path("data/reports/summary.json") == attachment.resolve()
+
+    def test_rejects_paths_outside_generated_directories(self, tmp_path):
+        svc = EnhancedNotificationService()
+        svc.project_root = tmp_path
+        secret_file = tmp_path / ".env"
+        secret_file.write_text("TOKEN=secret", encoding="utf-8")
+
+        assert svc._safe_attachment_path(".env") is None
+
+    def test_rejects_path_traversal_outside_generated_directories(self, tmp_path):
+        svc = EnhancedNotificationService()
+        svc.project_root = tmp_path
+        outside_file = tmp_path.parent / "secret.txt"
+        outside_file.write_text("secret", encoding="utf-8")
+
+        assert svc._safe_attachment_path("../secret.txt") is None

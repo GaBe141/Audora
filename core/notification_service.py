@@ -4,6 +4,7 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
@@ -23,6 +24,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+from aiohttp.abc import AbstractResolver
 
 
 class NotificationPriority(Enum):
@@ -72,6 +74,47 @@ class NotificationMessage:
     template_vars: dict[str, Any] | None = None
 
 
+class StaticWebhookResolver(AbstractResolver):
+    """Resolve a webhook host to addresses that were already security-checked."""
+
+    def __init__(self, hostname: str, resolved_ips: set[str]):
+        self.hostname = hostname
+        self.resolved_ips = resolved_ips
+
+    async def resolve(
+        self,
+        host: str,
+        port: int = 0,
+        family: int = socket.AF_INET,
+    ) -> list[dict[str, Any]]:
+        if host != self.hostname:
+            raise OSError("Unexpected webhook hostname during DNS resolution")
+
+        results: list[dict[str, Any]] = []
+        for ip in sorted(self.resolved_ips):
+            parsed_ip = ipaddress.ip_address(ip)
+            ip_family = socket.AF_INET6 if parsed_ip.version == 6 else socket.AF_INET
+            if family not in (socket.AF_UNSPEC, 0, ip_family):
+                continue
+            results.append(
+                {
+                    "hostname": host,
+                    "host": ip,
+                    "port": port,
+                    "family": ip_family,
+                    "proto": socket.IPPROTO_TCP,
+                    "flags": socket.AI_NUMERICHOST,
+                }
+            )
+
+        if not results:
+            raise OSError("No validated webhook addresses matched the requested address family")
+        return results
+
+    async def close(self) -> None:
+        return None
+
+
 class EnhancedNotificationService:
     """
     Advanced notification system for music discovery events.
@@ -87,6 +130,7 @@ class EnhancedNotificationService:
 
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
+        self.project_root = Path(__file__).resolve().parent.parent
         self.config = self._load_config(config_file)
         self.sent_notifications: dict[str, Any] = {}
         self.notification_history: list[dict[str, Any]] = []
@@ -226,8 +270,8 @@ class EnhancedNotificationService:
         except ValueError:
             return True
 
-    def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
-        """Validate outbound webhook URL to reduce SSRF risk."""
+    def _resolve_webhook_ips(self, url: str, *, allow_private: bool = False) -> set[str]:
+        """Resolve and validate outbound webhook targets to reduce SSRF risk."""
         parsed = urlparse(url.strip())
         if parsed.scheme != "https":
             raise ValueError("Webhook URL must use HTTPS")
@@ -253,7 +297,36 @@ class EnhancedNotificationService:
                         "Webhook URL resolves to a private or restricted network address"
                     )
 
+        return resolved_ips
+
+    def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
+        """Validate outbound webhook URL to reduce SSRF risk."""
+        self._resolve_webhook_ips(url, allow_private=allow_private)
         return url
+
+    def _webhook_connector(self, url: str, *, allow_private: bool = False) -> aiohttp.TCPConnector:
+        """Create an HTTP connector pinned to already validated webhook IP addresses."""
+        parsed = urlparse(url.strip())
+        hostname = parsed.hostname
+        if hostname is None:
+            raise ValueError("Webhook URL must include a valid hostname")
+
+        resolved_ips = self._resolve_webhook_ips(url, allow_private=allow_private)
+        return aiohttp.TCPConnector(resolver=StaticWebhookResolver(hostname, resolved_ips))
+
+    def _safe_attachment_path(self, attachment_path: str) -> Path | None:
+        """Return an allowed attachment path, or None for disallowed paths."""
+        path = (self.project_root / attachment_path).expanduser().resolve()
+        allowed_roots = [
+            (self.project_root / "data").resolve(),
+            (self.project_root / "exports").resolve(),
+        ]
+        if not any(path == root or root in path.parents for root in allowed_roots):
+            self.logger.warning("Blocked email attachment outside allowed export directories: %s", path)
+            return None
+        if not path.is_file():
+            return None
+        return path
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -553,20 +626,21 @@ System status: {{ system_status }}
             msg.attach(MIMEText(text_content, "plain"))
 
             # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            html_content = html.escape(text_content).replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
+                    safe_path = self._safe_attachment_path(attachment_path)
+                    if safe_path:
+                        with safe_path.open("rb") as f:
                             attachment = MIMEBase("application", "octet-stream")
                             attachment.set_payload(f.read())
                             encoders.encode_base64(attachment)
                             attachment.add_header(
                                 "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
+                                f"attachment; filename= {safe_path.name}",
                             )
                             msg.attach(attachment)
 
@@ -649,7 +723,9 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(
+                    connector=self._webhook_connector(webhook_url, allow_private=False)
+                ) as session,
                 session.post(webhook_url, json=slack_message) as response,
             ):
                 if response.status == 200:
@@ -716,7 +792,9 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(
+                    connector=self._webhook_connector(webhook_url, allow_private=False)
+                ) as session,
                 session.post(webhook_url, json=discord_message) as response,
             ):
                 if response.status in [200, 204]:
@@ -752,8 +830,9 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
+            allow_private = self._allow_private_webhooks()
             url = self._validate_webhook_url(
-                url, allow_private=self._allow_private_webhooks()
+                url, allow_private=allow_private
             )
             # Prepare payload
             payload = {
@@ -775,7 +854,9 @@ System status: {{ system_status }}
             timeout = webhook_config.get("timeout", 30)
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(
+                    connector=self._webhook_connector(url, allow_private=allow_private)
+                ) as session,
                 session.post(
                     url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
                 ) as response,
