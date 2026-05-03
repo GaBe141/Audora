@@ -1,9 +1,23 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+from datetime import date, datetime
 
+import pandas as pd
+import pytest
+
+import core.caching as caching
 from core.caching import (
+    CACHE_ENVELOPE_VERSION,
+    CACHE_PAYLOAD_ALGORITHM,
+    CACHE_TYPE_MARKER,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +132,119 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256_digest(self, mock_cache):
+        cache_key = mock_cache._build_cache_key("fn", ("value",), {"limit": 10})
+        key_parts = cache_key.split(":")
+
+        assert len(key_parts[1]) == hashlib.sha256().digest_size * 2
+        assert len(key_parts[2]) == hashlib.sha256().digest_size * 2
+
+
+@pytest.fixture
+def redis_backend(monkeypatch):
+    """Create a RedisCacheBackend instance without requiring a Redis server."""
+    monkeypatch.setattr(caching, "REDIS_AVAILABLE", True)
+    monkeypatch.setattr(caching, "ConnectionPool", lambda **_kwargs: object())
+
+    class FakeRedis:
+        def __init__(self, connection_pool):
+            self.connection_pool = connection_pool
+            self.values = {}
+
+        def ping(self):
+            return True
+
+        def get(self, key):
+            return self.values.get(key)
+
+        def set(self, key, value):
+            self.values[key] = value
+
+        def setex(self, key, _ttl, value):
+            self.values[key] = value
+
+        def delete(self, key):
+            self.values.pop(key, None)
+
+        def flushdb(self):
+            self.values.clear()
+
+        def exists(self, key):
+            return key in self.values
+
+    class FakeRedisModule:
+        ConnectionError = ConnectionError
+        Redis = FakeRedis
+
+    monkeypatch.setattr(caching, "redis", FakeRedisModule)
+
+    backend = RedisCacheBackend()
+    backend._signing_key = b"test-cache-signing-key"
+    return backend
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for safe Redis cache serialization."""
+
+    def test_round_trips_json_supported_values(self, redis_backend):
+        now = datetime(2026, 5, 3, 20, 0, 0)
+        value = {
+            "text": "hello",
+            "bytes": b"binary",
+            "tuple": ("a", 1),
+            "set": {"b", "a"},
+            "date": date(2026, 5, 3),
+            "datetime": now,
+        }
+
+        redis_backend.set("key", value)
+
+        assert redis_backend.get("key") == value
+
+    def test_round_trips_dataframe(self, redis_backend):
+        frame = pd.DataFrame({"track": ["a", "b"], "score": [1, 2]})
+
+        redis_backend.set("frame", frame)
+
+        pd.testing.assert_frame_equal(redis_backend.get("frame"), frame)
+
+    def test_rejects_legacy_pickle_envelope_without_loading(self, redis_backend, monkeypatch):
+        def fail_if_loaded(_payload):
+            raise AssertionError("pickle.loads should not be called")
+
+        legacy_payload = pickle.dumps({"unsafe": True})
+        signature = hmac.new(redis_backend._signing_key, legacy_payload, hashlib.sha256).hexdigest()
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(legacy_payload).decode("ascii"),
+        }
+        monkeypatch.setattr(pickle, "loads", fail_if_loaded)
+
+        assert redis_backend._deserialize(json.dumps(legacy_envelope).encode("utf-8")) is None
+
+    def test_rejects_tampered_payload(self, redis_backend):
+        serialized = json.loads(redis_backend._serialize({"safe": True}).decode("utf-8"))
+        payload = json.loads(base64.b64decode(serialized["payload"]).decode("utf-8"))
+        payload["safe"] = False
+        serialized["payload"] = base64.b64encode(json.dumps(payload).encode("utf-8")).decode(
+            "ascii"
+        )
+
+        assert redis_backend._deserialize(json.dumps(serialized).encode("utf-8")) is None
+
+    def test_rejects_unsupported_object_type(self, redis_backend):
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            redis_backend._serialize(object())
+
+    def test_serialized_envelope_declares_json_format(self, redis_backend):
+        envelope = json.loads(redis_backend._serialize({"safe": True}).decode("utf-8"))
+
+        assert envelope["v"] == CACHE_ENVELOPE_VERSION
+        assert envelope["alg"] == CACHE_PAYLOAD_ALGORITHM
+        assert envelope["format"] == "json"
+
+        payload = json.loads(base64.b64decode(envelope["payload"]).decode("utf-8"))
+        assert payload[CACHE_TYPE_MARKER] == "dict"
