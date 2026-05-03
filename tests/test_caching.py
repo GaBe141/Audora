@@ -4,6 +4,7 @@ import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -58,6 +59,20 @@ class TestLocalCacheBackend:
         assert backend.get("d") == 4
         present = sum(1 for k in ("a", "b", "c") if backend.get(k) is not None)
         assert present == 2
+
+
+class TestRedisCacheBackendSerialization:
+    """Tests for Redis cache payload integrity protection."""
+
+    def test_rejects_tampered_serialized_payload(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "test-signing-key")
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = backend._get_signing_key()
+
+        serialized = bytearray(backend._serialize({"safe": True}))
+        serialized[-2] = serialized[-2] ^ 1
+
+        assert backend._deserialize(bytes(serialized)) is None
 
 
 class TestCacheManager:
