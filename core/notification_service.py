@@ -4,12 +4,13 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -87,6 +88,7 @@ class EnhancedNotificationService:
 
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
+        self.project_root = Path(__file__).resolve().parent.parent
         self.config = self._load_config(config_file)
         self.sent_notifications: dict[str, Any] = {}
         self.notification_history: list[dict[str, Any]] = []
@@ -158,6 +160,10 @@ class EnhancedNotificationService:
                 "from_number": os.getenv("SMS_FROM_NUMBER", ""),
                 "recipients": os.getenv("SMS_RECIPIENTS", "").split(","),
             },
+            "attachments": {
+                "allowed_roots": [str(self.project_root / "data"), str(self.project_root / "exports")],
+                "max_bytes": 5 * 1024 * 1024,
+            },
         }
 
         if config_file and Path(config_file).exists():
@@ -197,7 +203,7 @@ class EnhancedNotificationService:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -262,6 +268,32 @@ class EnhancedNotificationService:
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    def _webhook_request_options(self, timeout: int | float | None = None) -> dict[str, Any]:
+        """Build secure aiohttp request options for outbound webhooks."""
+        options: dict[str, Any] = {"allow_redirects": False}
+        if timeout is not None:
+            options["timeout"] = aiohttp.ClientTimeout(total=timeout)
+        return options
+
+    def _resolve_attachment_path(self, attachment_path: str) -> Path:
+        """Resolve and validate an email attachment path before reading it."""
+        attachment_config = self.config.get("attachments", {})
+        allowed_roots = attachment_config.get("allowed_roots", [])
+        max_bytes = int(attachment_config.get("max_bytes", 5 * 1024 * 1024))
+
+        resolved_path = Path(attachment_path).expanduser().resolve(strict=True)
+        if not resolved_path.is_file():
+            raise ValueError(f"Attachment is not a regular file: {attachment_path}")
+
+        resolved_roots = [Path(root).expanduser().resolve() for root in allowed_roots]
+        if not any(resolved_path.is_relative_to(root) for root in resolved_roots):
+            raise ValueError("Attachment path is outside the allowed attachment directories")
+
+        if resolved_path.stat().st_size > max_bytes:
+            raise ValueError(f"Attachment exceeds maximum size of {max_bytes} bytes")
+
+        return resolved_path
 
     def _load_templates(self) -> dict[str, str]:
         """Load message templates."""
@@ -553,22 +585,22 @@ System status: {{ system_status }}
             msg.attach(MIMEText(text_content, "plain"))
 
             # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            html_content = html.escape(text_content).replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    resolved_path = self._resolve_attachment_path(attachment_path)
+                    with resolved_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename={resolved_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
@@ -650,7 +682,9 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url, json=slack_message, **self._webhook_request_options()
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +751,9 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url, json=discord_message, **self._webhook_request_options()
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +813,7 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url, json=payload, headers=headers, **self._webhook_request_options(timeout)
                 ) as response,
             ):
                 if 200 <= response.status < 300:
