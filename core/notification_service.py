@@ -4,12 +4,14 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -23,6 +25,10 @@ from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+
+
+DEFAULT_ATTACHMENT_DIRS = ("data", "exports", "demo_visualizations")
+DEFAULT_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
 
 class NotificationPriority(Enum):
@@ -87,6 +93,7 @@ class EnhancedNotificationService:
 
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
+        self.project_root = Path(__file__).resolve().parent.parent
         self.config = self._load_config(config_file)
         self.sent_notifications: dict[str, Any] = {}
         self.notification_history: list[dict[str, Any]] = []
@@ -254,6 +261,60 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _allowed_attachment_roots(self) -> list[Path]:
+        """Return directories that notification attachments may be read from."""
+        configured_dirs = [
+            item.strip()
+            for item in os.getenv("AUDORA_ATTACHMENT_DIRS", "").split(os.pathsep)
+            if item.strip()
+        ]
+        roots = list(DEFAULT_ATTACHMENT_DIRS) + configured_dirs
+
+        allowed_roots = []
+        for root in roots:
+            path = Path(root).expanduser()
+            if not path.is_absolute():
+                path = self.project_root / path
+            allowed_roots.append(path.resolve())
+
+        return allowed_roots
+
+    def _max_attachment_bytes(self) -> int:
+        """Return the maximum allowed size for a single notification attachment."""
+        try:
+            return int(os.getenv("AUDORA_MAX_ATTACHMENT_BYTES", DEFAULT_MAX_ATTACHMENT_BYTES))
+        except ValueError:
+            return DEFAULT_MAX_ATTACHMENT_BYTES
+
+    def _resolve_safe_attachment(self, attachment_path: str) -> Path:
+        """Resolve and validate an attachment path before reading it."""
+        path = Path(attachment_path).expanduser()
+        if not path.is_absolute():
+            path = self.project_root / path
+
+        try:
+            resolved = path.resolve(strict=True)
+        except FileNotFoundError as e:
+            raise ValueError(f"Attachment does not exist: {attachment_path}") from e
+
+        if not resolved.is_file():
+            raise ValueError(f"Attachment is not a file: {attachment_path}")
+
+        allowed = any(
+            resolved == root or root in resolved.parents for root in self._allowed_attachment_roots()
+        )
+        if not allowed:
+            raise ValueError(
+                "Attachment path is outside allowed directories "
+                f"({', '.join(str(root) for root in self._allowed_attachment_roots())})"
+            )
+
+        max_size = self._max_attachment_bytes()
+        if resolved.stat().st_size > max_size:
+            raise ValueError(f"Attachment exceeds maximum allowed size of {max_size} bytes")
+
+        return resolved
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -553,28 +614,28 @@ System status: {{ system_status }}
             msg.attach(MIMEText(text_content, "plain"))
 
             # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            html_content = html.escape(text_content).replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    safe_path = self._resolve_safe_attachment(attachment_path)
+                    with safe_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {safe_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
