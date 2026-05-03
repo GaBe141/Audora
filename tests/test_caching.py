@@ -1,9 +1,12 @@
-"""Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
+"""Tests for core caching (LocalCacheBackend, RedisCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -58,6 +61,38 @@ class TestLocalCacheBackend:
         assert backend.get("d") == 4
         present = sum(1 for k in ("a", "b", "c") if backend.get(k) is not None)
         assert present == 2
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis cache serialization safety."""
+
+    def test_serializes_without_pickle_payload(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "test-signing-key")
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = backend._get_signing_key()
+
+        serialized = backend._serialize({"artist": "Test Artist", "score": 91.5})
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert pickle.PROTO not in serialized
+        assert backend._deserialize(serialized) == {"artist": "Test Artist", "score": 91.5}
+
+    def test_rejects_legacy_pickle_envelope(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "test-signing-key")
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = backend._get_signing_key()
+
+        legacy_envelope = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "unused",
+                "payload": "gASVCwAAAAAAAABdlIwEZXZpbJRhLg==",
+            }
+        ).encode("utf-8")
+
+        assert backend._deserialize(legacy_envelope) is None
 
 
 class TestCacheManager:
