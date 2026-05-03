@@ -47,7 +47,8 @@ class TestWebhookUrlValidation:
         with pytest.raises(OSError, match="Unexpected webhook hostname"):
             await resolver.resolve("127.0.0.1", 443)
 
-    def test_webhook_connector_uses_static_resolver(self):
+    @pytest.mark.asyncio
+    async def test_webhook_connector_uses_static_resolver(self):
         svc = EnhancedNotificationService()
         target = svc._validate_webhook_url("https://10.0.0.1/webhook", allow_private=True)
         connector = svc._webhook_connector(target)
@@ -55,4 +56,4 @@ class TestWebhookUrlValidation:
         try:
             assert isinstance(connector._resolver, StaticWebhookResolver)
         finally:
-            connector.close()
+            await connector.close()
