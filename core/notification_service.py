@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -574,7 +575,9 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
+            elif email_config.get("username") and email_config.get("password"):
+                raise ValueError("Refusing to authenticate to SMTP without TLS")
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -650,11 +653,15 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
                     return {"success": True, "status_code": response.status}
+                elif 300 <= response.status < 400:
+                    error_text = "Redirect responses are not allowed for webhook notifications"
+                    self.logger.error("Slack notification failed: %s - %s", response.status, error_text)
+                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
                 else:
                     error_text = await response.text()
                     self.logger.error(
@@ -717,11 +724,15 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
                     return {"success": True, "status_code": response.status}
+                elif 300 <= response.status < 400:
+                    error_text = "Redirect responses are not allowed for webhook notifications"
+                    self.logger.error("Discord notification failed: %s - %s", response.status, error_text)
+                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
                 else:
                     error_text = await response.text()
                     self.logger.error(
@@ -777,12 +788,20 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
                     self.logger.info(f"Webhook notification sent successfully: {response.status}")
                     return {"success": True, "status_code": response.status}
+                elif 300 <= response.status < 400:
+                    error_text = "Redirect responses are not allowed for webhook notifications"
+                    self.logger.error("Webhook notification failed: %s - %s", response.status, error_text)
+                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
                 else:
                     error_text = await response.text()
                     self.logger.error(

@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+from unittest.mock import MagicMock
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,59 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSafeSerialization:
+    """Tests for Redis serialization that must not execute untrusted payloads."""
+
+    def _backend_without_connection(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._client = MagicMock()
+        return backend
+
+    def test_serializes_json_values(self):
+        backend = self._backend_without_connection()
+        payload = backend._serialize({"artist": "Example", "score": 99})
+
+        assert payload is not None
+        assert backend._deserialize(payload) == {"artist": "Example", "score": 99}
+
+    def test_serializes_bytes_values(self):
+        backend = self._backend_without_connection()
+        payload = backend._serialize(b"binary-data")
+
+        assert payload is not None
+        assert backend._deserialize(payload) == b"binary-data"
+
+    def test_serializes_dataframes(self):
+        backend = self._backend_without_connection()
+        df = pd.DataFrame([{"track": "Song", "score": 1.5}])
+        payload = backend._serialize(df)
+
+        assert payload is not None
+        restored = backend._deserialize(payload)
+        pd.testing.assert_frame_equal(restored, df)
+
+    def test_rejects_legacy_pickle_payloads(self):
+        backend = self._backend_without_connection()
+
+        assert backend._deserialize(b"\x80\x04}q\x00.") is None
+
+    def test_rejects_unsupported_object_values(self):
+        backend = self._backend_without_connection()
+
+        assert backend._serialize(object()) is None
+
+    def test_rejects_unknown_payload_types(self):
+        backend = self._backend_without_connection()
+        payload = json.dumps({"v": 1, "type": "pickle", "value": "ignored"}).encode()
+
+        assert backend._deserialize(payload) is None
+
+    def test_sha256_cache_key_components(self, mock_cache):
+        cache_key = mock_cache._build_cache_key("prefix", ("artist",), {"region": "US"})
+        digests = cache_key.split(":")[1:]
+
+        assert len(digests) == 2
+        assert all(len(digest) == 64 for digest in digests)
+        assert all(c in "0123456789abcdef" for digest in digests for c in digest)
