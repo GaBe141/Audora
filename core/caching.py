@@ -176,7 +176,10 @@ class RedisCacheBackend(CacheBackend):
         """Get cache signing key used to verify serialized payload integrity."""
         configured_key = os.getenv("AUDORA_CACHE_SIGNING_KEY", "").strip()
         if configured_key:
-            return configured_key.encode("utf-8")
+            key_bytes = configured_key.encode("utf-8")
+            if len(key_bytes) < 32:
+                raise ValueError("AUDORA_CACHE_SIGNING_KEY must be at least 32 bytes")
+            return key_bytes
 
         # Fallback to process-local random key to prevent unsigned pickle loading.
         # This keeps the cache safe by default, with only a reduced cross-process hit rate.
