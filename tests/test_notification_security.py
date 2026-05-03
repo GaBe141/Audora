@@ -141,4 +141,4 @@ class TestNotificationTransportSecurity:
 
         smtp.assert_not_called()
         assert result["success"] is False
-        assert "without TLS" in result["error"]
+        assert "requires TLS" in result["error"]
