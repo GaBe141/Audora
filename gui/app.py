@@ -4,18 +4,30 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
+import asyncio
+import io
+import os
+import secrets
 import subprocess
 import sys
+from ipaddress import ip_address
 from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import Response, request
+
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
 
 app = dash.Dash(
     __name__,
@@ -23,6 +35,49 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Audora",
 )
+
+
+def _is_loopback_request() -> bool:
+    """Return True only when every visible client hop is loopback."""
+    candidates = [request.remote_addr or ""]
+    forwarded_for = request.headers.get("X-Forwarded-For", "")
+    candidates.extend(part.strip() for part in forwarded_for.split(",") if part.strip())
+
+    try:
+        return all(ip_address(candidate).is_loopback for candidate in candidates)
+    except ValueError:
+        return False
+
+
+def _is_loopback_host() -> bool:
+    """Return True when the browser is using a local-only dashboard host."""
+    host = request.host.split(":", 1)[0].lower()
+    return host in {"localhost", "127.0.0.1"} or request.host.startswith("[::1]")
+
+
+def _is_authorized_request() -> bool:
+    """Authorize local-only access or an explicit admin bearer token."""
+    admin_token = os.getenv("AUDORA_DASH_ADMIN_TOKEN", "")
+    auth_header = request.headers.get("Authorization", "")
+    provided_token = ""
+    if auth_header.startswith("Bearer "):
+        provided_token = auth_header.removeprefix("Bearer ").strip()
+
+    if admin_token and secrets.compare_digest(provided_token, admin_token):
+        return True
+
+    return not admin_token and _is_loopback_request() and _is_loopback_host()
+
+
+@app.server.before_request
+def _protect_dashboard():
+    """Prevent accidental unauthenticated exposure of privileged dashboard actions."""
+    if _is_authorized_request():
+        return None
+    return Response(
+        "Audora dashboard access denied. Set AUDORA_DASH_ADMIN_TOKEN and send it as a Bearer token.",
+        status=401,
+    )
 
 # ---------------------------------------------------------------------------
 # Layout helpers
@@ -560,8 +615,6 @@ def search_history(_n, platform, min_score, days, artist_filter):
 def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
-    import io
-    import pandas as pd
     df = pd.DataFrame(table_data)
     buf = io.StringIO()
     df.to_csv(buf, index=False)
@@ -586,7 +639,6 @@ def export_csv(_n, table_data):
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
     try:
-        from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
             svc.config["slack"]["webhook_url"] = slack_url
@@ -621,13 +673,6 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         if not url:
             return "No URL"
         try:
-            import asyncio
-            from core.notification_service import (
-                EnhancedNotificationService,
-                NotificationChannel,
-                NotificationMessage,
-                NotificationPriority,
-            )
             svc = EnhancedNotificationService()
             svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
             channel = getattr(NotificationChannel, channel_enum_name)
