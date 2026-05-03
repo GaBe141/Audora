@@ -8,8 +8,8 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -231,7 +231,7 @@ class EnhancedNotificationService:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -312,8 +312,13 @@ class EnhancedNotificationService:
         self, url: str, *, allow_private: bool = False
     ) -> tuple[str, aiohttp.TCPConnector]:
         """Validate a webhook URL and pin request DNS to the vetted addresses."""
-        clean_url = self._validate_webhook_url(url, allow_private=allow_private)
-        connector = self._create_pinned_webhook_connector(clean_url, allow_private=allow_private)
+        clean_url = url.strip()
+        hostname = urlparse(clean_url).hostname
+        if not hostname:
+            raise ValueError("Webhook URL must include a valid hostname")
+
+        resolved_ips = self._resolve_webhook_ips(clean_url, allow_private=allow_private)
+        connector = aiohttp.TCPConnector(resolver=_PinnedResolver(hostname, resolved_ips))
         return clean_url, connector
 
     def _allowed_attachment_root(self) -> Path:

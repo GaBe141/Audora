@@ -1,5 +1,6 @@
 """Security tests for notification webhook and attachment validation."""
 
+import asyncio
 import socket
 
 import pytest
@@ -59,11 +60,18 @@ class TestWebhookUrlValidation:
 
         monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
-        url, connector = svc._prepare_webhook_request("https://example.com/webhook")
+        async def prepare_request():
+            return svc._prepare_webhook_request("https://example.com/webhook")
+
+        async def close_connector():
+            await connector.close()
+
+        url, connector = asyncio.run(prepare_request())
 
         assert url == "https://example.com/webhook"
         assert connector._resolver.resolved_ips == {"93.184.216.34"}
         assert calls == 1
+        asyncio.run(close_connector())
 
 
 class TestEmailAttachmentValidation:
