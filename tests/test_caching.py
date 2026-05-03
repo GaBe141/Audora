@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,48 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression coverage for Redis cache payload safety."""
+
+    def _backend_without_connection(self):
+        return RedisCacheBackend.__new__(RedisCacheBackend)
+
+    def test_serializes_json_values_without_pickle(self):
+        backend = self._backend_without_connection()
+        serialized = backend._serialize({"artist": "Example", "score": 42})
+
+        envelope = json.loads(serialized.decode("utf-8"))
+        assert envelope == {
+            "v": 2,
+            "type": "json",
+            "payload": {"artist": "Example", "score": 42},
+        }
+        assert backend._deserialize(serialized) == {"artist": "Example", "score": 42}
+
+    def test_serializes_bytes_as_base64(self):
+        backend = self._backend_without_connection()
+        serialized = backend._serialize(b"audio-bytes")
+
+        assert backend._deserialize(serialized) == b"audio-bytes"
+
+    def test_serializes_dataframes_as_json(self):
+        backend = self._backend_without_connection()
+        frame = pd.DataFrame({"track": ["Song A", "Song B"], "score": [1, 2]})
+
+        result = backend._deserialize(backend._serialize(frame))
+
+        pd.testing.assert_frame_equal(result, frame)
+
+    def test_rejects_legacy_or_malformed_payloads(self):
+        backend = self._backend_without_connection()
+
+        assert backend._deserialize(b"not-json") is None
+        assert backend._deserialize(json.dumps({"v": 1, "payload": "legacy"}).encode()) is None
+
+    def test_rejects_unsupported_object_types(self):
+        backend = self._backend_without_connection()
+
+        with pytest.raises(TypeError, match="does not support"):
+            backend._serialize(object())
