@@ -4,6 +4,7 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
@@ -23,6 +24,29 @@ from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+
+
+class _StaticWebhookResolver(aiohttp.abc.AbstractResolver):
+    """Resolve a webhook hostname to addresses that were already validated."""
+
+    def __init__(self, records: dict[tuple[str, int], list[dict[str, Any]]]):
+        self._records = {(host.lower(), port): values for (host, port), values in records.items()}
+
+    async def resolve(
+        self, host: str, port: int = 0, family: int = socket.AF_INET
+    ) -> list[dict[str, Any]]:
+        records = self._records.get((host.lower(), port))
+        if records is None:
+            raise OSError(f"Webhook hostname was not pre-resolved: {host}:{port}")
+
+        if family == socket.AF_UNSPEC:
+            return records
+
+        family_records = [record for record in records if record["family"] == family]
+        return family_records or records
+
+    async def close(self) -> None:
+        """No-op: this resolver does not hold external resources."""
 
 
 class NotificationPriority(Enum):
@@ -115,6 +139,11 @@ class EnhancedNotificationService:
 
     def _load_config(self, config_file: str | None) -> dict[str, Any]:
         """Load notification configuration."""
+        webhook_headers = {"Content-Type": "application/json"}
+        webhook_token = os.getenv("WEBHOOK_TOKEN", "").strip()
+        if webhook_token:
+            webhook_headers["Authorization"] = f"Bearer {webhook_token}"
+
         default_config = {
             "enabled": True,
             "default_channels": ["console"],
@@ -145,10 +174,7 @@ class EnhancedNotificationService:
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('WEBHOOK_TOKEN', '')}",
-                },
+                "headers": webhook_headers,
                 "timeout": 30,
             },
             "sms": {
@@ -238,22 +264,78 @@ class EnhancedNotificationService:
         if hostname.lower() == "localhost":
             raise ValueError("Localhost webhook URLs are not allowed")
 
-        resolved_ips = set()
+        self._resolve_webhook_addresses(
+            hostname,
+            parsed.port or 443,
+            allow_private=allow_private,
+        )
+        return url
+
+    def _resolve_webhook_addresses(
+        self,
+        hostname: str,
+        port: int,
+        *,
+        allow_private: bool = False,
+        allowed_schemes: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Resolve and validate all candidate addresses for a webhook target."""
+        resolved_addresses: list[dict[str, Any]] = []
+        resolved_ips = set[str]()
+        if allowed_schemes is None:
+            allowed_schemes = {"AF_INET", "AF_INET6"}
         try:
             # Validate all resolved addresses to avoid DNS-based bypass.
-            for info in socket.getaddrinfo(hostname, parsed.port or 443, proto=socket.IPPROTO_TCP):
-                resolved_ips.add(info[4][0])
+            address_infos = socket.getaddrinfo(
+                hostname,
+                port,
+                type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP,
+            )
         except socket.gaierror as e:
             raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
 
-        if not allow_private:
-            for ip in resolved_ips:
-                if self._is_restricted_ip(ip):
-                    raise ValueError(
-                        "Webhook URL resolves to a private or restricted network address"
-                    )
+        for family, _, proto, _, sockaddr in address_infos:
+            if socket.AddressFamily(family).name not in allowed_schemes:
+                continue
 
-        return url
+            ip = sockaddr[0]
+            if ip in resolved_ips:
+                continue
+
+            if not allow_private and self._is_restricted_ip(ip):
+                raise ValueError("Webhook URL resolves to a private or restricted network address")
+
+            resolved_ips.add(ip)
+            resolved_addresses.append(
+                {
+                    "hostname": hostname,
+                    "host": ip,
+                    "port": port,
+                    "family": family,
+                    "proto": proto,
+                    "flags": socket.AI_NUMERICHOST,
+                }
+            )
+
+        if not resolved_addresses:
+            raise ValueError(f"Could not resolve webhook hostname: {hostname}")
+
+        return resolved_addresses
+
+    def _build_webhook_connector(
+        self, url: str, *, allow_private: bool = False
+    ) -> aiohttp.TCPConnector:
+        """Create an aiohttp connector pinned to validated webhook addresses."""
+        parsed = urlparse(url.strip())
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError("Webhook URL must include a valid hostname")
+
+        port = parsed.port or 443
+        records = self._resolve_webhook_addresses(hostname, port, allow_private=allow_private)
+        resolver = _StaticWebhookResolver({(hostname, port): records})
+        return aiohttp.TCPConnector(resolver=resolver, use_dns_cache=False)
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -553,7 +635,7 @@ System status: {{ system_status }}
             msg.attach(MIMEText(text_content, "plain"))
 
             # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            html_content = html.escape(text_content).replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
             # Add attachments
@@ -601,6 +683,7 @@ System status: {{ system_status }}
 
         try:
             webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            connector = self._build_webhook_connector(webhook_url, allow_private=False)
             # Create Slack message format
             color_map = {
                 NotificationPriority.LOW: "good",
@@ -649,7 +732,9 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(
+                    connector=connector, timeout=aiohttp.ClientTimeout(total=30)
+                ) as session,
                 session.post(webhook_url, json=slack_message) as response,
             ):
                 if response.status == 200:
@@ -676,6 +761,7 @@ System status: {{ system_status }}
 
         try:
             webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            connector = self._build_webhook_connector(webhook_url, allow_private=False)
             # Format content for Discord
             content = message.content
             if message.template_vars:
@@ -716,7 +802,9 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(
+                    connector=connector, timeout=aiohttp.ClientTimeout(total=30)
+                ) as session,
                 session.post(webhook_url, json=discord_message) as response,
             ):
                 if response.status in [200, 204]:
@@ -755,6 +843,9 @@ System status: {{ system_status }}
             url = self._validate_webhook_url(
                 url, allow_private=self._allow_private_webhooks()
             )
+            connector = self._build_webhook_connector(
+                url, allow_private=self._allow_private_webhooks()
+            )
             # Prepare payload
             payload = {
                 "title": message.title,
@@ -772,10 +863,10 @@ System status: {{ system_status }}
                 payload["formatted_content"] = template.render(**message.template_vars)
 
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
-            timeout = webhook_config.get("timeout", 30)
+            timeout = max(1, min(int(webhook_config.get("timeout", 30)), 60))
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(connector=connector) as session,
                 session.post(
                     url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
                 ) as response,

@@ -27,3 +27,30 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_builds_connector_with_static_validated_resolver(self, monkeypatch):
+        svc = EnhancedNotificationService()
+        records = [
+            (
+                2,
+                1,
+                6,
+                "",
+                ("93.184.216.34", 443),
+            )
+        ]
+        monkeypatch.setattr("socket.getaddrinfo", lambda *_, **__: records)
+
+        connector = svc._build_webhook_connector("https://example.com/webhook")
+
+        assert connector._use_dns_cache is False
+        assert connector._resolver._records[("example.com", 443)][0]["host"] == "93.184.216.34"
+        awaitable = connector.close()
+        if awaitable:
+            awaitable.close()
+
+    def test_default_webhook_headers_omit_blank_authorization(self, monkeypatch):
+        monkeypatch.delenv("WEBHOOK_TOKEN", raising=False)
+        svc = EnhancedNotificationService()
+
+        assert svc.config["webhook"]["headers"] == {"Content-Type": "application/json"}
