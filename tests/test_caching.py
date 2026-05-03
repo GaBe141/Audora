@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -81,6 +87,15 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_build_cache_key_uses_sha256(self):
+        cache = CacheManager(backend=LocalCacheBackend(), key_prefix="audora_test")
+
+        key = cache._build_cache_key("prefix", ("track",), {"platform": "spotify"})
+        parts = key.split(":")
+
+        assert len(parts) == 3
+        assert all(len(part) == 64 for part in parts[1:])
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +133,43 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSerialization:
+    """Redis cache serialization avoids executable payload formats."""
+
+    def test_json_serialization_round_trip_without_pickle(self):
+        payload = {"track": "Song", "score": 98, "platforms": ["spotify", "lastfm"]}
+
+        serialized = RedisCacheBackend._serialize(None, payload)
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["type"] == "json"
+        assert RedisCacheBackend._deserialize(None, serialized) == payload
+
+    def test_bytes_serialization_round_trip(self):
+        payload = b"\x00audora\xff"
+
+        serialized = RedisCacheBackend._serialize(None, payload)
+
+        assert RedisCacheBackend._deserialize(None, serialized) == payload
+
+    def test_dataframe_serialization_round_trip(self):
+        frame = pd.DataFrame([{"track": "Song", "score": 98.5}])
+
+        serialized = RedisCacheBackend._serialize(None, frame)
+        restored = RedisCacheBackend._deserialize(None, serialized)
+
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_legacy_or_malformed_payloads(self):
+        assert RedisCacheBackend._deserialize(None, b"not-json") is None
+        assert RedisCacheBackend._deserialize(None, json.dumps({"v": 1, "payload": "x"}).encode()) is None
+
+    def test_rejects_unsupported_objects(self):
+        class UnsafeObject:
+            pass
+
+        with pytest.raises(TypeError):
+            RedisCacheBackend._serialize(None, UnsafeObject())
