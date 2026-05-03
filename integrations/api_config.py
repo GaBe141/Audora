@@ -42,10 +42,36 @@ class APIConfig:
 class SocialAPIManager:
     """Manages API configurations and rate limiting for all platforms."""
 
+    _SECRET_FIELDS = {"api_key", "secret_key", "access_token", "refresh_token"}
+
     def __init__(self, config_file: str = "config/social_apis.json"):
         self.config_file = Path(config_file)
         self.configs: dict[str, APIConfig] = {}
         self.load_configs()
+
+    def _env_key(self, platform: str, field_name: str) -> str:
+        """Return the environment variable name for a platform credential field."""
+        return f"{platform}_{field_name}".upper()
+
+    def _apply_env_credentials(self, config: APIConfig) -> APIConfig:
+        """Populate secret fields from environment variables when present."""
+        platform = config.platform
+        env_api_key = os.getenv(self._env_key(platform, "api_key"))
+        env_secret_key = os.getenv(self._env_key(platform, "secret_key"))
+        env_access_token = os.getenv(self._env_key(platform, "access_token"))
+        env_refresh_token = os.getenv(self._env_key(platform, "refresh_token"))
+
+        config.api_key = env_api_key or config.api_key
+        config.secret_key = env_secret_key or config.secret_key
+        config.access_token = env_access_token or config.access_token
+        config.refresh_token = env_refresh_token or config.refresh_token
+
+        has_credentials = bool(config.api_key or config.access_token)
+        if env_api_key or env_access_token:
+            config.enabled = True
+        else:
+            config.enabled = config.enabled and has_credentials
+        return config
 
     def load_configs(self):
         """Load API configurations from file using centralized utility."""
@@ -53,7 +79,14 @@ class SocialAPIManager:
 
         if data:
             for platform, config_data in data.items():
-                self.configs[platform] = APIConfig(platform=platform, **config_data)
+                config_data = {
+                    key: value
+                    for key, value in config_data.items()
+                    if key not in self._SECRET_FIELDS
+                }
+                self.configs[platform] = self._apply_env_credentials(
+                    APIConfig(platform=platform, **config_data)
+                )
         else:
             self._create_default_configs()
 
@@ -110,23 +143,21 @@ class SocialAPIManager:
         }
 
         for platform, config_data in default_configs.items():
-            self.configs[platform] = APIConfig(platform=platform, **config_data)
+            self.configs[platform] = self._apply_env_credentials(
+                APIConfig(platform=platform, **config_data)
+            )
 
         self.save_configs()
 
     def save_configs(self):
-        """Save configurations to file using centralized utility."""
+        """Save non-secret configurations to file using centralized utility."""
         config_data = {}
         for platform, config in self.configs.items():
             config_data[platform] = {
-                "api_key": config.api_key,
-                "secret_key": config.secret_key,
-                "access_token": config.access_token,
-                "refresh_token": config.refresh_token,
                 "requests_per_minute": config.requests_per_minute,
                 "requests_per_hour": config.requests_per_hour,
                 "requests_per_day": config.requests_per_day,
-                "enabled": config.enabled,
+                "enabled": config.enabled and bool(config.api_key or config.access_token),
                 "last_error": config.last_error,
                 "error_count": config.error_count,
             }
