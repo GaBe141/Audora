@@ -104,7 +104,7 @@ class AudoraMusicExplorer:
             search_columns = ["track_name", "name", "song", "title"]
             for col in search_columns:
                 if col in df.columns:
-                    matches = df[df[col].str.contains(track_name, case=False, na=False)]
+                    matches = df[df[col].str.contains(track_name, case=False, na=False, regex=False)]
                     if not matches.empty:
                         found_tracks.extend(matches.to_dict("records"))
                         break
@@ -273,7 +273,7 @@ class AudoraMusicExplorer:
             search_columns = ["track_name", "name", "artist_name", "artist"]
             for col in search_columns:
                 if col in df.columns:
-                    matches = df[df[col].str.contains(query, case=False, na=False)]
+                    matches = df[df[col].str.contains(query, case=False, na=False, regex=False)]
                     for _, match in matches.iterrows():
                         results.append(
                             {
