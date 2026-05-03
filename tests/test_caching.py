@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -81,6 +86,13 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        cache_key = mock_cache._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        parts = cache_key.split(":")
+
+        assert len(parts) == 3
+        assert all(len(part) == 64 for part in parts[1:])
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +130,33 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis cache serialization safety helpers."""
+
+    def test_serializes_json_envelope_without_pickle(self, monkeypatch):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        serialized = backend._serialize({"z": [1, 2], "a": "safe"})
+        envelope = json.loads(serialized.decode("utf-8"))
+        payload = base64.b64decode(envelope["payload"].encode("ascii"), validate=True)
+
+        assert envelope["v"] == 2
+        assert envelope["format"] == "json"
+        assert payload.startswith(b"{")
+        assert backend._deserialize(serialized) == {"a": "safe", "z": [1, 2]}
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        payload = b"\x80\x04N."
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest(),
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None

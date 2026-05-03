@@ -529,7 +529,7 @@ class EnhancedMusicDataStore:
                 conditions.append("region = ?")
                 params.append(region)
 
-            query = f"""
+            query = f"""  # nosec B608 - conditions are fixed SQL fragments; values use params.
             SELECT
                 platform, track_name, artist, score, rank, region, trend_date,
                 metadata, first_detected,
@@ -566,7 +566,7 @@ class EnhancedMusicDataStore:
                 conditions.append("status = ?")
                 params.append(status)
 
-            query = f"""
+            query = f"""  # nosec B608 - conditions are fixed SQL fragments; values use params.
             SELECT
                 track_name, artist, confidence, prediction_date,
                 predicted_peak_date, predicted_peak_score,
@@ -681,7 +681,7 @@ class EnhancedMusicDataStore:
                 conditions.append("(track_name LIKE ? AND artist LIKE ?)")
                 params.extend([f"%{track_name}%", f"%{artist}%"])
 
-            query = f"""
+            query = f"""  # nosec B608 - OR clauses are placeholders only; values use params.
             SELECT
                 platform, track_id, track_name, artist, score, rank,
                 region, trend_date, metadata, first_detected
@@ -734,7 +734,7 @@ class EnhancedMusicDataStore:
                 params.append(platform)
 
             # Get aggregate stats
-            stats_query = f"""
+            stats_query = f"""  # nosec B608 - conditions are fixed SQL fragments; values use params.
             SELECT
                 COUNT(DISTINCT track_name || artist) as unique_tracks,
                 COUNT(DISTINCT platform) as platforms,
@@ -748,7 +748,7 @@ class EnhancedMusicDataStore:
             stats = pd.read_sql_query(stats_query, conn, params=tuple(params)).to_dict("records")[0]
 
             # Get top tracks
-            top_tracks_query = f"""
+            top_tracks_query = f"""  # nosec B608 - conditions are fixed SQL fragments; values use params.
             SELECT
                 track_name, artist, platform, score, rank
             FROM trends
@@ -807,7 +807,7 @@ class EnhancedMusicDataStore:
         params.extend(track_ids)
 
         with self.get_connection() as conn:
-            query = f"""
+            query = f"""  # nosec B608 - update fields and ID placeholders are whitelisted.
             UPDATE trends
             SET {', '.join(set_clauses)}, last_updated = CURRENT_TIMESTAMP
             WHERE track_id IN ({placeholders})
@@ -947,7 +947,7 @@ class EnhancedMusicDataStore:
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
-                query = f"""
+                query = f"""  # nosec B608 - table name is validated against valid_tables.
                 SELECT * FROM {table}
                 WHERE datetime(created_at) >= datetime('now', ?)
                 ORDER BY created_at DESC
@@ -955,7 +955,7 @@ class EnhancedMusicDataStore:
                 df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
             else:
                 # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
+                query = f"SELECT * FROM {table} ORDER BY created_at DESC"  # nosec B608
                 df = pd.read_sql_query(query, conn)
 
             # Ensure directory exists
@@ -978,7 +978,7 @@ class EnhancedMusicDataStore:
 
             for table in tables:
                 # Table names are from whitelist, safe to use
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                cursor.execute(f"SELECT COUNT(*) FROM {table}")  # nosec B608
                 table_stats[table] = cursor.fetchone()[0]
 
             # Data quality checks
