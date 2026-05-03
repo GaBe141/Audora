@@ -42,7 +42,7 @@ class TestWebhookUrlValidation:
         with pytest.raises(ValueError, match="private or restricted"):
             svc._validate_webhook_url("https://example.com/webhook")
 
-    def test_pinned_resolver_reuses_validated_addresses(self, monkeypatch):
+    def test_webhook_resolution_keeps_validated_addresses(self, monkeypatch):
         svc = EnhancedNotificationService()
 
         def fake_getaddrinfo(*_args, **_kwargs):
@@ -57,12 +57,9 @@ class TestWebhookUrlValidation:
             ]
 
         monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
-        connector = svc._get_webhook_connector("https://example.com/webhook")
-        try:
-            resolved = connector._resolver.addresses
-            assert resolved[0]["host"] == "93.184.216.34"
-        finally:
-            connector.close()
+        resolved = svc._resolve_webhook_addresses("example.com", 443)
+
+        assert resolved[0]["host"] == "93.184.216.34"
 
 
 class TestEmailAttachmentValidation:
