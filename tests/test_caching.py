@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,35 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSerializationSecurity:
+    """Regression tests for safe Redis cache serialization."""
+
+    @pytest.fixture
+    def redis_backend(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "test-cache-signing-key")
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = backend._get_signing_key()
+        return backend
+
+    def test_json_payload_round_trips(self, redis_backend):
+        value = {"tracks": ["a", "b"], "score": 9.5}
+        assert redis_backend._deserialize(redis_backend._serialize(value)) == value
+
+    def test_bytes_payload_round_trips(self, redis_backend):
+        value = b"\x00audora\xff"
+        assert redis_backend._deserialize(redis_backend._serialize(value)) == value
+
+    def test_dataframe_payload_round_trips(self, redis_backend):
+        value = pd.DataFrame({"track": ["one", "two"], "score": [1, 2]})
+        restored = redis_backend._deserialize(redis_backend._serialize(value))
+        pd.testing.assert_frame_equal(restored, value)
+
+    def test_unsupported_objects_are_not_pickled(self, redis_backend):
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            redis_backend._serialize(object())
+
+    def test_rejects_legacy_pickle_payload_without_loading(self, redis_backend):
+        legacy_payload = pickle.dumps({"unsafe": "legacy"})
+        assert redis_backend._deserialize(legacy_payload) is None
