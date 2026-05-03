@@ -2,14 +2,8 @@
 """Security validation and configuration setup for Spotify Insights."""
 
 import sys
-from pathlib import Path
 
-# Add src to path for imports
-src_path = Path(__file__).resolve().parent / "src"
-sys.path.insert(0, str(src_path))
-
-# Import after path modification
-from src.config import SecureConfig  # noqa: E402
+from core.config import SecureConfig
 
 
 def main():
@@ -99,16 +93,13 @@ def main():
     else:
         security_checks.append(("⚠️", ".gitignore missing"))
 
-    # Check for credential files in current directory
+    # Check for credential files in the repository root
     credential_patterns = ["env_data", "*_keys", "*_secrets", "credentials.*"]
     found_credentials = []
     for pattern in credential_patterns:
         if pattern.startswith("*"):
-            # Use glob for wildcard patterns
-            from glob import glob
-
-            matches = glob(pattern)
-            found_credentials.extend(matches)
+            matches = config.project_root.glob(pattern)
+            found_credentials.extend(str(path) for path in matches)
         else:
             # Direct file check
             file_path = config.project_root / pattern

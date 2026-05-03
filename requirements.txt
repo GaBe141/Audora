@@ -1,6 +1,9 @@
 # Core dependencies
 spotipy==2.24.0
 python-dotenv==1.1.1
+aiohttp==3.13.2
+Jinja2==3.1.6
+redis==7.1.0
 pandas==2.3.3
 matplotlib==3.10.6
 seaborn==0.13.2

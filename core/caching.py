@@ -10,11 +10,15 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
+from datetime import date, datetime
+from decimal import Decimal
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
+
+import numpy as np
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -186,12 +190,61 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _json_default(self, value: Any) -> Any:
+        """Convert common analytics values to safe JSON-compatible data."""
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, (datetime, date)):
+            return value.isoformat()
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+    def _encode_value(self, value: Any) -> dict[str, Any]:
+        """Encode supported cache values without executable deserialization formats."""
+        if isinstance(value, pd.DataFrame):
+            return {
+                "type": "pandas.dataframe.split",
+                "payload": json.loads(value.to_json(orient="split", date_format="iso")),
+            }
+
+        return {"type": "json", "payload": value}
+
+    def _decode_value(self, document: dict[str, Any]) -> Any | None:
+        """Decode a value produced by _encode_value."""
+        value_type = document.get("type")
+        payload = document.get("payload")
+
+        if value_type == "json":
+            return payload
+        if value_type == "pandas.dataframe.split":
+            if not isinstance(payload, dict):
+                logger.warning("Rejected cache entry with invalid DataFrame payload")
+                return None
+            return pd.DataFrame(
+                data=payload.get("data", []),
+                columns=payload.get("columns", []),
+                index=payload.get("index"),
+            )
+
+        logger.warning("Rejected cache entry with unsupported payload type")
+        return None
+
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        encoded_value = self._encode_value(value)
+        payload = json.dumps(
+            encoded_value,
+            default=self._json_default,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
@@ -204,7 +257,7 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -223,7 +276,11 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            document = json.loads(payload.decode("utf-8"))
+            if not isinstance(document, dict):
+                logger.warning("Rejected cache entry with invalid payload document")
+                return None
+            return self._decode_value(document)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -337,7 +394,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: JSON-serializable value or supported analytics object
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
