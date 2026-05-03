@@ -1,5 +1,8 @@
 """Security tests for notification webhook URL validation."""
 
+import asyncio
+import socket
+
 import pytest
 
 from core.notification_service import EnhancedNotificationService
@@ -27,3 +30,33 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_connector_pins_validated_dns_results(self, monkeypatch):
+        svc = EnhancedNotificationService()
+
+        def fake_getaddrinfo(host, port, proto=0):
+            assert host == "webhook.example.com"
+            assert port == 443
+            assert proto == socket.IPPROTO_TCP
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    ("93.184.216.34", port),
+                )
+            ]
+
+        monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+        async def build_connector():
+            url, connector = svc._validated_webhook_connector("https://webhook.example.com/path")
+            resolver = connector._resolver
+
+            assert url == "https://webhook.example.com/path"
+            assert resolver.addresses[0].host == "93.184.216.34"
+            assert connector._use_dns_cache is False
+            await connector.close()
+
+        asyncio.run(build_connector())
