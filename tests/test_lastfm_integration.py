@@ -4,6 +4,7 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 # Last.fm module imports from .config which may not exist; provide a minimal mock
 if "integrations.config" not in sys.modules:
@@ -12,11 +13,14 @@ if "integrations.config" not in sys.modules:
     sys.modules["integrations.config"] = _config_mock
 
 from core.exceptions import APIConnectionError, APIResponseError
-from integrations.lastfm_integration import LastFmAPI
+from integrations.lastfm_integration import BASE_URL, LastFmAPI
 
 
 class TestLastFmAPISuccess:
     """Test successful API responses with mocked session.get."""
+
+    def test_uses_https_api_endpoint(self):
+        assert BASE_URL.startswith("https://")
 
     def test_get_top_artists_global_parses_response(self):
         api = LastFmAPI(api_key="test_key")
@@ -81,11 +85,27 @@ class TestLastFmAPIErrorHandling:
                 api.get_top_artists_global(limit=5)
 
     def test_http_error_raises_connection_error(self):
-        import requests
-
         api = LastFmAPI(api_key="test_key")
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("429")
         with patch.object(api.session, "get", return_value=mock_response):
             with pytest.raises(APIConnectionError, match="429"):
                 api.get_top_artists_global(limit=5)
+
+    def test_request_error_does_not_expose_api_key(self):
+        api = LastFmAPI(api_key="secret_key")
+        request = requests.Request(
+            "GET", BASE_URL, params={"api_key": "secret_key", "method": "chart.gettopartists"}
+        ).prepare()
+        error = requests.exceptions.ConnectionError(
+            "failed for https://ws.audioscrobbler.com/2.0/?api_key=secret_key"
+        )
+        error.request = request
+
+        with patch.object(api.session, "get", side_effect=error):
+            with pytest.raises(APIConnectionError) as exc_info:
+                api.get_top_artists_global(limit=5)
+
+        assert "secret_key" not in str(exc_info.value)
+        assert exc_info.value.details["url"].startswith("https://ws.audioscrobbler.com/2.0/")
+        assert "secret_key" not in exc_info.value.details["url"]
