@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Re-export for convenience
 try:
@@ -18,6 +19,33 @@ except ImportError:
 
 
 # JSON utilities
+def resolve_safe_output_path(path: Path | str, base_dir: Path | str) -> Path:
+    """Resolve an output path and require it to stay within an allowed base directory.
+
+    Relative paths are interpreted under ``base_dir`` unless they already include the
+    base directory name from the project root, such as ``data/report.json``.
+    """
+    base_path = Path(base_dir)
+    if not base_path.is_absolute():
+        base_path = PROJECT_ROOT / base_path
+    base_path = base_path.resolve()
+
+    requested_path = Path(path).expanduser()
+    if requested_path.is_absolute():
+        resolved_path = requested_path.resolve()
+    else:
+        project_relative_path = (PROJECT_ROOT / requested_path).resolve()
+        if project_relative_path.is_relative_to(base_path):
+            resolved_path = project_relative_path
+        else:
+            resolved_path = (base_path / requested_path).resolve()
+
+    if not resolved_path.is_relative_to(base_path):
+        raise ValueError(f"Output path must be within {base_path}: {path}")
+
+    return resolved_path
+
+
 def read_json(path: Path | str, default: Any = None) -> Any:
     """
     Read JSON file safely.
@@ -346,10 +374,10 @@ def save_report(
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{timestamp_str}.json"
 
-    # Create full path
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    filepath = output_path / filename
+    # Resolve under the requested output directory so custom filenames cannot
+    # escape via absolute paths or ".." segments.
+    filepath = resolve_safe_output_path(filename, output_dir)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:

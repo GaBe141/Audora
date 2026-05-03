@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +82,18 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis cache payload integrity protections."""
+
+    def test_deserialize_rejects_unsigned_payload(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        payload = json.dumps({"value": "not-signed"}).encode("utf-8")
+
+        assert backend._deserialize(payload) is None
 
 
 class TestCachedDecorator:
