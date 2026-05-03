@@ -11,6 +11,7 @@ import logging
 import time
 from collections.abc import Callable
 from functools import wraps
+from io import StringIO
 from typing import Any, ParamSpec, TypeVar
 
 import pandas as pd
@@ -220,7 +221,7 @@ class RedisCacheBackend(CacheBackend):
             if not isinstance(payload, str):
                 logger.warning("Rejected cache entry with non-string DataFrame payload")
                 return None
-            return pd.read_json(payload, orient="split")
+            return pd.read_json(StringIO(payload), orient="split")
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
