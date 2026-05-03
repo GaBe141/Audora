@@ -1,5 +1,7 @@
 """Security tests for notification webhook URL validation."""
 
+import asyncio
+
 import pytest
 
 from core.notification_service import EnhancedNotificationService
@@ -41,13 +43,18 @@ class TestWebhookUrlValidation:
         ]
         monkeypatch.setattr("socket.getaddrinfo", lambda *_, **__: records)
 
-        connector = svc._build_webhook_connector("https://example.com/webhook")
+        async def build_connector():
+            connector = svc._build_webhook_connector("https://example.com/webhook")
+            try:
+                assert connector._use_dns_cache is False
+                assert (
+                    connector._resolver._records[("example.com", 443)][0]["host"]
+                    == "93.184.216.34"
+                )
+            finally:
+                await connector.close()
 
-        assert connector._use_dns_cache is False
-        assert connector._resolver._records[("example.com", 443)][0]["host"] == "93.184.216.34"
-        awaitable = connector.close()
-        if awaitable:
-            awaitable.close()
+        asyncio.run(build_connector())
 
     def test_default_webhook_headers_omit_blank_authorization(self, monkeypatch):
         monkeypatch.delenv("WEBHOOK_TOKEN", raising=False)
