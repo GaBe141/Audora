@@ -1,8 +1,11 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
+from core.utils import PROJECT_ROOT
 
 
 class TestDataStorePooling:
@@ -107,3 +110,20 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportSecurity:
+    """Test export path validation for CSV writes."""
+
+    def test_export_to_csv_rejects_paths_outside_exports_dir(self, data_store):
+        outside_path = PROJECT_ROOT.parent / "audora-export.csv"
+
+        with pytest.raises(ValueError, match="Output path must be within"):
+            data_store.export_to_csv("trends", str(outside_path))
+
+    def test_export_to_csv_allows_relative_paths_under_exports_dir(self, data_store):
+        exported_path = Path(data_store.export_to_csv("trends", "trends.csv"))
+
+        assert exported_path == PROJECT_ROOT / "data" / "exports" / "trends.csv"
+        assert exported_path.exists()
+        exported_path.unlink()
