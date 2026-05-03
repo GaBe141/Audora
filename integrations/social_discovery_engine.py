@@ -16,6 +16,8 @@ from core.utils import write_json
 # Import our existing trending schema
 from integrations.trending_schema import TrendingSchema
 
+HTTP_TIMEOUT_SECONDS = 10
+
 
 class Platform(Enum):
     """Social media platforms for music discovery."""
@@ -131,7 +133,12 @@ class TikTokMusicAPI:
         try:
             async with aiohttp.ClientSession() as session:
                 headers = {"Authorization": f"Bearer {self.api_key}"}
-                async with session.get(endpoint, params=params, headers=headers) as response:
+                async with session.get(
+                    endpoint,
+                    params=params,
+                    headers=headers,
+                    timeout=HTTP_TIMEOUT_SECONDS,
+                ) as response:
                     if response.status == 200:
                         data = await response.json()
                         return data.get("data", [])
@@ -154,7 +161,12 @@ class TikTokMusicAPI:
         try:
             async with aiohttp.ClientSession() as session:
                 headers = {"Authorization": f"Bearer {self.api_key}"}
-                async with session.get(endpoint, params=params, headers=headers) as response:
+                async with session.get(
+                    endpoint,
+                    params=params,
+                    headers=headers,
+                    timeout=HTTP_TIMEOUT_SECONDS,
+                ) as response:
                     if response.status == 200:
                         return await response.json()
                     else:
@@ -175,7 +187,12 @@ class TikTokMusicAPI:
         try:
             async with aiohttp.ClientSession() as session:
                 headers = {"Authorization": f"Bearer {self.api_key}"}
-                async with session.get(endpoint, params=params, headers=headers) as response:
+                async with session.get(
+                    endpoint,
+                    params=params,
+                    headers=headers,
+                    timeout=HTTP_TIMEOUT_SECONDS,
+                ) as response:
                     if response.status == 200:
                         data = await response.json()
                         return data.get("data", [])
@@ -211,7 +228,7 @@ class YouTubeMusicAPI:
         try:
             async with (
                 aiohttp.ClientSession() as session,
-                session.get(endpoint, params=params) as response,
+                session.get(endpoint, params=params, timeout=HTTP_TIMEOUT_SECONDS) as response,
             ):
                 if response.status == 200:
                     data = await response.json()
@@ -242,7 +259,7 @@ class YouTubeMusicAPI:
         try:
             async with (
                 aiohttp.ClientSession() as session,
-                session.get(endpoint, params=params) as response,
+                session.get(endpoint, params=params, timeout=HTTP_TIMEOUT_SECONDS) as response,
             ):
                 if response.status == 200:
                     data = await response.json()
@@ -266,7 +283,7 @@ class YouTubeMusicAPI:
         try:
             async with (
                 aiohttp.ClientSession() as session,
-                session.get(endpoint, params=params) as response,
+                session.get(endpoint, params=params, timeout=HTTP_TIMEOUT_SECONDS) as response,
             ):
                 if response.status == 200:
                     data = await response.json()
@@ -300,7 +317,12 @@ class TwitterMusicAPI:
         try:
             async with aiohttp.ClientSession() as session:
                 headers = {"Authorization": f"Bearer {self.bearer_token}"}
-                async with session.get(endpoint, params=params, headers=headers) as response:
+                async with session.get(
+                    endpoint,
+                    params=params,
+                    headers=headers,
+                    timeout=HTTP_TIMEOUT_SECONDS,
+                ) as response:
                     if response.status == 200:
                         data = await response.json()
                         return data.get("data", [])
@@ -320,7 +342,12 @@ class TwitterMusicAPI:
         try:
             async with aiohttp.ClientSession() as session:
                 headers = {"Authorization": f"Bearer {self.bearer_token}"}
-                async with session.get(endpoint, params=params, headers=headers) as response:
+                async with session.get(
+                    endpoint,
+                    params=params,
+                    headers=headers,
+                    timeout=HTTP_TIMEOUT_SECONDS,
+                ) as response:
                     if response.status == 200:
                         data = await response.json()
                         trends = data[0].get("trends", []) if data else []
