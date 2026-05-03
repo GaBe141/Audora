@@ -2,8 +2,11 @@
 
 import time
 
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,21 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSecurity:
+    """Tests for Redis cache signing-key hardening."""
+
+    def test_rejects_weak_configured_signing_key(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "short")
+        backend = object.__new__(RedisCacheBackend)
+
+        with pytest.raises(ValueError, match="at least 32 bytes"):
+            backend._get_signing_key()
+
+    def test_accepts_strong_configured_signing_key(self, monkeypatch):
+        signing_key = "a" * 32
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", signing_key)
+        backend = object.__new__(RedisCacheBackend)
+
+        assert backend._get_signing_key() == signing_key.encode("utf-8")
