@@ -654,7 +654,7 @@ async def demo_extended_discovery():
     """Demonstrate extended discovery capabilities."""
     # Mock configuration for testing
     mock_configs = {
-        "reddit": {"client_id": "mock_reddit_id", "client_secret": "mock_reddit_secret"},
+        "reddit": {"client_id": "mock_reddit_id", "client_secret": ""},
         "tumblr": {"consumer_key": "mock_tumblr_key"},
         "soundcloud": {"client_id": "mock_soundcloud_id"},
     }

@@ -1,5 +1,6 @@
 """Security tests for notification webhook URL validation."""
 
+import asyncio
 import ssl
 from unittest.mock import MagicMock, patch
 
@@ -40,8 +41,7 @@ class TestWebhookUrlValidation:
 class TestEmailSecurity:
     """Validate secure email transport and HTML escaping."""
 
-    @pytest.mark.asyncio
-    async def test_email_uses_verified_tls_context_and_escapes_html(self):
+    def test_email_uses_verified_tls_context_and_escapes_html(self):
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -62,12 +62,14 @@ class TestEmailSecurity:
                 wraps=ssl.create_default_context,
             ) as create_default_context,
         ):
-            result = await svc._send_email(
-                NotificationMessage(
-                    title="Security alert",
-                    content="<script>alert('xss')</script>\nline",
-                    priority=NotificationPriority.HIGH,
-                    channels=[NotificationChannel.EMAIL],
+            result = asyncio.run(
+                svc._send_email(
+                    NotificationMessage(
+                        title="Security alert",
+                        content="<script>alert('xss')</script>\nline",
+                        priority=NotificationPriority.HIGH,
+                        channels=[NotificationChannel.EMAIL],
+                    )
                 )
             )
 
