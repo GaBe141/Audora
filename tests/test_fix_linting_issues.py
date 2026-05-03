@@ -10,4 +10,4 @@ def test_run_command_uses_argument_list_without_shell():
         assert run_command(["python", "-m", "ruff", "check", "core"], "ruff") is True
 
     assert run.call_args.args[0] == ["python", "-m", "ruff", "check", "core"]
-    assert run.call_args.kwargs["shell"] is False
+    assert "shell" not in run.call_args.kwargs

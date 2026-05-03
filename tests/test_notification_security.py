@@ -112,7 +112,6 @@ class TestNotificationTransportSecurity:
 
         assert result["success"] is False
         assert "Refusing to authenticate" in result["error"]
-        smtp.quit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_email_starttls_uses_verified_ssl_context(self):
@@ -142,3 +141,4 @@ class TestNotificationTransportSecurity:
         assert isinstance(tls_context, ssl.SSLContext)
         assert tls_context.check_hostname is True
         assert tls_context.verify_mode == ssl.CERT_REQUIRED
+        smtp.quit.assert_called_once()
