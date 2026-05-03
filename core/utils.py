@@ -18,6 +18,32 @@ except ImportError:
 
 
 # JSON utilities
+CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
+
+
+def sanitize_csv_cell(value: Any) -> Any:
+    """Escape spreadsheet formulas in text values before CSV export."""
+    if not isinstance(value, str):
+        return value
+
+    stripped = value.lstrip(" ")
+    if stripped.startswith(CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def sanitize_dataframe_for_csv(df: Any) -> Any:  # pd.DataFrame
+    """Return a copy of a DataFrame with text cells safe for spreadsheet CSV import."""
+    if not HAS_PANDAS:
+        raise ImportError("pandas is required for sanitize_dataframe_for_csv")
+
+    sanitized = df.copy()
+    object_columns = sanitized.select_dtypes(include=["object", "string"]).columns
+    for column in object_columns:
+        sanitized[column] = sanitized[column].map(sanitize_csv_cell)
+    return sanitized
+
+
 def read_json(path: Path | str, default: Any = None) -> Any:
     """
     Read JSON file safely.
@@ -103,7 +129,7 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    sanitize_dataframe_for_csv(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 

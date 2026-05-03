@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import sanitize_dataframe_for_csv
 
 
 @dataclass
@@ -961,7 +962,7 @@ class EnhancedMusicDataStore:
             # Ensure directory exists
             Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
+            sanitize_dataframe_for_csv(df).to_csv(filepath, index=False)
             self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
 
         return filepath
