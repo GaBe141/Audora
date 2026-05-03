@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import time
 
 import pandas as pd
@@ -13,7 +14,8 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
+API_KEY_QUERY_RE = re.compile(r"([?&]api_key=)[^&\s]+")
 
 
 class LastFmAPI:
@@ -32,6 +34,19 @@ class LastFmAPI:
         if time_since_last < self.rate_limit_delay:
             time.sleep(self.rate_limit_delay - time_since_last)
         self.last_request_time = time.time()
+
+    def _safe_request_error(self, error: requests.exceptions.RequestException) -> str:
+        """Return request error context without exposing API credentials."""
+        message = API_KEY_QUERY_RE.sub(r"\1[REDACTED]", str(error))
+        if self.api_key:
+            message = message.replace(self.api_key, "[REDACTED]")
+        return message or error.__class__.__name__
+
+    def _safe_request_url(self, error: requests.exceptions.RequestException) -> str:
+        """Return the request URL without query-string credentials."""
+        request = getattr(error, "request", None)
+        url = getattr(request, "url", BASE_URL)
+        return API_KEY_QUERY_RE.sub(r"\1[REDACTED]", url).split("?", 1)[0]
 
     def _make_request(self, method: str, **params) -> dict:
         """Make a rate-limited request to Last.fm API."""
@@ -56,10 +71,11 @@ class LastFmAPI:
         except APIResponseError:
             raise
         except requests.exceptions.RequestException as e:
-            logger.error("Last.fm request failed for %s: %s", method, e)
+            error_message = self._safe_request_error(e)
+            logger.error("Last.fm request failed for %s: %s", method, error_message)
             raise APIConnectionError(
-                message=f"Last.fm request failed: {e}",
-                details={"method": method},
+                message=f"Last.fm request failed: {error_message}",
+                details={"method": method, "url": self._safe_request_url(e)},
             ) from e
         except json.JSONDecodeError as e:
             logger.error("Last.fm returned invalid JSON for %s: %s", method, e)
