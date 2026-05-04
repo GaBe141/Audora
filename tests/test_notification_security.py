@@ -1,5 +1,6 @@
 """Security tests for notification webhook URL validation."""
 
+import asyncio
 import socket
 from unittest.mock import Mock
 
@@ -53,11 +54,10 @@ class TestWebhookUrlValidation:
         assert destination.port == 443
         assert destination.resolved_ips == ("93.184.216.34",)
 
-    @pytest.mark.asyncio
-    async def test_static_resolver_only_returns_prevalidated_addresses(self):
+    def test_static_resolver_only_returns_prevalidated_addresses(self):
         resolver = StaticWebhookResolver({"example.com": ("93.184.216.34",)})
 
-        result = await resolver.resolve("example.com", 443)
+        result = asyncio.run(resolver.resolve("example.com", 443))
 
         assert result == [
             {
@@ -71,10 +71,9 @@ class TestWebhookUrlValidation:
         ]
 
         with pytest.raises(OSError, match="pre-validated"):
-            await resolver.resolve("metadata.google.internal", 443)
+            asyncio.run(resolver.resolve("metadata.google.internal", 443))
 
-    @pytest.mark.asyncio
-    async def test_webhook_posts_disable_redirects_and_use_pinned_resolver(self, monkeypatch):
+    def test_webhook_posts_disable_redirects_and_use_pinned_resolver(self, monkeypatch):
         svc = EnhancedNotificationService()
         destination = svc._prepare_webhook_destination("https://10.0.0.1/webhook", allow_private=True)
         post = Mock()
@@ -115,11 +114,13 @@ class TestWebhookUrlValidation:
 
         monkeypatch.setattr(aiohttp, "ClientSession", fake_session)
 
-        status, response_text = await svc._post_json_to_webhook(
-            destination,
-            {"ok": True},
-            headers={"Content-Type": "application/json"},
-            timeout=5,
+        status, response_text = asyncio.run(
+            svc._post_json_to_webhook(
+                destination,
+                {"ok": True},
+                headers={"Content-Type": "application/json"},
+                timeout=5,
+            )
         )
 
         assert status == 302
