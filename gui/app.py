@@ -4,15 +4,29 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
+import asyncio
+import io
+import ipaddress
+import os
+import secrets
 import subprocess
 import sys
 from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import Response, request
+
+from core.data_store import EnhancedMusicDataStore
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -23,6 +37,10 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Audora",
 )
+
+GUI_TOKEN_ENV = "AUDORA_GUI_TOKEN"
+GUI_REQUIRE_AUTH_ENV = "AUDORA_GUI_REQUIRE_AUTH"
+ALLOW_SECRET_SAVE_ENV = "AUDORA_ALLOW_PLAINTEXT_NOTIFICATION_SECRETS"
 
 # ---------------------------------------------------------------------------
 # Layout helpers
@@ -366,9 +384,85 @@ def _run_command(args: list[str]) -> tuple[str, str]:
 
 def _get_data_store():
     """Return an EnhancedMusicDataStore pointed at the default DB path."""
-    from core.data_store import EnhancedMusicDataStore
     db_path = PROJECT_ROOT / "data" / "enhanced_music_trends.db"
     return EnhancedMusicDataStore(str(db_path))
+
+
+def _env_flag(name: str) -> bool:
+    """Return True when an environment flag is explicitly enabled."""
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _host_is_loopback(host: str | None) -> bool:
+    """Return True when a request host or remote address is loopback-only."""
+    if not host:
+        return False
+
+    raw_host = host.rsplit("@", 1)[-1].strip().lower()
+    if raw_host.startswith("["):
+        closing_bracket = raw_host.find("]")
+        hostname = raw_host[1:closing_bracket] if closing_bracket != -1 else raw_host.strip("[]")
+    elif raw_host.count(":") > 1:
+        hostname = raw_host
+    else:
+        hostname = raw_host.split(":", 1)[0]
+
+    if hostname == "localhost":
+        return True
+
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _request_is_local() -> bool:
+    """Treat a request as local only when both peer and Host are loopback."""
+    return _host_is_loopback(request.remote_addr) and _host_is_loopback(request.host)
+
+
+def _request_token() -> str:
+    """Extract a GUI auth token from query params or common auth headers."""
+    if request.args.get("token"):
+        return request.args["token"]
+
+    header_token = request.headers.get("X-Audora-Token", "")
+    if header_token:
+        return header_token
+
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        return auth_header.removeprefix("Bearer ").strip()
+
+    return ""
+
+
+@app.server.before_request
+def _protect_gui_routes():
+    """Block remote GUI access unless a caller proves possession of the GUI token."""
+    configured_token = os.getenv(GUI_TOKEN_ENV, "")
+    require_auth = _env_flag(GUI_REQUIRE_AUTH_ENV)
+
+    supplied_token = _request_token()
+    if (
+        configured_token
+        and supplied_token
+        and secrets.compare_digest(supplied_token, configured_token)
+    ):
+        return None
+
+    if not require_auth and _request_is_local():
+        return None
+
+    if not configured_token:
+        message = (
+            "Audora GUI remote access is disabled. Set AUDORA_GUI_TOKEN and pass it as "
+            "a Bearer token, X-Audora-Token header, or ?token=... to enable remote access."
+        )
+    else:
+        message = "Unauthorized Audora GUI request."
+
+    return Response(message, status=401, headers={"WWW-Authenticate": "Bearer"})
 
 
 # ---------------------------------------------------------------------------
@@ -560,8 +654,6 @@ def search_history(_n, platform, min_score, days, artist_filter):
 def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
-    import io
-    import pandas as pd
     df = pd.DataFrame(table_data)
     buf = io.StringIO()
     df.to_csv(buf, index=False)
@@ -586,23 +678,37 @@ def export_csv(_n, table_data):
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
     try:
-        from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
-        if slack_url:
+        allow_secret_save = _env_flag(ALLOW_SECRET_SAVE_ENV)
+        secret_values_supplied = any((slack_url, discord_url, webhook_url, smtp_pass))
+
+        if slack_url and allow_secret_save:
             svc.config["slack"]["webhook_url"] = slack_url
-        if discord_url:
+        if discord_url and allow_secret_save:
             svc.config["discord"]["webhook_url"] = discord_url
-        if webhook_url:
+        if webhook_url and allow_secret_save:
             svc.config["webhook"]["url"] = webhook_url
+        if slack_url:
+            svc._validate_webhook_url(slack_url, allow_private=False)
+        if discord_url:
+            svc._validate_webhook_url(discord_url, allow_private=False)
+        if webhook_url:
+            svc._validate_webhook_url(webhook_url, allow_private=svc._allow_private_webhooks())
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
         if smtp_port:
             svc.config["email"]["port"] = int(smtp_port)
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
-        if smtp_pass:
+        if smtp_pass and allow_secret_save:
             svc.config["email"]["password"] = smtp_pass
-        svc.save_config()
+        svc.save_config(include_secrets=allow_secret_save)
+        if secret_values_supplied and not allow_secret_save:
+            return (
+                "Saved non-secret settings. Secret values were not persisted; use environment "
+                f"variables or set {ALLOW_SECRET_SAVE_ENV}=true to explicitly allow local "
+                "plaintext storage."
+            )
         return "Saved"
     except Exception as e:
         return f"Error: {e}"
@@ -621,13 +727,6 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         if not url:
             return "No URL"
         try:
-            import asyncio
-            from core.notification_service import (
-                EnhancedNotificationService,
-                NotificationChannel,
-                NotificationMessage,
-                NotificationPriority,
-            )
             svc = EnhancedNotificationService()
             svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
             channel = getattr(NotificationChannel, channel_enum_name)
