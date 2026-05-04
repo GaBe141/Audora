@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Security validation and configuration setup for Audora."""
 
-from glob import glob
 import sys
 from pathlib import Path
 
@@ -104,8 +103,8 @@ def main():
     found_credentials = []
     for pattern in credential_patterns:
         if pattern.startswith("*"):
-            matches = glob(str(config.project_root / pattern))
-            found_credentials.extend(matches)
+            matches = config.project_root.glob(pattern)
+            found_credentials.extend(str(match) for match in matches)
         else:
             # Direct file check
             file_path = config.project_root / pattern

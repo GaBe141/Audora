@@ -18,8 +18,7 @@ import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
-from flask import Response, request, session
-from werkzeug.http import parse_host
+from flask import Response, request
 
 from core.data_store import EnhancedMusicDataStore
 from core.notification_service import (
@@ -42,8 +41,6 @@ app = dash.Dash(
 GUI_TOKEN_ENV = "AUDORA_GUI_TOKEN"
 GUI_REQUIRE_AUTH_ENV = "AUDORA_GUI_REQUIRE_AUTH"
 ALLOW_SECRET_SAVE_ENV = "AUDORA_ALLOW_PLAINTEXT_NOTIFICATION_SECRETS"
-
-app.server.secret_key = os.getenv("AUDORA_GUI_SECRET_KEY") or os.getenv(GUI_TOKEN_ENV)
 
 # ---------------------------------------------------------------------------
 # Layout helpers
@@ -401,8 +398,15 @@ def _host_is_loopback(host: str | None) -> bool:
     if not host:
         return False
 
-    hostname = parse_host(host, scheme="http") or host
-    hostname = hostname.rsplit("@", 1)[-1].lower()
+    raw_host = host.rsplit("@", 1)[-1].strip().lower()
+    if raw_host.startswith("["):
+        closing_bracket = raw_host.find("]")
+        hostname = raw_host[1:closing_bracket] if closing_bracket != -1 else raw_host.strip("[]")
+    elif raw_host.count(":") > 1:
+        hostname = raw_host
+    else:
+        hostname = raw_host.split(":", 1)[0]
+
     if hostname == "localhost":
         return True
 
@@ -433,31 +437,19 @@ def _request_token() -> str:
     return ""
 
 
-def _ensure_session_secret(configured_token: str) -> None:
-    """Set a stable Flask session key before accepting token-authenticated requests."""
-    if app.server.secret_key:
-        return
-
-    secret_key = os.getenv("AUDORA_GUI_SECRET_KEY") or configured_token
-    if secret_key:
-        app.server.secret_key = secret_key
-
-
 @app.server.before_request
 def _protect_gui_routes():
     """Block remote GUI access unless a caller proves possession of the GUI token."""
     configured_token = os.getenv(GUI_TOKEN_ENV, "")
     require_auth = _env_flag(GUI_REQUIRE_AUTH_ENV)
-    _ensure_session_secret(configured_token)
-
-    if session.get("audora_gui_authenticated"):
-        return None
 
     supplied_token = _request_token()
-    if configured_token and supplied_token:
-        if secrets.compare_digest(supplied_token, configured_token):
-            session["audora_gui_authenticated"] = True
-            return None
+    if (
+        configured_token
+        and supplied_token
+        and secrets.compare_digest(supplied_token, configured_token)
+    ):
+        return None
 
     if not require_auth and _request_is_local():
         return None
