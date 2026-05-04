@@ -6,10 +6,57 @@ file and console output, improving observability and debugging capabilities.
 
 import json
 import logging
+import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+SENSITIVE_VALUE_PATTERN = re.compile(
+    r"(?i)(api[_-]?key|token|secret|password|authorization)(=|%3D|:\s*Bearer\s+)[^&\s\"']+"
+)
+SENSITIVE_KEYWORDS = ("api_key", "apikey", "token", "secret", "password", "authorization")
+
+
+def redact_sensitive_data(value: Any) -> Any:
+    """Redact common credential fields from values before logging."""
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]"
+            if any(keyword in str(key).lower() for keyword in SENSITIVE_KEYWORDS)
+            else redact_sensitive_data(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_sensitive_data(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_sensitive_data(item) for item in value)
+    if isinstance(value, str):
+        return SENSITIVE_VALUE_PATTERN.sub(r"\1\2[REDACTED]", value)
+    return value
+
+
+class RedactingFilter(logging.Filter):
+    """Remove likely secrets from log messages, arguments, and exception text."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = redact_sensitive_data(record.msg)
+        record.args = redact_sensitive_data(record.args)
+        if record.exc_info and record.exc_info[1]:
+            record.exc_text = None
+        return True
+
+
+def _prepare_secure_log_file(path: Path) -> None:
+    """Create a log file with owner-only permissions before handlers use it."""
+    if os.name == "nt":
+        path.touch(exist_ok=True)
+        return
+
+    fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    os.close(fd)
+    os.chmod(path, 0o600)
 
 
 class JSONFormatter(logging.Formatter):
@@ -32,7 +79,7 @@ class JSONFormatter(logging.Formatter):
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact_sensitive_data(record.getMessage()),
             "module": record.module,
             "function": record.funcName,
             "line": record.lineno,
@@ -44,13 +91,15 @@ class JSONFormatter(logging.Formatter):
         if record.exc_info:
             log_data["exception"] = {
                 "type": record.exc_info[0].__name__ if record.exc_info[0] else None,
-                "message": str(record.exc_info[1]) if record.exc_info[1] else None,
-                "traceback": self.formatException(record.exc_info),
+                "message": redact_sensitive_data(str(record.exc_info[1]))
+                if record.exc_info[1]
+                else None,
+                "traceback": redact_sensitive_data(self.formatException(record.exc_info)),
             }
 
         # Add custom fields from 'extra' parameter
         if hasattr(record, "extra_fields"):
-            log_data.update(record.extra_fields)
+            log_data.update(redact_sensitive_data(record.extra_fields))
 
         # Add any other custom attributes
         for key, value in record.__dict__.items():
@@ -79,9 +128,9 @@ class JSONFormatter(logging.Formatter):
                 "extra_fields",
             ]:
                 try:
-                    log_data[key] = value
+                    log_data[key] = redact_sensitive_data(value)
                 except (TypeError, ValueError):
-                    log_data[key] = str(value)
+                    log_data[key] = redact_sensitive_data(str(value))
 
         return json.dumps(log_data, default=str)
 
@@ -171,6 +220,7 @@ def setup_logging(
     if console_output:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(log_level)
+        console_handler.addFilter(RedactingFilter())
 
         if sys.stdout.isatty():  # Use colors only in interactive terminals
             console_formatter = ColoredConsoleFormatter(
@@ -192,8 +242,10 @@ def setup_logging(
 
         # Main log file (all levels)
         main_log_file = log_path / f"{app_name}_{timestamp}.log"
+        _prepare_secure_log_file(main_log_file)
         main_handler = logging.FileHandler(main_log_file, encoding="utf-8")
         main_handler.setLevel(log_level)
+        main_handler.addFilter(RedactingFilter())
 
         if json_logs:
             main_handler.setFormatter(JSONFormatter())
@@ -210,8 +262,10 @@ def setup_logging(
 
         # Error log file (ERROR and CRITICAL only)
         error_log_file = log_path / f"{app_name}_errors_{timestamp}.log"
+        _prepare_secure_log_file(error_log_file)
         error_handler = logging.FileHandler(error_log_file, encoding="utf-8")
         error_handler.setLevel(logging.ERROR)
+        error_handler.addFilter(RedactingFilter())
 
         if json_logs:
             error_handler.setFormatter(JSONFormatter())

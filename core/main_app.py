@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.utils import safe_output_path
 from integrations.api_config import SocialAPIManager
 from integrations.extended_platforms import ExtendedSocialDiscoveryEngine
 from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
@@ -341,12 +342,12 @@ class ComprehensiveMusicDiscoveryApp:
             filename = custom_filename
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            filename = f"comprehensive_discovery_report_{timestamp}.json"
 
-        filepath = Path(filename)
+        filepath = safe_output_path("data", filename, allowed_suffixes={".json"})
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        with filepath.open("w", encoding="utf-8") as f:
             json.dump(discovery_results, f, indent=2, default=str, ensure_ascii=False)
 
         return str(filepath)

@@ -13,7 +13,7 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
 class LastFmAPI:
@@ -32,6 +32,14 @@ class LastFmAPI:
         if time_since_last < self.rate_limit_delay:
             time.sleep(self.rate_limit_delay - time_since_last)
         self.last_request_time = time.time()
+
+    def _safe_request_error(self, error: requests.exceptions.RequestException) -> str:
+        """Return a requests error string without URL-embedded secrets."""
+        message = str(error)
+        if self.api_key:
+            message = message.replace(f"api_key={self.api_key}", "api_key=[REDACTED]")
+            message = message.replace(self.api_key, "[REDACTED]")
+        return message
 
     def _make_request(self, method: str, **params) -> dict:
         """Make a rate-limited request to Last.fm API."""
@@ -56,9 +64,10 @@ class LastFmAPI:
         except APIResponseError:
             raise
         except requests.exceptions.RequestException as e:
-            logger.error("Last.fm request failed for %s: %s", method, e)
+            safe_error = self._safe_request_error(e)
+            logger.error("Last.fm request failed for %s: %s", method, safe_error)
             raise APIConnectionError(
-                message=f"Last.fm request failed: {e}",
+                message=f"Last.fm request failed: {safe_error}",
                 details={"method": method},
             ) from e
         except json.JSONDecodeError as e:
