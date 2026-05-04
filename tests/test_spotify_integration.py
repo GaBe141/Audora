@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
-from integrations.spotify_charts_integration import SpotifyChartsAPI
+from integrations.spotify_charts_integration import REQUEST_TIMEOUT, SpotifyChartsAPI
 
 
 class TestSpotifyChartsAPISuccess:
@@ -21,10 +21,10 @@ class TestSpotifyChartsAPISuccess:
         mock_response.raise_for_status = MagicMock()
         mock_response.content = html_with_script
 
-        with patch.object(api.session, "get", return_value=mock_response):
+        with patch.object(api.session, "get", return_value=mock_response) as mock_get:
             df = api.get_top_200_daily(country_code="us", date="2024-01-15")
-        api.session.get.assert_called_once()
-        assert api.session.get.call_args.kwargs["timeout"] == api.REQUEST_TIMEOUT
+        mock_get.assert_called_once()
+        assert mock_get.call_args.kwargs["timeout"] == REQUEST_TIMEOUT
 
         assert isinstance(df, __import__("pandas").DataFrame)
         if not df.empty:
