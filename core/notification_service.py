@@ -181,18 +181,32 @@ class EnhancedNotificationService:
 
         return default_config
 
-    def save_config(self, path: str = "config/notification_config.json") -> None:
+    def save_config(
+        self, path: str = "config/notification_config.json", *, include_secrets: bool = True
+    ) -> None:
         """Persist the current channel configuration to a JSON file.
 
         Args:
             path: File path to write the configuration to.
+            include_secrets: Whether to persist secret-bearing values such as webhook URLs,
+                API credentials, and SMTP passwords. Disable this for GUI writes unless the
+                operator has explicitly opted into plaintext local secret storage.
         """
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        if not include_secrets:
+            to_save = self._redact_persisted_secrets(to_save)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -201,6 +215,29 @@ class EnhancedNotificationService:
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _redact_persisted_secrets(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Return a copy of notification config with secret values removed before writing."""
+        redacted = json.loads(json.dumps(config))
+        secret_paths = [
+            ("email", "password"),
+            ("slack", "webhook_url"),
+            ("discord", "webhook_url"),
+            ("webhook", "url"),
+            ("webhook", "headers", "Authorization"),
+            ("sms", "api_key"),
+            ("sms", "api_secret"),
+        ]
+        for path in secret_paths:
+            cursor = redacted
+            for key in path[:-1]:
+                if not isinstance(cursor, dict):
+                    break
+                cursor = cursor.get(key, {})
+            else:
+                if isinstance(cursor, dict):
+                    cursor[path[-1]] = ""
+        return redacted
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
