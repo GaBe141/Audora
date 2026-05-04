@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
 
+import pandas as pd
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,58 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis cache serialization hardening."""
+
+    def test_serializes_plain_json_values_without_pickle(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        cached_value = {"artist": "Bowie", "scores": [1, 2, 3], "active": True}
+        serialized = backend._serialize(cached_value)
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert pickle.PROTO not in serialized
+        assert backend._deserialize(serialized) == cached_value
+
+    def test_serializes_dataframes_without_pickle(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        dataframe = pd.DataFrame(
+            [
+                {"track_name": "Song A", "score": 91.5},
+                {"track_name": "Song B", "score": 83.0},
+            ]
+        )
+
+        restored = backend._deserialize(backend._serialize(dataframe))
+
+        pd.testing.assert_frame_equal(restored, dataframe)
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        payload = pickle.dumps({"unsafe": "payload"}, protocol=pickle.HIGHEST_PROTOCOL)
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "unused",
+            "payload": payload.hex(),
+        }
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+
+class TestCacheManagerRedisConfiguration:
+    """Tests for explicit Redis opt-in."""
+
+    def test_uses_local_cache_when_redis_url_is_not_configured(self, monkeypatch):
+        monkeypatch.delenv("AUDORA_REDIS_URL", raising=False)
+        monkeypatch.delenv("AUDORA_REDIS_HOST", raising=False)
+
+        cache = CacheManager()
+
+        assert isinstance(cache._backend, LocalCacheBackend)

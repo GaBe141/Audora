@@ -7,14 +7,17 @@ fallback to in-memory caching when Redis is unavailable.
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
+from urllib.parse import urlparse
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +143,7 @@ class RedisCacheBackend(CacheBackend):
         db: int = 0,
         password: str | None = None,
         max_connections: int = 10,
+        ssl: bool = False,
     ) -> None:
         """Initialize Redis cache.
 
@@ -149,6 +153,7 @@ class RedisCacheBackend(CacheBackend):
             db: Redis database number
             password: Redis password (if required)
             max_connections: Maximum connections in pool
+            ssl: Whether to use TLS for Redis connections
         """
         if not REDIS_AVAILABLE:
             raise ImportError("Redis package not installed")
@@ -160,6 +165,7 @@ class RedisCacheBackend(CacheBackend):
             password=password,
             max_connections=max_connections,
             decode_responses=False,  # Keep binary mode for signed payloads
+            ssl=ssl,
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
@@ -178,7 +184,7 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
+        # Fallback to process-local random key to prevent unsigned cache injection.
         # This keeps the cache safe by default, with only a reduced cross-process hit rate.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
@@ -186,12 +192,113 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    @classmethod
+    def from_environment(cls) -> "RedisCacheBackend":
+        """Create a Redis backend from explicit environment configuration."""
+        redis_url = os.getenv("AUDORA_REDIS_URL", "").strip()
+        if redis_url:
+            parsed = urlparse(redis_url)
+            if parsed.scheme not in {"redis", "rediss"} or not parsed.hostname:
+                raise ValueError("AUDORA_REDIS_URL must be a redis:// or rediss:// URL")
+
+            return cls(
+                host=parsed.hostname,
+                port=parsed.port or 6379,
+                db=int(parsed.path.lstrip("/") or "0"),
+                password=parsed.password,
+                ssl=parsed.scheme == "rediss",
+            )
+
+        redis_host = os.getenv("AUDORA_REDIS_HOST", "").strip()
+        if not redis_host:
+            raise ValueError("Redis cache requires AUDORA_REDIS_URL or AUDORA_REDIS_HOST")
+
+        return cls(
+            host=redis_host,
+            port=int(os.getenv("AUDORA_REDIS_PORT", "6379")),
+            db=int(os.getenv("AUDORA_REDIS_DB", "0")),
+            password=os.getenv("AUDORA_REDIS_PASSWORD") or None,
+            ssl=os.getenv("AUDORA_REDIS_SSL", "").strip().lower() in {"1", "true", "yes", "on"},
+        )
+
+    def _to_json_safe(self, value: Any) -> Any:
+        """Convert supported cache values to a JSON-safe structure."""
+        if value is None or isinstance(value, str | int | float | bool):
+            return value
+
+        if isinstance(value, pd.DataFrame):
+            return {
+                "__audora_cache_type__": "dataframe",
+                "value": value.to_json(orient="split", date_format="iso"),
+            }
+
+        if isinstance(value, tuple):
+            return {
+                "__audora_cache_type__": "tuple",
+                "items": [self._to_json_safe(item) for item in value],
+            }
+
+        if isinstance(value, list):
+            return [self._to_json_safe(item) for item in value]
+
+        if isinstance(value, dict):
+            return {
+                "__audora_cache_type__": "dict",
+                "items": [
+                    [self._to_json_safe(key), self._to_json_safe(item)]
+                    for key, item in value.items()
+                ],
+            }
+
+        if hasattr(value, "item") and callable(value.item):
+            return self._to_json_safe(value.item())
+
+        if hasattr(value, "tolist") and callable(value.tolist):
+            return self._to_json_safe(value.tolist())
+
+        raise TypeError(f"Unsupported cache value type: {type(value).__name__}")
+
+    def _from_json_safe(self, value: Any) -> Any:
+        """Rebuild supported cache values from a JSON-safe structure."""
+        if value is None or isinstance(value, str | int | float | bool):
+            return value
+
+        if isinstance(value, list):
+            return [self._from_json_safe(item) for item in value]
+
+        if isinstance(value, dict):
+            value_type = value.get("__audora_cache_type__")
+
+            if value_type == "dataframe":
+                dataframe_json = value.get("value")
+                if not isinstance(dataframe_json, str):
+                    raise ValueError("Invalid cached DataFrame payload")
+                return pd.read_json(io.StringIO(dataframe_json), orient="split")
+
+            if value_type == "tuple":
+                items = value.get("items")
+                if not isinstance(items, list):
+                    raise ValueError("Invalid cached tuple payload")
+                return tuple(self._from_json_safe(item) for item in items)
+
+            if value_type == "dict":
+                items = value.get("items")
+                if not isinstance(items, list):
+                    raise ValueError("Invalid cached dict payload")
+                return {
+                    self._from_json_safe(key): self._from_json_safe(item) for key, item in items
+                }
+
+        raise ValueError("Unsupported cache payload structure")
+
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload = json.dumps(
+            self._to_json_safe(value), separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
@@ -204,7 +311,7 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -223,7 +330,7 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return self._from_json_safe(json.loads(payload.decode("utf-8")))
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -296,10 +403,10 @@ class CacheManager:
         if backend:
             self._backend = backend
         else:
-            # Try Redis first, fall back to local cache
+            # Redis must be explicitly configured; localhost defaults are unsafe for deployments.
             if REDIS_AVAILABLE:
                 try:
-                    self._backend = RedisCacheBackend()
+                    self._backend = RedisCacheBackend.from_environment()
                     logger.info("Using Redis cache backend")
                 except Exception as e:
                     logger.warning(f"Redis initialization failed: {e}, using local cache")
@@ -337,7 +444,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON serializable or a pandas DataFrame)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
