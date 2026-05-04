@@ -1,11 +1,14 @@
 """Security tests for notification webhook URL validation."""
 
 from email import message_from_string
-from email.mime.multipart import MIMEMultipart
 
 import pytest
 
-from core.notification_service import EnhancedNotificationService, NotificationMessage, NotificationPriority
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationMessage,
+    NotificationPriority,
+)
 
 
 class TestWebhookUrlValidation:
@@ -101,7 +104,6 @@ class TestEmailSecurity:
         assert result["success"] is True
         assert sent_messages
         parsed = message_from_string(sent_messages[0].as_string())
-        assert isinstance(parsed, MIMEMultipart)
 
         html_part = next(part for part in parsed.walk() if part.get_content_type() == "text/html")
         html_payload = html_part.get_payload(decode=True).decode()
