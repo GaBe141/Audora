@@ -53,7 +53,7 @@ class TestWebhookUrlValidation:
         target = svc._validated_webhook_target("https://example.com/webhook")
 
         assert target.url == "https://example.com/webhook"
-        assert "93.184.216.34" in target._connector._addresses
+        assert "93.184.216.34" in target.addresses
 
     def test_webhook_sends_with_redirects_disabled(self, monkeypatch):
         svc = EnhancedNotificationService()
