@@ -1,5 +1,6 @@
 """Integration tests for Last.fm API client (mocked HTTP)."""
 
+import requests
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -12,7 +13,12 @@ if "integrations.config" not in sys.modules:
     sys.modules["integrations.config"] = _config_mock
 
 from core.exceptions import APIConnectionError, APIResponseError
-from integrations.lastfm_integration import LastFmAPI
+from integrations.lastfm_integration import BASE_URL, LastFmAPI
+
+
+def test_lastfm_api_uses_https_transport():
+    """Ensure API keys are never sent to Last.fm over plaintext HTTP."""
+    assert BASE_URL.startswith("https://")
 
 
 class TestLastFmAPISuccess:
@@ -81,8 +87,6 @@ class TestLastFmAPIErrorHandling:
                 api.get_top_artists_global(limit=5)
 
     def test_http_error_raises_connection_error(self):
-        import requests
-
         api = LastFmAPI(api_key="test_key")
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("429")
