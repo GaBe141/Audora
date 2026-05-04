@@ -4,6 +4,7 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
@@ -158,6 +159,9 @@ class EnhancedNotificationService:
                 "from_number": os.getenv("SMS_FROM_NUMBER", ""),
                 "recipients": os.getenv("SMS_RECIPIENTS", "").split(","),
             },
+            "attachments": {
+                "allowed_base_dir": os.getenv("AUDORA_ATTACHMENT_DIR", "data/reports"),
+            },
         }
 
         if config_file and Path(config_file).exists():
@@ -254,6 +258,28 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _resolve_attachment_path(self, attachment_path: str) -> Path | None:
+        """Resolve an email attachment within the configured safe attachment directory."""
+        configured_base = self.config.get("attachments", {}).get(
+            "allowed_base_dir", "data/reports"
+        )
+        base_dir = Path(configured_base).resolve()
+        candidate = Path(attachment_path).expanduser().resolve()
+
+        try:
+            candidate.relative_to(base_dir)
+        except ValueError:
+            self.logger.warning(
+                "Rejected attachment outside allowed directory: %s", attachment_path
+            )
+            return None
+
+        if not candidate.is_file():
+            self.logger.warning("Rejected missing or non-file attachment: %s", attachment_path)
+            return None
+
+        return candidate
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -553,22 +579,25 @@ System status: {{ system_status }}
             msg.attach(MIMEText(text_content, "plain"))
 
             # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            html_content = html.escape(text_content).replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    resolved_attachment = self._resolve_attachment_path(attachment_path)
+                    if not resolved_attachment:
+                        continue
+
+                    with resolved_attachment.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {resolved_attachment.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
