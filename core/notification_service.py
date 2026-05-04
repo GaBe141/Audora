@@ -266,7 +266,8 @@ class EnhancedNotificationService:
         try:
             parsed = ipaddress.ip_address(ip)
             return (
-                parsed.is_private
+                not parsed.is_global
+                or parsed.is_private
                 or parsed.is_loopback
                 or parsed.is_link_local
                 or parsed.is_multicast
