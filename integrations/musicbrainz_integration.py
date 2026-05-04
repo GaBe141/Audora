@@ -8,6 +8,7 @@ import requests
 
 BASE_URL = "https://musicbrainz.org/ws/2/"
 USER_AGENT = "SpotifyInsights/1.0 (https://github.com/GaBe141/spotify-insights)"
+REQUEST_TIMEOUT = (3.05, 15)
 
 
 class MusicBrainzAPI:
@@ -34,7 +35,9 @@ class MusicBrainzAPI:
         params.update({"fmt": "json"})
 
         try:
-            response = self.session.get(f"{BASE_URL}{endpoint}", params=params)
+            response = self.session.get(
+                f"{BASE_URL}{endpoint}", params=params, timeout=REQUEST_TIMEOUT
+            )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -75,16 +78,18 @@ class MusicBrainzAPI:
 
         related_artists = []
         for relation in artist_details["relations"]:
-            if relation.get("type") in ["member", "collaboration", "founder", "collaboration"]:
-                if "artist" in relation:
-                    related_artists.append(
-                        {
-                            "name": relation["artist"]["name"],
-                            "mbid": relation["artist"]["id"],
-                            "relationship_type": relation["type"],
-                            "direction": relation.get("direction", "forward"),
-                        }
-                    )
+            if (
+                relation.get("type") in ["member", "collaboration", "founder", "collaboration"]
+                and "artist" in relation
+            ):
+                related_artists.append(
+                    {
+                        "name": relation["artist"]["name"],
+                        "mbid": relation["artist"]["id"],
+                        "relationship_type": relation["type"],
+                        "direction": relation.get("direction", "forward"),
+                    }
+                )
 
         return related_artists
 

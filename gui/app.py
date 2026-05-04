@@ -4,15 +4,25 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
+import asyncio
+import csv
+import io
 import subprocess
 import sys
 from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -364,6 +374,21 @@ def _run_command(args: list[str]) -> tuple[str, str]:
         return "Error", str(e)
 
 
+def _escape_csv_formula(value):
+    """Escape spreadsheet formula prefixes in exported CSV cells."""
+    if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return f"'{value}"
+    return value
+
+
+def _safe_csv_export(df: pd.DataFrame) -> str:
+    """Serialize a DataFrame to CSV without formula-executable cells."""
+    safe_df = df.map(_escape_csv_formula)
+    buf = io.StringIO()
+    safe_df.to_csv(buf, index=False, quoting=csv.QUOTE_MINIMAL)
+    return buf.getvalue()
+
+
 def _get_data_store():
     """Return an EnhancedMusicDataStore pointed at the default DB path."""
     from core.data_store import EnhancedMusicDataStore
@@ -560,12 +585,8 @@ def search_history(_n, platform, min_score, days, artist_filter):
 def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
-    import io
-    import pandas as pd
     df = pd.DataFrame(table_data)
-    buf = io.StringIO()
-    df.to_csv(buf, index=False)
-    return dcc.send_string(buf.getvalue(), "audora_trends.csv")
+    return dcc.send_string(_safe_csv_export(df), "audora_trends.csv")
 
 
 # ---------------------------------------------------------------------------
@@ -621,13 +642,6 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         if not url:
             return "No URL"
         try:
-            import asyncio
-            from core.notification_service import (
-                EnhancedNotificationService,
-                NotificationChannel,
-                NotificationMessage,
-                NotificationPriority,
-            )
             svc = EnhancedNotificationService()
             svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
             channel = getattr(NotificationChannel, channel_enum_name)
