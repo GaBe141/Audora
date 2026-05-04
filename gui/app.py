@@ -15,13 +15,14 @@ import dash
 import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.graph_objects as go
+from dash import Input, Output, State, ctx, dash_table, dcc, html
+
 from core.notification_service import (
     EnhancedNotificationService,
     NotificationChannel,
     NotificationMessage,
     NotificationPriority,
 )
-from dash import Input, Output, State, ctx, dash_table, dcc, html
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
