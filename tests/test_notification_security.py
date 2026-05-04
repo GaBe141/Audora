@@ -1,9 +1,6 @@
 """Security tests for notification webhook URL validation and delivery hardening."""
 
-import smtplib
-from contextlib import nullcontext
-from email import message_from_string
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 

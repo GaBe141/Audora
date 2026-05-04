@@ -8,12 +8,18 @@ import hashlib
 import json
 import logging
 import time
-from datetime import date, datetime
 from collections.abc import Callable
+from datetime import date, datetime
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
-import pandas as pd
+try:
+    import pandas as pd
+
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
+    pd = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -211,12 +217,12 @@ class RedisCacheBackend(CacheBackend):
             return {"__audora_cache_type__": "datetime", "data": value.isoformat()}
         if isinstance(value, date):
             return {"__audora_cache_type__": "date", "data": value.isoformat()}
-        if isinstance(value, pd.DataFrame):
+        if PANDAS_AVAILABLE and isinstance(value, pd.DataFrame):
             return {
                 "__audora_cache_type__": "dataframe",
                 "data": value.to_json(orient="split", date_format="iso"),
             }
-        if isinstance(value, pd.Series):
+        if PANDAS_AVAILABLE and isinstance(value, pd.Series):
             return {
                 "__audora_cache_type__": "series",
                 "data": value.to_json(orient="split", date_format="iso"),
@@ -269,7 +275,7 @@ class RedisCacheBackend(CacheBackend):
         if value_type == "tuple":
             return tuple(self._decode_value(item) for item in value["items"])
         if value_type == "set":
-            return set(self._decode_value(item) for item in value["items"])
+            return {self._decode_value(item) for item in value["items"]}
         if value_type == "dict":
             return {
                 self._decode_value(key): self._decode_value(item)
