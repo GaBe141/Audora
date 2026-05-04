@@ -1,6 +1,7 @@
 """AudioDB API integration for rich artist profiles and comprehensive music metadata."""
 
 import time
+from contextlib import suppress
 from typing import Any
 
 import pandas as pd
@@ -200,10 +201,8 @@ class AudioDBAPI:
                 if formed_year:
                     current_year = 2025
                     end_year = disbanded_year if disbanded_year else current_year
-                    try:
+                    with suppress(ValueError, TypeError):
                         career_length = int(end_year) - int(formed_year)
-                    except (ValueError, TypeError):
-                        pass
 
                 career_data.append(
                     {
@@ -379,10 +378,10 @@ class AudioDBIntegration:
         insights = {
             "artists_compared": len(comparisons),
             "countries_represented": len(
-                set(data.get("country") for data in comparisons.values() if data.get("country"))
+                {data.get("country") for data in comparisons.values() if data.get("country")}
             ),
             "genres_represented": len(
-                set(data.get("genre") for data in comparisons.values() if data.get("genre"))
+                {data.get("genre") for data in comparisons.values() if data.get("genre")}
             ),
             "most_prolific": (
                 max(comparisons.items(), key=lambda x: x[1].get("total_albums", 0))[0]

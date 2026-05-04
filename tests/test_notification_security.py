@@ -1,5 +1,6 @@
 """Security tests for notification webhook URL validation."""
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -43,14 +44,13 @@ class TestWebhookUrlValidation:
             )
         ]
 
-        with patch("core.notification_service.socket.getaddrinfo", return_value=socket_result):
-            with pytest.raises(ValueError, match="private or restricted"):
-                import asyncio
+        with (
+            patch("core.notification_service.socket.getaddrinfo", return_value=socket_result),
+            pytest.raises(ValueError, match="private or restricted"),
+        ):
+            asyncio.run(resolver.resolve("example.com", 443))
 
-                asyncio.run(resolver.resolve("example.com", 443))
-
-    @pytest.mark.asyncio
-    async def test_custom_webhook_disables_redirects(self):
+    def test_custom_webhook_disables_redirects(self):
         svc = EnhancedNotificationService()
         svc.config["webhook"]["url"] = "https://hooks.example.com/audora"
         message = MagicMock()
@@ -82,7 +82,7 @@ class TestWebhookUrlValidation:
             patch.object(svc, "_public_only_connector", return_value=MagicMock()),
             patch("core.notification_service.aiohttp.ClientSession", return_value=session_context),
         ):
-            result = await svc._send_webhook(message)
+            result = asyncio.run(svc._send_webhook(message))
 
         assert result["success"] is True
         assert session.post.call_args.kwargs["allow_redirects"] is False
