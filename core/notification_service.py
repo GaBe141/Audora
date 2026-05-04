@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -158,6 +159,13 @@ class EnhancedNotificationService:
                 "from_number": os.getenv("SMS_FROM_NUMBER", ""),
                 "recipients": os.getenv("SMS_RECIPIENTS", "").split(","),
             },
+            "allowed_attachment_dirs": [
+                "data",
+                "reports",
+                "exports",
+                "demo_visualizations",
+            ],
+            "max_attachment_bytes": 10 * 1024 * 1024,
         }
 
         if config_file and Path(config_file).exists():
@@ -254,6 +262,39 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _allowed_attachment_roots(self) -> list[Path]:
+        """Resolve configured directories that email attachments may be read from."""
+        configured_roots = self.config.get("allowed_attachment_dirs", [])
+        if not isinstance(configured_roots, list):
+            return []
+
+        roots = []
+        for root in configured_roots:
+            if not isinstance(root, str) or not root.strip():
+                continue
+            roots.append(Path(root).expanduser().resolve())
+        return roots
+
+    def _resolve_attachment_path(self, attachment_path: str) -> Path:
+        """Resolve and validate an email attachment path before reading it."""
+        candidate = Path(attachment_path).expanduser().resolve()
+        allowed_roots = self._allowed_attachment_roots()
+
+        if not allowed_roots:
+            raise ValueError("No allowed attachment directories are configured")
+
+        if not candidate.is_file():
+            raise ValueError("Attachment path must point to an existing file")
+
+        if not any(candidate == root or candidate.is_relative_to(root) for root in allowed_roots):
+            raise ValueError("Attachment path is outside allowed attachment directories")
+
+        max_attachment_bytes = int(self.config.get("max_attachment_bytes", 10 * 1024 * 1024))
+        if candidate.stat().st_size > max_attachment_bytes:
+            raise ValueError("Attachment exceeds configured size limit")
+
+        return candidate
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -559,22 +600,26 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    resolved_attachment = self._resolve_attachment_path(attachment_path)
+                    with resolved_attachment.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {resolved_attachment.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            server = smtplib.SMTP(
+                email_config["smtp_server"],
+                email_config.get("port", 587),
+                timeout=email_config.get("timeout", 30),
+            )
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -650,7 +695,12 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    timeout=aiohttp.ClientTimeout(total=slack_config.get("timeout", 30)),
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +767,12 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    timeout=aiohttp.ClientTimeout(total=discord_config.get("timeout", 30)),
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +832,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
