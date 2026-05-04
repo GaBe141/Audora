@@ -18,7 +18,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import aiohttp
@@ -70,6 +70,47 @@ class NotificationMessage:
     data: dict[str, Any] | None = None
     attachments: list[str] | None = None
     template_vars: dict[str, Any] | None = None
+
+
+class RestrictedIPResolver(aiohttp.abc.AbstractResolver):
+    """Resolver that blocks restricted IPs at connection time."""
+
+    def __init__(self, is_restricted_ip: Callable[[str], bool], *, allow_private: bool = False):
+        self.is_restricted_ip = is_restricted_ip
+        self.allow_private = allow_private
+
+    async def resolve(
+        self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    ) -> list[dict[str, Any]]:
+        loop = asyncio.get_running_loop()
+        addr_infos = await loop.getaddrinfo(
+            host,
+            port,
+            family=family,
+            type=socket.SOCK_STREAM,
+            proto=socket.IPPROTO_TCP,
+        )
+
+        hosts = []
+        for address_family, _type, proto, _cname, address in addr_infos:
+            ip = address[0]
+            if not self.allow_private and self.is_restricted_ip(ip):
+                raise OSError("Webhook URL resolves to a private or restricted network address")
+            hosts.append(
+                {
+                    "hostname": host,
+                    "host": ip,
+                    "port": address[1],
+                    "family": address_family,
+                    "proto": proto,
+                    "flags": 0,
+                }
+            )
+
+        return hosts
+
+    async def close(self) -> None:
+        """No resolver resources to release."""
 
 
 class EnhancedNotificationService:
@@ -254,6 +295,13 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _create_webhook_connector(self, *, allow_private: bool = False) -> aiohttp.TCPConnector:
+        """Create a connector that revalidates DNS results during outbound requests."""
+        return aiohttp.TCPConnector(
+            resolver=RestrictedIPResolver(self._is_restricted_ip, allow_private=allow_private),
+            use_dns_cache=False,
+        )
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -649,7 +697,7 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(connector=self._create_webhook_connector()) as session,
                 session.post(webhook_url, json=slack_message) as response,
             ):
                 if response.status == 200:
@@ -716,7 +764,7 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(connector=self._create_webhook_connector()) as session,
                 session.post(webhook_url, json=discord_message) as response,
             ):
                 if response.status in [200, 204]:
@@ -775,7 +823,11 @@ System status: {{ system_status }}
             timeout = webhook_config.get("timeout", 30)
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(
+                    connector=self._create_webhook_connector(
+                        allow_private=self._allow_private_webhooks()
+                    )
+                ) as session,
                 session.post(
                     url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
                 ) as response,
