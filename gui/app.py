@@ -4,9 +4,9 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import asyncio
 import csv
 import io
+import asyncio
 import subprocess
 import sys
 from pathlib import Path

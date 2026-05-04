@@ -78,16 +78,18 @@ class MusicBrainzAPI:
 
         related_artists = []
         for relation in artist_details["relations"]:
-            if relation.get("type") in ["member", "collaboration", "founder", "collaboration"]:
-                if "artist" in relation:
-                    related_artists.append(
-                        {
-                            "name": relation["artist"]["name"],
-                            "mbid": relation["artist"]["id"],
-                            "relationship_type": relation["type"],
-                            "direction": relation.get("direction", "forward"),
-                        }
-                    )
+            if (
+                relation.get("type") in ["member", "collaboration", "founder", "collaboration"]
+                and "artist" in relation
+            ):
+                related_artists.append(
+                    {
+                        "name": relation["artist"]["name"],
+                        "mbid": relation["artist"]["id"],
+                        "relationship_type": relation["type"],
+                        "direction": relation.get("direction", "forward"),
+                    }
+                )
 
         return related_artists
 
