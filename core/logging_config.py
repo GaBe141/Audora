@@ -56,7 +56,7 @@ def _prepare_secure_log_file(path: Path) -> None:
 
     fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
     os.close(fd)
-    os.chmod(path, 0o600)
+    path.chmod(0o600)
 
 
 class JSONFormatter(logging.Formatter):

@@ -73,7 +73,7 @@ class EnhancedMusicDiscoverySetup:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
-        os.chmod(path, 0o600)
+        path.chmod(0o600)
 
     def _setup_logging(self) -> logging.Logger:
         """Set up logging for setup process."""
@@ -485,7 +485,7 @@ System Status: {{ system_status }}
         for template_name, template_content in templates.items():
             template_path = self.templates_dir / template_name
             try:
-                with open(template_path, "w") as f:
+                with template_path.open("w") as f:
                     f.write(template_content.strip())
                 self.logger.info(f"  Created template: {template_name}")
             except Exception as e:

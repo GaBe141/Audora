@@ -6,7 +6,6 @@ Integrates all social media APIs for Gen Z/Alpha music trend analysis.
 import asyncio
 import json
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from core.utils import safe_output_path
@@ -157,7 +156,7 @@ class ComprehensiveMusicDiscoveryApp:
         # Extract song identifiers from mainstream platforms
         mainstream_data = discovery_results.get("mainstream_platforms", {})
         if "platform_breakdown" in mainstream_data:
-            for platform, songs in mainstream_data["platform_breakdown"].items():
+            for _platform, songs in mainstream_data["platform_breakdown"].items():
                 for song in songs:
                     if hasattr(song, "artist_name") and hasattr(song, "song_title"):
                         song_key = f"{song.artist_name} - {song.song_title}".lower()
@@ -166,7 +165,7 @@ class ComprehensiveMusicDiscoveryApp:
         # Extract song identifiers from underground platforms
         underground_data = discovery_results.get("underground_platforms", {})
         if "underground_breakdown" in underground_data:
-            for platform, songs in underground_data["underground_breakdown"].items():
+            for _platform, songs in underground_data["underground_breakdown"].items():
                 for song in songs:
                     if hasattr(song, "artist_name") and hasattr(song, "song_title"):
                         song_key = f"{song.artist_name} - {song.song_title}".lower()
@@ -207,20 +206,21 @@ class ComprehensiveMusicDiscoveryApp:
         if "underground_breakdown" in underground_data:
             for platform, songs in underground_data["underground_breakdown"].items():
                 for song in songs:
-                    if hasattr(song, "viral_stage") and hasattr(song, "trend_velocity"):
-                        if (
-                            song.viral_stage.value in ["emerging", "niche_viral"]
-                            and song.trend_velocity > 100
-                        ):
-                            predictions["next_viral_candidates"].append(
-                                {
-                                    "artist": song.artist_name,
-                                    "song": song.song_title,
-                                    "platform": platform,
-                                    "momentum": song.trend_velocity,
-                                    "prediction": "Likely to go viral in 7-14 days",
-                                }
-                            )
+                    if (
+                        hasattr(song, "viral_stage")
+                        and hasattr(song, "trend_velocity")
+                        and song.viral_stage.value in ["emerging", "niche_viral"]
+                        and song.trend_velocity > 100
+                    ):
+                        predictions["next_viral_candidates"].append(
+                            {
+                                "artist": song.artist_name,
+                                "song": song.song_title,
+                                "platform": platform,
+                                "momentum": song.trend_velocity,
+                                "prediction": "Likely to go viral in 7-14 days",
+                            }
+                        )
 
         # Platform momentum analysis
         mainstream_data = discovery_results.get("mainstream_platforms", {})

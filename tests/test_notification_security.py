@@ -1,5 +1,7 @@
 """Security tests for notification webhook URL validation."""
 
+import asyncio
+
 import pytest
 
 from core.notification_service import (
@@ -63,8 +65,7 @@ class _FakeClientSession:
         return _FakePostContext(kwargs)
 
 
-@pytest.mark.asyncio
-async def test_custom_webhook_disables_redirects(monkeypatch):
+def test_custom_webhook_disables_redirects(monkeypatch):
     svc = EnhancedNotificationService()
     svc.config["webhook"]["url"] = "https://example.com/webhook"
     monkeypatch.setattr(
@@ -80,7 +81,7 @@ async def test_custom_webhook_disables_redirects(monkeypatch):
         channels=[NotificationChannel.WEBHOOK],
     )
 
-    result = await svc._send_webhook(message)
+    result = asyncio.run(svc._send_webhook(message))
 
     assert result["success"] is True
     assert _FakeClientSession.captured_kwargs["allow_redirects"] is False
