@@ -1,8 +1,9 @@
 """Security tests for the Dash admin dashboard guard."""
 
 import base64
+import importlib
 
-from gui import app as gui_app
+gui_app = importlib.import_module("gui.app")
 
 
 def _auth_header(username: str, password: str) -> dict[str, str]:
