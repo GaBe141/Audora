@@ -21,11 +21,12 @@ class TestMusicBrainzAPISuccess:
                 },
             ],
         }
-        with patch.object(api.session, "get", return_value=mock_response):
+        with patch.object(api.session, "get", return_value=mock_response) as mock_get:
             result = api.search_artist("Test Artist")
         assert result is not None
         assert result["name"] == "Test Artist"
         assert result["id"] == "mbid-123"
+        assert mock_get.call_args.kwargs["timeout"] == (3.05, 15)
 
     def test_search_artist_empty_returns_none(self):
         api = MusicBrainzAPI()

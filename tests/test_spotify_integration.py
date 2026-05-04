@@ -23,6 +23,8 @@ class TestSpotifyChartsAPISuccess:
 
         with patch.object(api.session, "get", return_value=mock_response):
             df = api.get_top_200_daily(country_code="us", date="2024-01-15")
+        api.session.get.assert_called_once()
+        assert api.session.get.call_args.kwargs["timeout"] == api.REQUEST_TIMEOUT
 
         assert isinstance(df, __import__("pandas").DataFrame)
         if not df.empty:
