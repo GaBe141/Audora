@@ -9,11 +9,11 @@ import requests
 
 from core.exceptions import APIConnectionError, APIResponseError
 
-from .config import get_config
+from core.config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
 class LastFmAPI:
@@ -56,10 +56,11 @@ class LastFmAPI:
         except APIResponseError:
             raise
         except requests.exceptions.RequestException as e:
-            logger.error("Last.fm request failed for %s: %s", method, e)
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            logger.error("Last.fm request failed for %s with status %s", method, status_code)
             raise APIConnectionError(
-                message=f"Last.fm request failed: {e}",
-                details={"method": method},
+                message="Last.fm request failed",
+                details={"method": method, "status_code": status_code},
             ) from e
         except json.JSONDecodeError as e:
             logger.error("Last.fm returned invalid JSON for %s: %s", method, e)
