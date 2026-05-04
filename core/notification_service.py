@@ -18,6 +18,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 from urllib.parse import urlparse
 
@@ -70,6 +71,59 @@ class NotificationMessage:
     data: dict[str, Any] | None = None
     attachments: list[str] | None = None
     template_vars: dict[str, Any] | None = None
+
+
+class _PinnedIpConnector(aiohttp.TCPConnector):
+    """TCP connector that reuses pre-validated DNS answers for one hostname."""
+
+    def __init__(self, hostname: str, port: int, addresses: set[str]):
+        super().__init__(ttl_dns_cache=0)
+        self._hostname = hostname
+        self._port = port
+        self._addresses = addresses
+
+    async def _resolve_host(
+        self, host: str, port: int, traces: list[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        if host == self._hostname and port == self._port:
+            return [
+                {
+                    "hostname": host,
+                    "host": address,
+                    "port": port,
+                    "family": socket.AF_INET6 if ":" in address else socket.AF_INET,
+                    "proto": socket.IPPROTO_TCP,
+                    "flags": socket.AI_NUMERICHOST,
+                }
+                for address in self._addresses
+            ]
+
+        return await super()._resolve_host(host, port, traces)
+
+
+class _ValidatedWebhookTarget:
+    """Validated webhook destination with DNS answers pinned for the send."""
+
+    def __init__(self, url: str, hostname: str, port: int, addresses: set[str]):
+        self.url = url
+        self.addresses = addresses
+        self._hostname = hostname
+        self._port = port
+        self._connector: _PinnedIpConnector | None = None
+
+    async def __aenter__(self) -> tuple[str, _PinnedIpConnector]:
+        self._connector = _PinnedIpConnector(self._hostname, self._port, self.addresses)
+        return self.url, self._connector
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        if self._connector is not None:
+            await self._connector.close()
+            self._connector = None
 
 
 class EnhancedNotificationService:
@@ -228,6 +282,12 @@ class EnhancedNotificationService:
 
     def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
         """Validate outbound webhook URL to reduce SSRF risk."""
+        return self._validated_webhook_target(url, allow_private=allow_private).url
+
+    def _validated_webhook_target(
+        self, url: str, *, allow_private: bool = False
+    ) -> _ValidatedWebhookTarget:
+        """Validate and pin a webhook destination before making an outbound request."""
         parsed = urlparse(url.strip())
         if parsed.scheme != "https":
             raise ValueError("Webhook URL must use HTTPS")
@@ -253,7 +313,7 @@ class EnhancedNotificationService:
                         "Webhook URL resolves to a private or restricted network address"
                     )
 
-        return url
+        return _ValidatedWebhookTarget(url, hostname, parsed.port or 443, resolved_ips)
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -600,7 +660,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Slack webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            target = self._validated_webhook_target(webhook_url, allow_private=False)
             # Create Slack message format
             color_map = {
                 NotificationPriority.LOW: "good",
@@ -649,8 +709,9 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                target as (webhook_url, connector),
+                aiohttp.ClientSession(connector=connector) as session,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -675,7 +736,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Discord webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            target = self._validated_webhook_target(webhook_url, allow_private=False)
             # Format content for Discord
             content = message.content
             if message.template_vars:
@@ -716,8 +777,9 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                target as (webhook_url, connector),
+                aiohttp.ClientSession(connector=connector) as session,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -752,7 +814,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
-            url = self._validate_webhook_url(
+            target = self._validated_webhook_target(
                 url, allow_private=self._allow_private_webhooks()
             )
             # Prepare payload
@@ -775,9 +837,14 @@ System status: {{ system_status }}
             timeout = webhook_config.get("timeout", 30)
 
             async with (
-                aiohttp.ClientSession() as session,
+                target as (url, connector),
+                aiohttp.ClientSession(connector=connector) as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
