@@ -1,9 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -81,6 +84,14 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_cache_key_uses_sha256_digest(self):
+        manager = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+        key = manager._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        parts = key.split(":")
+
+        assert len(parts) == 3
+        assert all(len(part) == 64 for part in parts[1:])
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +129,52 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for safe Redis cache payload handling."""
+
+    def test_json_payload_round_trip_without_pickle(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = {
+            "name": "track",
+            "scores": [1, 2, 3],
+            "blob": b"audora",
+            "coords": (1, 2),
+            "tags": {"viral", "new"},
+        }
+
+        serialized = backend._serialize(value)
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["format"] == "json"
+        restored = backend._deserialize(serialized)
+        assert restored["name"] == value["name"]
+        assert restored["scores"] == value["scores"]
+        assert restored["blob"] == value["blob"]
+        assert restored["coords"] == value["coords"]
+        assert restored["tags"] == value["tags"]
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        backend = object.__new__(RedisCacheBackend)
+        legacy_payload = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "unused",
+                "payload": "gASVCgAAAAAAAAB9lIwBeJRLAXMu",
+            }
+        ).encode("utf-8")
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_unsupported_object_is_not_serialized(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        try:
+            backend._serialize(object())
+        except TypeError as exc:
+            assert "Unsupported cache value type" in str(exc)
+        else:
+            raise AssertionError("unsupported objects must not be serialized")
