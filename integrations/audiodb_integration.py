@@ -20,6 +20,16 @@ class AudioDBAPI:
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second
 
+    def _sanitize_exception(self, error: requests.exceptions.RequestException) -> str:
+        """Return request error text without leaking API keys embedded in URLs."""
+        message = str(error)
+        keys_to_redact = [self.api_key, "123"]
+        for key in keys_to_redact:
+            if key:
+                message = message.replace(f"/{key}/", "/[REDACTED]/")
+                message = message.replace(str(key), "[REDACTED]")
+        return message
+
     def _rate_limit(self):
         """Ensure we don't exceed rate limits."""
         current_time = time.time()
@@ -45,7 +55,7 @@ class AudioDBAPI:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"AudioDB API error: {e}")
+            print(f"AudioDB API error: {self._sanitize_exception(e)}")
             return None
 
     def search_artist(self, artist_name: str) -> dict | None:

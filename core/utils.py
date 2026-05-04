@@ -18,6 +18,44 @@ except ImportError:
 
 
 # JSON utilities
+def resolve_safe_output_path(
+    path: Path | str,
+    base_dir: Path | str,
+    allowed_suffixes: set[str],
+) -> Path:
+    """Resolve a user-provided output path under a trusted base directory."""
+    requested_path = Path(path)
+    if requested_path.is_absolute():
+        raise ValueError("Output path must be relative")
+
+    if ".." in requested_path.parts:
+        raise ValueError("Output path cannot contain parent directory references")
+
+    base_path = Path(base_dir).resolve()
+    relative_path = requested_path
+    if requested_path.parts and requested_path.parts[0] == base_path.name:
+        remaining_parts = requested_path.parts[1:]
+        relative_path = Path(*remaining_parts) if remaining_parts else Path(requested_path.name)
+
+    if relative_path.suffix.lower() not in allowed_suffixes:
+        allowed = ", ".join(sorted(allowed_suffixes))
+        raise ValueError(f"Output path must use one of these suffixes: {allowed}")
+
+    resolved_path = (base_path / relative_path).resolve()
+    try:
+        resolved_path.relative_to(base_path)
+    except ValueError as e:
+        raise ValueError("Output path must stay within the application output directory") from e
+
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    return resolved_path
+
+
+def resolve_safe_data_output_path(path: Path | str, allowed_suffixes: set[str]) -> Path:
+    """Resolve an output path under the repository's data directory."""
+    return resolve_safe_output_path(path, Path(__file__).resolve().parent.parent / "data", allowed_suffixes)
+
+
 def read_json(path: Path | str, default: Any = None) -> Any:
     """
     Read JSON file safely.

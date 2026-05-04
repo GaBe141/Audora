@@ -13,7 +13,7 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
 class LastFmAPI:
@@ -24,6 +24,13 @@ class LastFmAPI:
         self.session = requests.Session()
         self.last_request_time = 0
         self.rate_limit_delay = 0.2  # 5 requests per second max
+
+    def _sanitize_exception(self, error: requests.exceptions.RequestException) -> str:
+        """Return request error text without leaking the API key."""
+        message = str(error)
+        if self.api_key:
+            message = message.replace(self.api_key, "[REDACTED]")
+        return message
 
     def _rate_limit(self):
         """Ensure we don't exceed rate limits."""
@@ -56,9 +63,10 @@ class LastFmAPI:
         except APIResponseError:
             raise
         except requests.exceptions.RequestException as e:
-            logger.error("Last.fm request failed for %s: %s", method, e)
+            sanitized_error = self._sanitize_exception(e)
+            logger.error("Last.fm request failed for %s: %s", method, sanitized_error)
             raise APIConnectionError(
-                message=f"Last.fm request failed: {e}",
+                message=f"Last.fm request failed: {sanitized_error}",
                 details={"method": method},
             ) from e
         except json.JSONDecodeError as e:

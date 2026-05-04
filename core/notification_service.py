@@ -25,6 +25,55 @@ import aiohttp
 import jinja2  # type: ignore[import-untyped]
 
 
+def _is_restricted_ip_address(ip: str) -> bool:
+    """Return True when the IP belongs to a non-public range."""
+    try:
+        parsed = ipaddress.ip_address(ip)
+        return (
+            parsed.is_private
+            or parsed.is_loopback
+            or parsed.is_link_local
+            or parsed.is_multicast
+            or parsed.is_reserved
+            or parsed.is_unspecified
+        )
+    except ValueError:
+        return True
+
+
+class PublicOnlyResolver(aiohttp.abc.AbstractResolver):
+    """Resolver that rejects private or otherwise restricted network addresses."""
+
+    async def resolve(
+        self,
+        host: str,
+        port: int = 0,
+        family: int = socket.AF_INET,
+    ) -> list[dict[str, Any]]:
+        resolved_hosts: list[dict[str, Any]] = []
+        for info in socket.getaddrinfo(host, port, family=family, proto=socket.IPPROTO_TCP):
+            address_family, socket_type, protocol, canonical_name, address = info
+            resolved_ip = address[0]
+            if _is_restricted_ip_address(resolved_ip):
+                raise ValueError(
+                    "Webhook URL resolves to a private or restricted network address"
+                )
+            resolved_hosts.append(
+                {
+                    "hostname": canonical_name or host,
+                    "host": resolved_ip,
+                    "port": address[1],
+                    "family": address_family,
+                    "proto": protocol,
+                    "flags": 0,
+                }
+            )
+        return resolved_hosts
+
+    async def close(self) -> None:
+        """No resolver resources need explicit cleanup."""
+
+
 class NotificationPriority(Enum):
     """Notification priority levels."""
 
@@ -213,18 +262,11 @@ class EnhancedNotificationService:
 
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
-        try:
-            parsed = ipaddress.ip_address(ip)
-            return (
-                parsed.is_private
-                or parsed.is_loopback
-                or parsed.is_link_local
-                or parsed.is_multicast
-                or parsed.is_reserved
-                or parsed.is_unspecified
-            )
-        except ValueError:
-            return True
+        return _is_restricted_ip_address(ip)
+
+    def _public_only_connector(self) -> aiohttp.TCPConnector:
+        """Create a connector that re-validates DNS at connection time."""
+        return aiohttp.TCPConnector(resolver=PublicOnlyResolver())
 
     def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
         """Validate outbound webhook URL to reduce SSRF risk."""
@@ -649,8 +691,12 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                aiohttp.ClientSession(connector=self._public_only_connector()) as session,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -716,8 +762,12 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                aiohttp.ClientSession(connector=self._public_only_connector()) as session,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -774,10 +824,15 @@ System status: {{ system_status }}
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
             timeout = webhook_config.get("timeout", 30)
 
+            connector = None if self._allow_private_webhooks() else self._public_only_connector()
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(connector=connector) as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
