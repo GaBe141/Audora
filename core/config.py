@@ -33,8 +33,8 @@ class SecureConfig:
             )
             return
 
-        # Load with explicit encoding and override
-        load_dotenv(dotenv_path=str(self.env_file), override=True, encoding="utf-8")
+        # Preserve values injected by the runtime or secrets manager over local files.
+        load_dotenv(dotenv_path=str(self.env_file), override=False, encoding="utf-8")
 
         # Validate file permissions (Unix-like systems)
         if hasattr(os, "stat") and not sys.platform.startswith("win"):

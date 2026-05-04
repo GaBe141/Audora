@@ -47,6 +47,7 @@ env_data
 credentials.*
 config.ini
 config/*_config.json
+config/social_apis.local.json
 !config/*.template
 !config/*.example
 
