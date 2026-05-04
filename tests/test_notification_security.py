@@ -1,8 +1,15 @@
 """Security tests for notification webhook URL validation."""
 
+import asyncio
+
 import pytest
 
-from core.notification_service import EnhancedNotificationService
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
 
 
 class TestWebhookUrlValidation:
@@ -27,3 +34,54 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+
+class _FakePostContext:
+    def __init__(self, captured_kwargs):
+        self.status = 200
+        self._captured_kwargs = captured_kwargs
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    async def text(self):
+        return ""
+
+
+class _FakeClientSession:
+    captured_kwargs = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    def post(self, _url, **kwargs):
+        type(self).captured_kwargs = kwargs
+        return _FakePostContext(kwargs)
+
+
+def test_custom_webhook_disables_redirects(monkeypatch):
+    svc = EnhancedNotificationService()
+    svc.config["webhook"]["url"] = "https://example.com/webhook"
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(None, None, None, None, ("93.184.216.34", 443))],
+    )
+    monkeypatch.setattr("core.notification_service.aiohttp.ClientSession", _FakeClientSession)
+
+    message = NotificationMessage(
+        title="Test",
+        content="Body",
+        priority=NotificationPriority.HIGH,
+        channels=[NotificationChannel.WEBHOOK],
+    )
+
+    result = asyncio.run(svc._send_webhook(message))
+
+    assert result["success"] is True
+    assert _FakeClientSession.captured_kwargs["allow_redirects"] is False

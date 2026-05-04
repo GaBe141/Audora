@@ -6,6 +6,7 @@ Installs dependencies, configures services, and validates the system.
 
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -61,6 +62,18 @@ class EnhancedMusicDiscoverySetup:
             "python_version": sys.version,
             "architecture": platform.architecture()[0],
         }
+
+    def _write_private_text(self, path: Path, content: str) -> None:
+        """Write secret-capable configuration with owner-only permissions."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            path.write_text(content, encoding="utf-8")
+            return
+
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        path.chmod(0o600)
 
     def _setup_logging(self) -> logging.Logger:
         """Set up logging for setup process."""
@@ -191,8 +204,7 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
-                    json.dump(config_data, f, indent=2)
+                self._write_private_text(config_path, json.dumps(config_data, indent=2))
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -473,7 +485,7 @@ System Status: {{ system_status }}
         for template_name, template_content in templates.items():
             template_path = self.templates_dir / template_name
             try:
-                with open(template_path, "w") as f:
+                with template_path.open("w") as f:
                     f.write(template_content.strip())
                 self.logger.info(f"  Created template: {template_name}")
             except Exception as e:
@@ -522,8 +534,7 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
-                f.write(env_template.strip())
+            self._write_private_text(env_path, env_template.strip())
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True

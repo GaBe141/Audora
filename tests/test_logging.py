@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from io import StringIO
 
 from core.logging_config import (
@@ -9,6 +10,7 @@ from core.logging_config import (
     JSONFormatter,
     LogContext,
     get_logger,
+    redact_sensitive_data,
     setup_logging,
 )
 
@@ -67,6 +69,33 @@ class TestJSONFormatter:
         assert "exception" in data
         assert data["exception"]["type"] == "ValueError"
         assert "test error" in (data["exception"].get("message") or "")
+
+    def test_format_redacts_sensitive_values(self):
+        formatter = JSONFormatter()
+        record = logging.LogRecord(
+            name="test.logger",
+            level=logging.INFO,
+            pathname="",
+            lineno=10,
+            msg="request failed: api_key=supersecret&method=x",
+            args=(),
+            exc_info=None,
+        )
+        record.funcName = "test_func"
+        record.module = "test_module"
+        record.thread = 1
+        record.threadName = "MainThread"
+        output = formatter.format(record)
+        data = json.loads(output)
+        assert "supersecret" not in data["message"]
+        assert "api_key=[REDACTED]" in data["message"]
+
+    def test_redacts_sensitive_extra_fields(self):
+        redacted = redact_sensitive_data(
+            {"api_key": "secret-key", "nested": {"Authorization": "Bearer token"}}
+        )
+        assert redacted["api_key"] == "[REDACTED]"
+        assert redacted["nested"]["Authorization"] == "[REDACTED]"
 
 
 class TestColoredConsoleFormatter:
@@ -151,3 +180,22 @@ class TestSetupLogging:
         )
         root = logging.getLogger()
         assert root.level == logging.DEBUG
+
+    def test_file_logs_use_private_permissions(self, tmp_path):
+        setup_logging(
+            log_dir=str(tmp_path),
+            log_level="INFO",
+            app_name="audora_secure",
+            json_logs=True,
+            console_output=False,
+            file_output=True,
+        )
+        for handler in logging.getLogger().handlers:
+            handler.close()
+        logging.getLogger().handlers = []
+
+        log_files = list(tmp_path.glob("audora_secure*.log"))
+        assert len(log_files) == 2
+        if os.name != "nt":
+            for log_file in log_files:
+                assert log_file.stat().st_mode & 0o777 == 0o600

@@ -8,6 +8,48 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
+def safe_output_path(
+    base_dir: Path | str,
+    filename: Path | str,
+    *,
+    allowed_suffixes: set[str] | None = None,
+) -> Path:
+    """Resolve a caller-supplied output filename inside a fixed base directory."""
+    candidate = Path(filename)
+    if candidate.is_absolute():
+        raise ValueError("Output filename must be relative")
+
+    if allowed_suffixes and candidate.suffix.lower() not in allowed_suffixes:
+        allowed = ", ".join(sorted(allowed_suffixes))
+        raise ValueError(f"Output filename must use one of these extensions: {allowed}")
+
+    base_path = Path(base_dir).resolve()
+    resolved = (base_path / candidate).resolve()
+    try:
+        resolved.relative_to(base_path)
+    except ValueError as e:
+        raise ValueError("Output filename must stay within the configured output directory") from e
+
+    return resolved
+
+
+def resolve_output_filepath(
+    default_base_dir: Path | str,
+    requested_path: Path | str,
+    *,
+    allowed_suffixes: set[str] | None = None,
+) -> Path:
+    """Resolve a possibly directory-qualified output path under a fixed default base."""
+    requested = Path(requested_path)
+    try:
+        requested.relative_to(Path(default_base_dir))
+        requested = Path(*requested.parts[len(Path(default_base_dir).parts) :])
+    except ValueError:
+        pass
+    return safe_output_path(default_base_dir, requested, allowed_suffixes=allowed_suffixes)
+
+
 # Re-export for convenience
 try:
     import pandas as pd
@@ -346,10 +388,8 @@ def save_report(
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{timestamp_str}.json"
 
-    # Create full path
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    filepath = output_path / filename
+    filepath = safe_output_path(output_dir, filename, allowed_suffixes={".json"})
+    filepath.parent.mkdir(parents=True, exist_ok=True)
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:
