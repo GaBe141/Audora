@@ -190,9 +190,16 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
+        to_save = self._scrub_secrets({k: self.config[k] for k in saveable_keys if k in self.config})
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -204,12 +211,37 @@ class EnhancedNotificationService:
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
-        return os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
+        if os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS"):
+            self.logger.warning(
+                "AUDORA_ALLOW_PRIVATE_WEBHOOKS is ignored; private webhook targets are blocked"
+            )
+        return False
+
+    def _scrub_secrets(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Return a copy of config without credential-bearing notification fields."""
+        secret_keys = {
+            "api_key",
+            "api_secret",
+            "authorization",
+            "password",
+            "token",
+            "webhook_url",
+            "url",
         }
+
+        def scrub(value: Any, key: str | None = None) -> Any:
+            if key and key.lower() in secret_keys:
+                return ""
+            if isinstance(value, dict):
+                return {
+                    child_key: scrub(child_value, child_key)
+                    for child_key, child_value in value.items()
+                }
+            if isinstance(value, list):
+                return [scrub(item) for item in value]
+            return value
+
+        return scrub(config)
 
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
@@ -650,7 +682,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +749,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +809,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
