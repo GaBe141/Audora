@@ -4,6 +4,7 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
@@ -189,9 +190,17 @@ class EnhancedNotificationService:
         """
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
+        self._validate_persisted_webhook_config()
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         try:
             with config_path.open("w") as f:
@@ -201,6 +210,26 @@ class EnhancedNotificationService:
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _validate_persisted_webhook_config(self) -> None:
+        """Reject unsafe outbound webhook targets before storing them."""
+        slack_url = self.config.get("slack", {}).get("webhook_url")
+        if slack_url:
+            self.config["slack"]["webhook_url"] = self._validate_webhook_url(
+                slack_url, allow_private=False
+            )
+
+        discord_url = self.config.get("discord", {}).get("webhook_url")
+        if discord_url:
+            self.config["discord"]["webhook_url"] = self._validate_webhook_url(
+                discord_url, allow_private=False
+            )
+
+        custom_url = self.config.get("webhook", {}).get("url")
+        if custom_url:
+            self.config["webhook"]["url"] = self._validate_webhook_url(
+                custom_url, allow_private=self._allow_private_webhooks()
+            )
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
@@ -553,7 +582,7 @@ System status: {{ system_status }}
             msg.attach(MIMEText(text_content, "plain"))
 
             # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            html_content = html.escape(text_content).replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
             # Add attachments
