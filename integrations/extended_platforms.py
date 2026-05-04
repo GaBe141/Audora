@@ -35,7 +35,11 @@ class RedditMusicAPI:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    auth_url, auth=auth, headers=headers, data=data
+                    auth_url,
+                    auth=auth,
+                    headers=headers,
+                    data=data,
+                    allow_redirects=False,
                 ) as response:
                     if response.status == 200:
                         token_data = await response.json()
