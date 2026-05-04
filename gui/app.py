@@ -4,18 +4,36 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
+import asyncio
+import base64
+import hmac
+import io
 import json
+import os
 import subprocess
 import sys
+from ipaddress import ip_address
 from pathlib import Path
+from urllib.parse import urlparse
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import Response, abort, request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.data_store import EnhancedMusicDataStore
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
 
 app = dash.Dash(
     __name__,
@@ -23,6 +41,92 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Audora",
 )
+
+SAFE_HTTP_METHODS = {"GET", "HEAD", "OPTIONS"}
+GUI_USERNAME = os.getenv("AUDORA_GUI_USERNAME", "")
+GUI_PASSWORD = os.getenv("AUDORA_GUI_PASSWORD", "")
+
+
+def _env_flag(name: str) -> bool:
+    """Return True for common truthy environment variable values."""
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_loopback_client(remote_addr: str | None) -> bool:
+    """Return True when a request originates from the local machine."""
+    if not remote_addr:
+        return False
+    try:
+        return ip_address(remote_addr).is_loopback
+    except ValueError:
+        return remote_addr.lower() == "localhost"
+
+
+def _basic_auth_configured() -> bool:
+    """Return True when GUI basic auth credentials are available."""
+    return bool(GUI_USERNAME and GUI_PASSWORD)
+
+
+def _authorized_by_basic_auth() -> bool:
+    """Validate an HTTP Basic Authorization header using constant-time comparison."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Basic "):
+        return False
+
+    try:
+        decoded = base64.b64decode(auth_header.removeprefix("Basic "), validate=True).decode()
+    except (ValueError, UnicodeDecodeError):
+        return False
+
+    expected = f"{GUI_USERNAME}:{GUI_PASSWORD}"
+    return hmac.compare_digest(decoded, expected)
+
+
+def _authentication_challenge() -> Response:
+    """Return a Basic auth challenge without exposing dashboard internals."""
+    return Response(
+        "Authentication required",
+        status=401,
+        headers={"WWW-Authenticate": 'Basic realm="Audora Dashboard"'},
+    )
+
+
+def _request_origin_allowed() -> bool:
+    """Validate Origin/Referer for mutating Dash callback requests."""
+    origin = request.headers.get("Origin")
+    referer = request.headers.get("Referer")
+    source = origin or referer
+    if not source:
+        return False
+
+    parsed_source = urlparse(source)
+    if not parsed_source.scheme or not parsed_source.netloc:
+        return False
+
+    return (
+        parsed_source.scheme == request.scheme
+        and parsed_source.netloc.lower() == request.host.lower()
+    )
+
+
+@app.server.before_request
+def _protect_dashboard_requests():
+    """Deny unsafe dashboard access unless it is local or explicitly authenticated."""
+    if request.method not in SAFE_HTTP_METHODS and not _request_origin_allowed():
+        abort(403)
+
+    if _basic_auth_configured():
+        if not _authorized_by_basic_auth():
+            return _authentication_challenge()
+        return None
+
+    if _is_loopback_client(request.remote_addr):
+        return None
+
+    if _env_flag("AUDORA_GUI_ALLOW_REMOTE"):
+        abort(403, "Remote dashboard access requires AUDORA_GUI_USERNAME and AUDORA_GUI_PASSWORD")
+
+    abort(403)
 
 # ---------------------------------------------------------------------------
 # Layout helpers
@@ -366,7 +470,6 @@ def _run_command(args: list[str]) -> tuple[str, str]:
 
 def _get_data_store():
     """Return an EnhancedMusicDataStore pointed at the default DB path."""
-    from core.data_store import EnhancedMusicDataStore
     db_path = PROJECT_ROOT / "data" / "enhanced_music_trends.db"
     return EnhancedMusicDataStore(str(db_path))
 
@@ -560,8 +663,6 @@ def search_history(_n, platform, min_score, days, artist_filter):
 def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
-    import io
-    import pandas as pd
     df = pd.DataFrame(table_data)
     buf = io.StringIO()
     df.to_csv(buf, index=False)
@@ -586,7 +687,6 @@ def export_csv(_n, table_data):
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
     try:
-        from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
             svc.config["slack"]["webhook_url"] = slack_url
@@ -621,13 +721,6 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         if not url:
             return "No URL"
         try:
-            import asyncio
-            from core.notification_service import (
-                EnhancedNotificationService,
-                NotificationChannel,
-                NotificationMessage,
-                NotificationPriority,
-            )
             svc = EnhancedNotificationService()
             svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
             channel = getattr(NotificationChannel, channel_enum_name)
