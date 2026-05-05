@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,56 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for safe Redis payload serialization."""
+
+    def _backend_without_init(self):
+        return object.__new__(RedisCacheBackend)
+
+    def test_serializes_json_compatible_values_without_pickle(self):
+        backend = self._backend_without_init()
+        payload = {"artist": "Aphex Twin", "score": 98, "tags": ["electronic"]}
+
+        serialized = backend._serialize(payload)
+
+        envelope = json.loads(serialized.decode("utf-8"))
+        assert envelope == {"v": 1, "type": "json", "value": payload}
+        assert backend._deserialize(serialized) == payload
+
+    def test_serializes_bytes_as_hex_payload(self):
+        backend = self._backend_without_init()
+
+        serialized = backend._serialize(b"\x00audora\xff")
+
+        assert backend._deserialize(serialized) == b"\x00audora\xff"
+
+    def test_serializes_dataframes_as_typed_json_payload(self):
+        backend = self._backend_without_init()
+        frame = pd.DataFrame({"track": ["A", "B"], "score": [1.5, 2.5]})
+
+        restored = backend._deserialize(backend._serialize(frame))
+
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_legacy_or_malformed_payloads(self):
+        backend = self._backend_without_init()
+
+        assert backend._deserialize(b"not json") is None
+        assert backend._deserialize(json.dumps({"v": 1, "payload": "legacy"}).encode()) is None
+
+    def test_unsupported_payload_types_are_not_serialized(self):
+        backend = self._backend_without_init()
+
+        with pytest.raises(TypeError, match="Unsupported Redis cache payload type"):
+            backend._serialize(object())
+
+    def test_cache_keys_use_sha256_length_hashes(self):
+        manager = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+
+        cache_key = manager._build_cache_key("fn", ("arg",), {"kw": "value"})
+        _, args_hash, kwargs_hash = cache_key.split(":")
+
+        assert len(args_hash) == 64
+        assert len(kwargs_hash) == 64
