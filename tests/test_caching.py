@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import json
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +126,70 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security tests for Redis cache serialization envelopes."""
+
+    @pytest.fixture
+    def redis_backend(self, monkeypatch):
+        monkeypatch.setattr(RedisCacheBackend, "__init__", lambda self: None)
+        backend = RedisCacheBackend()
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_json_payload_round_trip(self, redis_backend):
+        value = {"artist": "Test Artist", "score": 98.5, "tags": ["pop", "viral"]}
+        serialized = redis_backend._serialize(value)
+
+        assert redis_backend._deserialize(serialized) == value
+
+    def test_bytes_payload_round_trip(self, redis_backend):
+        value = b"\x00audora-cache"
+        serialized = redis_backend._serialize(value)
+
+        assert redis_backend._deserialize(serialized) == value
+
+    def test_dataframe_payload_round_trip(self, redis_backend):
+        value = pd.DataFrame([{"track": "One", "score": 1}, {"track": "Two", "score": 2}])
+        serialized = redis_backend._serialize(value)
+
+        pd.testing.assert_frame_equal(redis_backend._deserialize(serialized), value)
+
+    def test_rejects_legacy_signed_pickle_envelope(self, redis_backend):
+        payload = base64.b64encode(b"not actually pickle").decode("ascii")
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "unused",
+            "payload": payload,
+        }
+
+        assert redis_backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_tampered_payload(self, redis_backend):
+        serialized = redis_backend._serialize({"safe": True})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"] = base64.b64encode(b'{"format":"json","value":{"safe":false}}').decode(
+            "ascii"
+        )
+
+        assert redis_backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_unsupported_object_is_not_serialized(self, redis_backend):
+        class Unsupported:
+            pass
+
+        with pytest.raises(TypeError):
+            redis_backend._serialize(Unsupported())
+
+    def test_cache_key_uses_sha256_digest(self):
+        manager = CacheManager(backend=LocalCacheBackend())
+        cache_key = manager._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        args_digest = hashlib.sha256(json.dumps(("arg",), sort_keys=True).encode()).hexdigest()
+        kwargs_digest = hashlib.sha256(
+            json.dumps({"kw": "value"}, sort_keys=True).encode()
+        ).hexdigest()
+
+        assert cache_key == f"prefix:{args_digest}:{kwargs_digest}"
+        assert len(cache_key.split(":")[1]) == 64
