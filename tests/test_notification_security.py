@@ -1,5 +1,6 @@
 """Security tests for notification transport hardening."""
 
+import asyncio
 import ssl
 from unittest.mock import MagicMock, patch
 
@@ -49,8 +50,7 @@ class TestWebhookUrlValidation:
 class TestEmailTransportSecurity:
     """Validate SMTP credential and STARTTLS hardening."""
 
-    @pytest.mark.asyncio
-    async def test_rejects_plaintext_smtp_auth(self):
+    def test_rejects_plaintext_smtp_auth(self):
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -68,13 +68,12 @@ class TestEmailTransportSecurity:
             channels=[NotificationChannel.EMAIL],
         )
 
-        result = await svc._send_email(message)
+        result = asyncio.run(svc._send_email(message))
 
         assert result["success"] is False
         assert "without TLS" in result["error"]
 
-    @pytest.mark.asyncio
-    async def test_starttls_uses_verified_ssl_context(self):
+    def test_starttls_uses_verified_ssl_context(self):
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -96,7 +95,7 @@ class TestEmailTransportSecurity:
         smtp_instance.__exit__.return_value = None
 
         with patch("core.notification_service.smtplib.SMTP", return_value=smtp_instance):
-            result = await svc._send_email(message)
+            result = asyncio.run(svc._send_email(message))
 
         assert result["success"] is True
         context = smtp_instance.starttls.call_args.kwargs["context"]
