@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
+import pickle
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +86,47 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+
+class TestRedisSerialization:
+    """Security tests for Redis cache serialization without a live Redis server."""
+
+    def test_serializes_json_safe_values_without_pickle(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = {"artist": "Example", "scores": [1, 2], "raw": b"abc", "tags": ("pop", "rock")}
+
+        serialized = backend._serialize(value)
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["format"] == "json"
+        assert backend._deserialize(serialized) == value
+
+    def test_serializes_pandas_dataframe(self):
+        backend = object.__new__(RedisCacheBackend)
+        df = pd.DataFrame([{"artist": "Example", "score": 99.5}])
+
+        restored = backend._deserialize(backend._serialize(df))
+
+        pd.testing.assert_frame_equal(restored, df)
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        backend = object.__new__(RedisCacheBackend)
+        legacy_payload = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "ignored",
+            "payload": base64.b64encode(pickle.dumps({"unsafe": True})).decode("ascii"),
+        }
+
+        assert backend._deserialize(json.dumps(legacy_payload).encode("utf-8")) is None
+
+    def test_uses_sha256_for_argument_cache_keys(self, mock_cache):
+        cache_key = mock_cache._build_cache_key("fn", ("artist",), {"region": "US"})
+        digest_parts = cache_key.split(":")[1:]
+
+        assert len(digest_parts) == 2
+        assert all(len(part) == 64 for part in digest_parts)
 
 
 class TestCachedDecorator:
