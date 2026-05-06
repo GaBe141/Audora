@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Security validation and configuration setup for Audora."""
 
+import os
 import sys
-from glob import glob
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -17,11 +17,10 @@ def main():
     print("🔐 Audora - Security Configuration Validator")
     print("=" * 60)
 
-    # Initialize config manager
     config = SecureConfig()
-
-    # Run interactive setup if needed
-    config.setup_interactive()
+    if not config.env_file.exists():
+        print(f"ℹ️  No .env file found at: {config.env_file}")
+        print("   Run `python -m core.config` if you want to create a local template.")
 
     print("\n" + "=" * 60)
     print("🔍 Configuration Validation")
@@ -104,8 +103,8 @@ def main():
     found_credentials = []
     for pattern in credential_patterns:
         if pattern.startswith("*"):
-            matches = glob(str(config.project_root / pattern))
-            found_credentials.extend(matches)
+            matches = config.project_root.glob(pattern)
+            found_credentials.extend(str(match) for match in matches)
         else:
             # Direct file check
             file_path = config.project_root / pattern

@@ -2,7 +2,7 @@
 
 import subprocess
 
-from gui import app as gui_app
+import gui.app as gui_app
 
 
 def test_run_command_blocked_by_default(monkeypatch):

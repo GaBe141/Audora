@@ -5,11 +5,10 @@ Includes live trend dashboard, history search, notification settings, and accura
 """
 
 import asyncio
-import json
 import os
 import subprocess
 import sys
-from enum import Enum
+from enum import StrEnum
 from io import StringIO
 from pathlib import Path
 
@@ -41,7 +40,7 @@ app = dash.Dash(
 # Layout helpers
 # ---------------------------------------------------------------------------
 
-class GuiAction(str, Enum):
+class GuiAction(StrEnum):
     """Actions that can trigger local project commands from the GUI."""
 
     DISCOVERY = "discovery"
