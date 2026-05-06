@@ -14,7 +14,7 @@ class DummyStore:
         return pd.DataFrame(
             [
                 {
-                    "artist": "a" * 40 + "X",
+                    "artist": "a" * 120 + "X",
                     "track_name": "Track One",
                     "score": 90.0,
                     "metadata": {},
@@ -45,4 +45,4 @@ def test_history_artist_filter_caps_input_length(monkeypatch):
     rows = gui_app.search_history(1, None, 0, 30, ("a" * 200) + "X")
 
     assert len(rows) == 1
-    assert rows[0]["artist"] == "a" * 40 + "X"
+    assert rows[0]["artist"] == "a" * 120 + "X"
