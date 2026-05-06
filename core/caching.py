@@ -5,6 +5,7 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
+import io
 import json
 import logging
 import time
@@ -237,14 +238,14 @@ class RedisCacheBackend(CacheBackend):
                 raise ValueError("Pandas is required to load DataFrame cache payloads")
             if not isinstance(payload_value, str):
                 raise ValueError("Invalid DataFrame cache payload")
-            return pd.read_json(payload_value, orient="split")
+            return pd.read_json(io.StringIO(payload_value), orient="split")
 
         if payload_type == "pandas_series":
             if not PANDAS_AVAILABLE or pd is None:
                 raise ValueError("Pandas is required to load Series cache payloads")
             if not isinstance(payload_value, str):
                 raise ValueError("Invalid Series cache payload")
-            return pd.read_json(payload_value, orient="split", typ="series")
+            return pd.read_json(io.StringIO(payload_value), orient="split", typ="series")
 
         raise ValueError(f"Unsupported cache payload type: {payload_type}")
 
