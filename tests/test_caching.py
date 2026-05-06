@@ -1,6 +1,5 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
-import pickle
 import time
 
 from core.caching import (
@@ -143,7 +142,7 @@ class TestRedisCacheSerialization:
 
     def test_rejects_legacy_pickle_payload(self):
         backend = object.__new__(RedisCacheBackend)
-        unsafe_payload = pickle.dumps({"legacy": True})
+        unsafe_payload = b"\x80\x04}\x94."
 
         assert backend._deserialize(unsafe_payload) is None
 

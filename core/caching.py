@@ -197,9 +197,7 @@ class RedisCacheBackend(CacheBackend):
         try:
             json.dumps(value)
         except (TypeError, ValueError) as e:
-            raise TypeError(
-                f"Unsupported Redis cache value type: {type(value).__name__}"
-            ) from e
+            raise TypeError(f"Unsupported Redis cache value type: {type(value).__name__}") from e
 
         return {"type": "json", "payload": value}
 

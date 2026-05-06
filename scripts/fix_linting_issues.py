@@ -80,8 +80,7 @@ def main() -> None:
 
     # Step 5: Summary
     print_step(5, "Summary")
-    print(
-        """
+    print("""
     ✅ Type stubs installed
     ✅ Code formatted with Black
     ✅ Auto-fixes applied with Ruff
@@ -96,8 +95,7 @@ def main() -> None:
     - Type annotations in notification_service.py (lines 87-89, 613, 782)
     - Sequence types in data_store.py for pandas compatibility
     - Logging formatter type in logging_config.py
-    """
-    )
+    """)
 
 
 if __name__ == "__main__":
