@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,34 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Serialization tests that do not require a live Redis server."""
+
+    def _backend_without_connection(self) -> RedisCacheBackend:
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-cache-signing-key"
+        return backend
+
+    def test_signed_json_round_trip_for_dict(self):
+        backend = self._backend_without_connection()
+        payload = {"artist": "Test Artist", "scores": [1, 2, 3]}
+
+        serialized = backend._serialize(payload)
+
+        assert backend._deserialize(serialized) == payload
+
+    def test_signed_json_round_trip_for_dataframe(self):
+        backend = self._backend_without_connection()
+        df = pd.DataFrame([{"track_name": "Song", "score": 91.5}])
+
+        restored = backend._deserialize(backend._serialize(df))
+
+        pd.testing.assert_frame_equal(restored, df)
+
+    def test_rejects_unsigned_legacy_or_malformed_payloads(self):
+        backend = self._backend_without_connection()
+        malformed = json.dumps({"v": 1, "payload": "not-trusted"}).encode("utf-8")
+
+        assert backend._deserialize(malformed) is None

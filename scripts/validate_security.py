@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
-"""Security validation and configuration setup for Spotify Insights."""
+"""Security validation and configuration setup for Audora."""
 
+import os
 import sys
 from pathlib import Path
 
-# Add src to path for imports
-src_path = Path(__file__).resolve().parent / "src"
-sys.path.insert(0, str(src_path))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-# Import after path modification
-from src.config import SecureConfig  # noqa: E402
+from core.config import SecureConfig  # noqa: E402
 
 
 def main():
     """Main security validation and setup routine."""
-    print("🔐 Spotify Insights - Security Configuration Validator")
+    print("🔐 Audora - Security Configuration Validator")
     print("=" * 60)
 
-    # Initialize config manager
     config = SecureConfig()
-
-    # Run interactive setup if needed
-    config.setup_interactive()
+    if not config.env_file.exists():
+        print(f"ℹ️  No .env file found at: {config.env_file}")
+        print("   Run `python -m core.config` if you want to create a local template.")
 
     print("\n" + "=" * 60)
     print("🔍 Configuration Validation")
@@ -99,21 +98,20 @@ def main():
     else:
         security_checks.append(("⚠️", ".gitignore missing"))
 
-    # Check for credential files in current directory
+    # Check for credential files in project root
     credential_patterns = ["env_data", "*_keys", "*_secrets", "credentials.*"]
     found_credentials = []
     for pattern in credential_patterns:
         if pattern.startswith("*"):
-            # Use glob for wildcard patterns
-            from glob import glob
-
-            matches = glob(pattern)
-            found_credentials.extend(matches)
+            matches = config.project_root.glob(pattern)
+            found_credentials.extend(str(match) for match in matches)
         else:
             # Direct file check
             file_path = config.project_root / pattern
             if file_path.exists():
-                found_credentials.append(pattern)
+                found_credentials.append(str(file_path))
+
+    found_credentials = [str(Path(match).relative_to(config.project_root)) for match in found_credentials]
 
     if found_credentials:
         security_checks.append(
@@ -121,6 +119,20 @@ def main():
         )
     else:
         security_checks.append(("✅", "No exposed credential files found"))
+
+    if os.getenv("AUDORA_ENABLE_GUI_ACTIONS", "").strip().lower() in {"1", "true", "yes", "on"}:
+        security_checks.append(
+            ("⚠️", "GUI subprocess actions are enabled; expose the Dash app only on trusted hosts")
+        )
+    else:
+        security_checks.append(("✅", "GUI subprocess actions disabled by default"))
+
+    if os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {"1", "true", "yes", "on"}:
+        security_checks.append(
+            ("⚠️", "Private webhook targets are enabled; this weakens SSRF protections")
+        )
+    else:
+        security_checks.append(("✅", "Private webhook targets blocked by default"))
 
     for icon, message in security_checks:
         print(f"{icon} {message}")
@@ -131,11 +143,11 @@ def main():
 
     if status["spotify"]["configured"]:
         print("✅ Ready to run Spotify analysis!")
-        print("   Try: python -m src.main")
+        print("   Try: python main.py --mode single")
 
         if status["lastfm"]["configured"]:
             print("✅ Ready for global trend comparison!")
-            print("   Try: python -m src.lastfm_main")
+            print("   Try: python -m core.lastfm_main")
         else:
             print("💡 Optional: Configure Last.fm for global trend analysis")
     else:

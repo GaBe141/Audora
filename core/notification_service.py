@@ -8,8 +8,8 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -190,14 +190,21 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -205,6 +212,15 @@ class EnhancedNotificationService:
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
         return os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _allow_private_smtp(self) -> bool:
+        """Whether private network SMTP targets are allowed."""
+        return os.getenv("AUDORA_ALLOW_PRIVATE_SMTP", "").strip().lower() in {
             "1",
             "true",
             "yes",
@@ -226,6 +242,38 @@ class EnhancedNotificationService:
         except ValueError:
             return True
 
+    def _validate_outbound_hostname(
+        self,
+        hostname: str,
+        *,
+        port: int,
+        allow_private: bool = False,
+        target_name: str = "Outbound target",
+    ) -> str:
+        """Validate an outbound hostname to reduce SSRF risk."""
+        hostname = hostname.strip()
+        if not hostname:
+            raise ValueError(f"{target_name} must include a valid hostname")
+        if hostname.lower() == "localhost":
+            raise ValueError(f"Localhost {target_name.lower()}s are not allowed")
+
+        resolved_ips = set()
+        try:
+            # Validate all resolved addresses to avoid DNS-based bypass.
+            for info in socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP):
+                resolved_ips.add(info[4][0])
+        except socket.gaierror as e:
+            raise ValueError(f"Could not resolve {target_name.lower()} hostname: {hostname}") from e
+
+        if not allow_private:
+            for ip in resolved_ips:
+                if self._is_restricted_ip(ip):
+                    raise ValueError(
+                        f"{target_name} resolves to a private or restricted network address"
+                    )
+
+        return hostname
+
     def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
         """Validate outbound webhook URL to reduce SSRF risk."""
         parsed = urlparse(url.strip())
@@ -234,26 +282,34 @@ class EnhancedNotificationService:
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
 
-        hostname = parsed.hostname
-        if hostname.lower() == "localhost":
-            raise ValueError("Localhost webhook URLs are not allowed")
-
-        resolved_ips = set()
-        try:
-            # Validate all resolved addresses to avoid DNS-based bypass.
-            for info in socket.getaddrinfo(hostname, parsed.port or 443, proto=socket.IPPROTO_TCP):
-                resolved_ips.add(info[4][0])
-        except socket.gaierror as e:
-            raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
-
-        if not allow_private:
-            for ip in resolved_ips:
-                if self._is_restricted_ip(ip):
-                    raise ValueError(
-                        "Webhook URL resolves to a private or restricted network address"
-                    )
+        self._validate_outbound_hostname(
+            parsed.hostname,
+            port=parsed.port or 443,
+            allow_private=allow_private,
+            target_name="Webhook URL",
+        )
 
         return url
+
+    def _validate_smtp_target(
+        self, hostname: str, port: int | str, *, allow_private: bool = False
+    ) -> tuple[str, int]:
+        """Validate SMTP connection target to reduce SSRF risk."""
+        try:
+            smtp_port = int(port)
+        except (TypeError, ValueError) as e:
+            raise ValueError("SMTP port must be an integer") from e
+
+        if smtp_port < 1 or smtp_port > 65535:
+            raise ValueError("SMTP port must be between 1 and 65535")
+
+        validated_host = self._validate_outbound_hostname(
+            hostname,
+            port=smtp_port,
+            allow_private=allow_private,
+            target_name="SMTP server",
+        )
+        return validated_host, smtp_port
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -571,7 +627,12 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            smtp_host, smtp_port = self._validate_smtp_target(
+                email_config["smtp_server"],
+                email_config.get("port", 587),
+                allow_private=self._allow_private_smtp(),
+            )
+            server = smtplib.SMTP(smtp_host, smtp_port)
 
             if email_config.get("use_tls", True):
                 server.starttls()

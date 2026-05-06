@@ -27,3 +27,29 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+
+class TestSmtpHostValidation:
+    """Validate SSRF protections for SMTP notification targets."""
+
+    def test_rejects_localhost_smtp_targets(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="Localhost"):
+            svc._validate_smtp_target("localhost", 587)
+
+    def test_rejects_private_smtp_targets_by_default(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="private or restricted"):
+            svc._validate_smtp_target("10.0.0.1", 587)
+
+    def test_allows_private_smtp_when_explicitly_enabled(self):
+        svc = EnhancedNotificationService()
+        assert svc._validate_smtp_target("10.0.0.1", 587, allow_private=True) == (
+            "10.0.0.1",
+            587,
+        )
+
+    def test_rejects_invalid_smtp_ports(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="between 1 and 65535"):
+            svc._validate_smtp_target("example.com", 0, allow_private=True)
