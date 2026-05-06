@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,52 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256_digest(self):
+        manager = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+
+        cache_key = manager._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        digests = cache_key.split(":")[1:]
+
+        assert len(digests) == 2
+        assert all(len(digest) == 64 for digest in digests)
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for non-executable Redis cache serialization."""
+
+    def test_json_compatible_values_round_trip_without_pickle(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = {"artist": "Example", "scores": [1, 2, 3], "active": True}
+
+        serialized = backend._serialize(value)
+
+        assert b"pickle" not in serialized.lower()
+        assert backend._deserialize(serialized) == value
+
+    def test_dataframe_round_trip(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = pd.DataFrame([{"track": "One", "score": 90}, {"track": "Two", "score": 80}])
+
+        restored = backend._deserialize(backend._serialize(value))
+
+        pd.testing.assert_frame_equal(restored, value)
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        backend = object.__new__(RedisCacheBackend)
+        legacy_payload = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "unused",
+                "payload": "gASVBAAAAAAAAABOLg==",
+            }
+        ).encode("utf-8")
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_unsupported_objects_are_not_serialized(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            backend._serialize(object())
