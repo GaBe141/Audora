@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
+import pickle
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -58,6 +64,47 @@ class TestLocalCacheBackend:
         assert backend.get("d") == 4
         present = sum(1 for k in ("a", "b", "c") if backend.get(k) is not None)
         assert present == 2
+
+
+class TestRedisCacheSerialization:
+    """Validate Redis cache serialization avoids executable payloads."""
+
+    def _backend_without_redis_connection(self) -> RedisCacheBackend:
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_round_trips_json_safe_values(self):
+        backend = self._backend_without_redis_connection()
+        value = {
+            "artist": "Bjork",
+            "scores": [1, 2.5, True, None],
+            "position": ("global", 1),
+        }
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_round_trips_dataframes_without_pickle(self):
+        backend = self._backend_without_redis_connection()
+        frame = pd.DataFrame([{"track": "Hyperballad", "score": 98}])
+
+        restored = backend._deserialize(backend._serialize(frame))
+
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_legacy_pickle_cache_envelope(self):
+        backend = self._backend_without_redis_connection()
+        payload = pickle.dumps({"unsafe": "legacy"}, protocol=pickle.HIGHEST_PROTOCOL)
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "unused",
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        serialized = json.dumps(envelope).encode("utf-8")
+
+        assert backend._deserialize(serialized) is None
 
 
 class TestCacheManager:
