@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,42 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression coverage for safe Redis payload handling."""
+
+    def test_serialize_deserialize_json_value(self):
+        backend = object.__new__(RedisCacheBackend)
+        payload = {"artist": "Example", "score": 91.5, "tags": ["pop", "viral"]}
+
+        serialized = backend._serialize(payload)
+
+        assert backend._deserialize(serialized) == payload
+
+    def test_serialize_deserialize_bytes(self):
+        backend = object.__new__(RedisCacheBackend)
+        payload = b"binary payload"
+
+        serialized = backend._serialize(payload)
+
+        assert backend._deserialize(serialized) == payload
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = object.__new__(RedisCacheBackend)
+        unsafe_payload = pickle.dumps({"legacy": True})
+
+        assert backend._deserialize(unsafe_payload) is None
+
+    def test_rejects_unsupported_value_type(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        class Unsupported:
+            pass
+
+        try:
+            backend._serialize(Unsupported())
+        except TypeError as exc:
+            assert "Unsupported Redis cache value type" in str(exc)
+        else:
+            raise AssertionError("Unsupported values must not be serialized")
