@@ -10,8 +10,8 @@ import logging
 import os
 import socket
 import smtplib
-from datetime import datetime, timedelta
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -190,14 +190,21 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")

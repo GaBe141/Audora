@@ -1,8 +1,9 @@
 """Security tests for Dash GUI command execution."""
 
+import importlib
 import subprocess
 
-import gui.app as gui_app
+gui_app = importlib.import_module("gui.app")
 
 
 def test_run_command_blocked_by_default(monkeypatch):
