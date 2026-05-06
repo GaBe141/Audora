@@ -1,8 +1,10 @@
 """Security tests for Dash GUI helpers and callbacks."""
 
+import importlib
+
 import pandas as pd
 
-from gui import app as gui_app
+gui_app = importlib.import_module("gui.app")
 
 
 class DummyStore:
