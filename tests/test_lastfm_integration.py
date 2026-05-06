@@ -4,6 +4,7 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 # Last.fm module imports from .config which may not exist; provide a minimal mock
 if "integrations.config" not in sys.modules:
@@ -12,11 +13,14 @@ if "integrations.config" not in sys.modules:
     sys.modules["integrations.config"] = _config_mock
 
 from core.exceptions import APIConnectionError, APIResponseError
-from integrations.lastfm_integration import LastFmAPI
+from integrations.lastfm_integration import BASE_URL, LastFmAPI
 
 
 class TestLastFmAPISuccess:
     """Test successful API responses with mocked session.get."""
+
+    def test_base_url_uses_https(self):
+        assert BASE_URL.startswith("https://")
 
     def test_get_top_artists_global_parses_response(self):
         api = LastFmAPI(api_key="test_key")
@@ -81,8 +85,6 @@ class TestLastFmAPIErrorHandling:
                 api.get_top_artists_global(limit=5)
 
     def test_http_error_raises_connection_error(self):
-        import requests
-
         api = LastFmAPI(api_key="test_key")
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("429")
