@@ -1,6 +1,11 @@
 """Security regression tests for file output path containment."""
 
+import sys
 from pathlib import Path
+
+INTEGRATIONS_DIR = Path(__file__).resolve().parent.parent / "integrations"
+if str(INTEGRATIONS_DIR) not in sys.path:
+    sys.path.insert(0, str(INTEGRATIONS_DIR))
 
 from core.main_app import AudoraDiscoveryApp
 from core.utils import save_report
