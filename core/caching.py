@@ -7,13 +7,13 @@ fallback to in-memory caching when Redis is unavailable.
 import base64
 import hashlib
 import hmac
-from io import StringIO
 import json
 import logging
 import os
 import time
 from collections.abc import Callable
 from functools import wraps
+from io import StringIO
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)

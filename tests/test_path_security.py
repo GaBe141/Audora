@@ -7,9 +7,9 @@ INTEGRATIONS_DIR = Path(__file__).resolve().parent.parent / "integrations"
 if str(INTEGRATIONS_DIR) not in sys.path:
     sys.path.insert(0, str(INTEGRATIONS_DIR))
 
-from core.main_app import ComprehensiveMusicDiscoveryApp
-from core.utils import save_report
-from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
+from core.main_app import ComprehensiveMusicDiscoveryApp  # noqa: E402
+from core.utils import save_report  # noqa: E402
+from integrations.social_discovery_engine import SocialMusicDiscoveryEngine  # noqa: E402
 
 
 def test_save_report_sanitizes_custom_filename(tmp_path):
