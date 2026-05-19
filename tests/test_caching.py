@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,54 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis payload serialization security."""
+
+    def _backend(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_json_round_trip_uses_safe_envelope(self):
+        backend = self._backend()
+        value = {"artist": "Example", "score": 91, "tags": ["pop", "viral"]}
+
+        serialized = backend._serialize(value)
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["type"] == "json"
+        assert backend._deserialize(serialized) == value
+
+    def test_bytes_round_trip(self):
+        backend = self._backend()
+        value = b"binary payload"
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_dataframe_round_trip(self):
+        backend = self._backend()
+        value = pd.DataFrame([{"track": "Example", "score": 42}])
+
+        serialized = backend._serialize(value)
+        result = backend._deserialize(serialized)
+
+        pd.testing.assert_frame_equal(result, value)
+
+    def test_rejects_legacy_non_json_payload(self):
+        backend = self._backend()
+
+        assert backend._deserialize(b"\x80\x04legacy-pickle-like-payload") is None
+
+    def test_rejects_unsupported_object_types(self):
+        backend = self._backend()
+
+        class Unsupported:
+            pass
+
+        with pytest.raises(TypeError):
+            backend._serialize(Unsupported())

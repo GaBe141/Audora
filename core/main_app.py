@@ -338,15 +338,20 @@ class ComprehensiveMusicDiscoveryApp:
     ) -> str:
         """Save comprehensive discovery report."""
         if custom_filename:
-            filename = custom_filename
+            filename = Path(custom_filename).name
+            if not filename:
+                raise ValueError("Report filename must include a file name")
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            filename = f"comprehensive_discovery_report_{timestamp}.json"
 
-        filepath = Path(filename)
+        output_dir = Path("data").resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filepath = (output_dir / filename).resolve()
+        filepath.relative_to(output_dir)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        with filepath.open("w", encoding="utf-8") as f:
             json.dump(discovery_results, f, indent=2, default=str, ensure_ascii=False)
 
         return str(filepath)
