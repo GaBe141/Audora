@@ -7,7 +7,7 @@ INTEGRATIONS_DIR = Path(__file__).resolve().parent.parent / "integrations"
 if str(INTEGRATIONS_DIR) not in sys.path:
     sys.path.insert(0, str(INTEGRATIONS_DIR))
 
-from core.main_app import AudoraDiscoveryApp
+from core.main_app import ComprehensiveMusicDiscoveryApp
 from core.utils import save_report
 from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
 
@@ -28,7 +28,7 @@ def test_save_report_sanitizes_custom_filename(tmp_path):
 
 def test_main_app_report_stays_under_data_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    app = AudoraDiscoveryApp.__new__(AudoraDiscoveryApp)
+    app = ComprehensiveMusicDiscoveryApp.__new__(ComprehensiveMusicDiscoveryApp)
 
     saved_path = Path(app.save_discovery_report({"status": "ok"}, "../outside.json")).resolve()
 
