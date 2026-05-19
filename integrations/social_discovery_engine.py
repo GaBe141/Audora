@@ -7,6 +7,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -758,9 +759,15 @@ class SocialMusicDiscoveryEngine:
         """Save discovery report to file using centralized utility."""
         if filepath is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = f"data/social_discovery_report_{timestamp}.json"
+            filename = f"social_discovery_report_{timestamp}.json"
+        else:
+            filename = Path(filepath).name
+            if not filename:
+                raise ValueError("Report filename must include a file name")
 
-        saved_path = write_json(filepath, report)
+        output_dir = Path("data").resolve()
+        saved_path = write_json((output_dir / filename).resolve(), report)
+        saved_path.relative_to(output_dir)
         return str(saved_path)
 
 

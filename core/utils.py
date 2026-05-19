@@ -345,11 +345,16 @@ def save_report(
     if filename is None:
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{timestamp_str}.json"
+    else:
+        filename = Path(filename).name
+        if not filename:
+            raise ValueError("Report filename must include a file name")
 
     # Create full path
-    output_path = Path(output_dir)
+    output_path = Path(output_dir).resolve()
     output_path.mkdir(parents=True, exist_ok=True)
-    filepath = output_path / filename
+    filepath = (output_path / filename).resolve()
+    filepath.relative_to(output_path)
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:

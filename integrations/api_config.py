@@ -11,6 +11,16 @@ from typing import Any
 
 from core.utils import read_json, write_json
 
+SECRET_CONFIG_FIELDS = {"api_key", "secret_key", "access_token", "refresh_token"}
+ENV_CREDENTIALS = {
+    "tiktok": {"api_key": "TIKTOK_API_KEY", "secret_key": "TIKTOK_SECRET_KEY"},
+    "youtube": {"api_key": "YOUTUBE_API_KEY"},
+    "twitter": {"api_key": "TWITTER_API_KEY", "access_token": "TWITTER_ACCESS_TOKEN"},
+    "instagram": {"access_token": "INSTAGRAM_ACCESS_TOKEN"},
+    "reddit": {"api_key": "REDDIT_API_KEY", "secret_key": "REDDIT_SECRET_KEY"},
+    "tumblr": {"api_key": "TUMBLR_API_KEY", "secret_key": "TUMBLR_SECRET_KEY"},
+}
+
 
 @dataclass
 class APIConfig:
@@ -53,9 +63,28 @@ class SocialAPIManager:
 
         if data:
             for platform, config_data in data.items():
-                self.configs[platform] = APIConfig(platform=platform, **config_data)
+                non_secret_config = {
+                    key: value
+                    for key, value in config_data.items()
+                    if key not in SECRET_CONFIG_FIELDS
+                }
+                self.configs[platform] = APIConfig(platform=platform, **non_secret_config)
         else:
             self._create_default_configs()
+        self._apply_env_credentials()
+
+    def _apply_env_credentials(self):
+        """Load API credentials from environment variables instead of persisted JSON."""
+        for platform, fields in ENV_CREDENTIALS.items():
+            config = self.configs.setdefault(platform, APIConfig(platform=platform))
+            has_credential = False
+            for field_name, env_name in fields.items():
+                value = os.getenv(env_name, "").strip()
+                if value:
+                    setattr(config, field_name, value)
+                    has_credential = True
+            if has_credential:
+                config.enabled = True
 
     def _create_default_configs(self):
         """Create default configuration template."""
@@ -119,10 +148,6 @@ class SocialAPIManager:
         config_data = {}
         for platform, config in self.configs.items():
             config_data[platform] = {
-                "api_key": config.api_key,
-                "secret_key": config.secret_key,
-                "access_token": config.access_token,
-                "refresh_token": config.refresh_token,
                 "requests_per_minute": config.requests_per_minute,
                 "requests_per_hour": config.requests_per_hour,
                 "requests_per_day": config.requests_per_day,
@@ -133,7 +158,7 @@ class SocialAPIManager:
 
         written_path = write_json(self.config_file, config_data)
         if os.name != "nt":
-            os.chmod(written_path, 0o600)
+            written_path.chmod(0o600)
 
     def get_config(self, platform: str) -> APIConfig | None:
         """Get configuration for a platform."""
@@ -187,13 +212,10 @@ class SocialAPIManager:
         if config.requests_per_hour > 0 and config.requests_this_hour >= config.requests_per_hour:
             return False
 
-        if (
+        return not (
             config.requests_per_minute > 0
             and config.requests_this_minute >= config.requests_per_minute
-        ):
-            return False
-
-        return True
+        )
 
     def record_request(self, platform: str, success: bool = True, error: str = ""):
         """Record a request for rate limiting tracking."""
