@@ -8,8 +8,9 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -17,6 +18,7 @@ from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from enum import Enum
+from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -73,8 +75,7 @@ class NotificationMessage:
 
 
 class EnhancedNotificationService:
-    """
-    Advanced notification system for music discovery events.
+    """Advanced notification system for music discovery events.
 
     Features:
     - Multiple notification channels
@@ -84,6 +85,19 @@ class EnhancedNotificationService:
     - Delivery confirmation
     - Analytics and reporting
     """
+
+    _SECRET_CONFIG_KEYS = {
+        "api_key",
+        "api_secret",
+        "authorization",
+        "password",
+        "refresh_token",
+        "secret",
+        "secret_key",
+        "token",
+        "url",
+        "webhook_url",
+    }
 
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
@@ -190,17 +204,39 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
+        to_save = {
+            k: self._redact_config_secrets(k, self.config[k])
+            for k in saveable_keys
+            if k in self.config
+        }
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+
+    def _redact_config_secrets(self, key: str, value: Any) -> Any:
+        """Return a config value safe to persist to disk."""
+        key_lower = key.lower()
+        if key_lower in self._SECRET_CONFIG_KEYS:
+            return ""
+        if isinstance(value, dict):
+            return {k: self._redact_config_secrets(k, v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._redact_config_secrets(key, item) for item in value]
+        return value
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
@@ -233,6 +269,8 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
@@ -254,6 +292,37 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _attachment_base_dir(self) -> Path:
+        """Return the directory attachments may be read from."""
+        return Path(os.getenv("AUDORA_ATTACHMENT_DIR", "data")).expanduser().resolve()
+
+    def _safe_attachment_path(self, attachment_path: str) -> Path | None:
+        """Resolve an attachment path and reject reads outside the attachment directory."""
+        base_dir = self._attachment_base_dir()
+        requested_path = Path(attachment_path).expanduser()
+        candidate = (
+            requested_path.resolve()
+            if requested_path.is_absolute()
+            else (base_dir / requested_path).resolve()
+        )
+
+        try:
+            candidate.relative_to(base_dir)
+        except ValueError:
+            self.logger.warning("Rejected attachment outside allowed directory: %s", attachment_path)
+            return None
+
+        if not candidate.is_file():
+            return None
+
+        max_bytes = int(os.getenv("AUDORA_MAX_ATTACHMENT_BYTES", str(10 * 1024 * 1024)))
+        if candidate.stat().st_size > max_bytes:
+            self.logger.warning("Rejected oversized attachment: %s", candidate)
+            return None
+
+        return candidate
+
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -553,34 +622,44 @@ System status: {{ system_status }}
             msg.attach(MIMEText(text_content, "plain"))
 
             # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            html_content = escape(text_content).replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    safe_path = self._safe_attachment_path(attachment_path)
+                    if safe_path is None:
+                        continue
+
+                    with safe_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {safe_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            use_tls = email_config.get("use_tls", True)
+            if email_config.get("username") and email_config.get("password") and not use_tls:
+                return {"success": False, "error": "SMTP authentication requires TLS"}
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+            server = smtplib.SMTP(
+                email_config["smtp_server"], email_config.get("port", 587), timeout=30
+            )
+            try:
+                if use_tls:
+                    server.starttls(context=ssl.create_default_context())
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
+            finally:
+                server.quit()
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"
@@ -650,7 +729,12 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +801,12 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +866,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:

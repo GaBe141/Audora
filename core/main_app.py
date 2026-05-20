@@ -18,6 +18,8 @@ from integrations.trending_schema import TrendingSchema
 class ComprehensiveMusicDiscoveryApp:
     """Main application orchestrating all music discovery systems."""
 
+    _REPORT_DIR = Path("data")
+
     def __init__(self, config_file: str = "config/social_apis.json"):
         """Initialize the comprehensive music discovery application."""
         print("🎵 Initializing Comprehensive Music Discovery System")
@@ -156,7 +158,7 @@ class ComprehensiveMusicDiscoveryApp:
         # Extract song identifiers from mainstream platforms
         mainstream_data = discovery_results.get("mainstream_platforms", {})
         if "platform_breakdown" in mainstream_data:
-            for platform, songs in mainstream_data["platform_breakdown"].items():
+            for _platform, songs in mainstream_data["platform_breakdown"].items():
                 for song in songs:
                     if hasattr(song, "artist_name") and hasattr(song, "song_title"):
                         song_key = f"{song.artist_name} - {song.song_title}".lower()
@@ -165,7 +167,7 @@ class ComprehensiveMusicDiscoveryApp:
         # Extract song identifiers from underground platforms
         underground_data = discovery_results.get("underground_platforms", {})
         if "underground_breakdown" in underground_data:
-            for platform, songs in underground_data["underground_breakdown"].items():
+            for _platform, songs in underground_data["underground_breakdown"].items():
                 for song in songs:
                     if hasattr(song, "artist_name") and hasattr(song, "song_title"):
                         song_key = f"{song.artist_name} - {song.song_title}".lower()
@@ -206,20 +208,21 @@ class ComprehensiveMusicDiscoveryApp:
         if "underground_breakdown" in underground_data:
             for platform, songs in underground_data["underground_breakdown"].items():
                 for song in songs:
-                    if hasattr(song, "viral_stage") and hasattr(song, "trend_velocity"):
-                        if (
-                            song.viral_stage.value in ["emerging", "niche_viral"]
-                            and song.trend_velocity > 100
-                        ):
-                            predictions["next_viral_candidates"].append(
-                                {
-                                    "artist": song.artist_name,
-                                    "song": song.song_title,
-                                    "platform": platform,
-                                    "momentum": song.trend_velocity,
-                                    "prediction": "Likely to go viral in 7-14 days",
-                                }
-                            )
+                    if (
+                        hasattr(song, "viral_stage")
+                        and hasattr(song, "trend_velocity")
+                        and song.viral_stage.value in ["emerging", "niche_viral"]
+                        and song.trend_velocity > 100
+                    ):
+                        predictions["next_viral_candidates"].append(
+                            {
+                                "artist": song.artist_name,
+                                "song": song.song_title,
+                                "platform": platform,
+                                "momentum": song.trend_velocity,
+                                "prediction": "Likely to go viral in 7-14 days",
+                            }
+                        )
 
         # Platform momentum analysis
         mainstream_data = discovery_results.get("mainstream_platforms", {})
@@ -338,18 +341,36 @@ class ComprehensiveMusicDiscoveryApp:
     ) -> str:
         """Save comprehensive discovery report."""
         if custom_filename:
-            filename = custom_filename
+            filepath = self._safe_report_path(custom_filename)
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            filepath = self._safe_report_path(f"comprehensive_discovery_report_{timestamp}.json")
 
-        filepath = Path(filename)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        with filepath.open("w", encoding="utf-8") as f:
             json.dump(discovery_results, f, indent=2, default=str, ensure_ascii=False)
 
         return str(filepath)
+
+    def _safe_report_path(self, filename: str) -> Path:
+        """Resolve a report filename under the data directory."""
+        base_dir = self._REPORT_DIR.resolve()
+        requested_path = Path(filename).expanduser()
+
+        if requested_path.is_absolute():
+            candidate = requested_path.resolve()
+        elif len(requested_path.parts) == 1:
+            candidate = (base_dir / requested_path.name).resolve()
+        else:
+            candidate = (Path.cwd() / requested_path).resolve()
+
+        try:
+            candidate.relative_to(base_dir)
+        except ValueError as e:
+            raise ValueError("Discovery reports must be saved under the data directory") from e
+
+        return candidate
 
     async def run_continuous_monitoring(
         self, interval_hours: int = 4, regions: list[str] | None = None

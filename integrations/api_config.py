@@ -42,6 +42,37 @@ class APIConfig:
 class SocialAPIManager:
     """Manages API configurations and rate limiting for all platforms."""
 
+    _SECRET_FIELDS = {"api_key", "secret_key", "access_token", "refresh_token"}
+    _ENV_CREDENTIALS = {
+        "tiktok": {
+            "api_key": "TIKTOK_API_KEY",
+            "secret_key": "TIKTOK_SECRET_KEY",
+        },
+        "youtube": {
+            "api_key": "YOUTUBE_API_KEY",
+        },
+        "twitter": {
+            "api_key": "TWITTER_API_KEY",
+            "secret_key": "TWITTER_SECRET_KEY",
+            "access_token": "TWITTER_BEARER_TOKEN",
+        },
+        "instagram": {
+            "access_token": "INSTAGRAM_ACCESS_TOKEN",
+        },
+        "reddit": {
+            "api_key": "REDDIT_CLIENT_ID",
+            "secret_key": "REDDIT_CLIENT_SECRET",
+            "access_token": "REDDIT_ACCESS_TOKEN",
+            "refresh_token": "REDDIT_REFRESH_TOKEN",
+        },
+        "tumblr": {
+            "api_key": "TUMBLR_CONSUMER_KEY",
+            "secret_key": "TUMBLR_CONSUMER_SECRET",
+            "access_token": "TUMBLR_ACCESS_TOKEN",
+            "refresh_token": "TUMBLR_REFRESH_TOKEN",
+        },
+    }
+
     def __init__(self, config_file: str = "config/social_apis.json"):
         self.config_file = Path(config_file)
         self.configs: dict[str, APIConfig] = {}
@@ -53,55 +84,51 @@ class SocialAPIManager:
 
         if data:
             for platform, config_data in data.items():
-                self.configs[platform] = APIConfig(platform=platform, **config_data)
+                safe_config_data = {
+                    key: value
+                    for key, value in config_data.items()
+                    if key not in self._SECRET_FIELDS
+                }
+                self.configs[platform] = APIConfig(platform=platform, **safe_config_data)
         else:
             self._create_default_configs()
+
+        self._load_env_credentials()
 
     def _create_default_configs(self):
         """Create default configuration template."""
         default_configs = {
             "tiktok": {
-                "api_key": "",
-                "secret_key": "",
                 "requests_per_minute": 60,
                 "requests_per_hour": 1000,
                 "requests_per_day": 10000,
                 "enabled": False,
             },
             "youtube": {
-                "api_key": "",
                 "requests_per_minute": 100,
                 "requests_per_hour": 10000,
                 "requests_per_day": 1000000,
                 "enabled": False,
             },
             "twitter": {
-                "api_key": "",
-                "secret_key": "",
-                "access_token": "",
                 "requests_per_minute": 300,
                 "requests_per_hour": 300,
                 "requests_per_day": 300,
                 "enabled": False,
             },
             "instagram": {
-                "access_token": "",
                 "requests_per_minute": 60,
                 "requests_per_hour": 200,
                 "requests_per_day": 200,
                 "enabled": False,
             },
             "reddit": {
-                "api_key": "",
-                "secret_key": "",
                 "requests_per_minute": 60,
                 "requests_per_hour": 1000,
                 "requests_per_day": 1000,
                 "enabled": False,
             },
             "tumblr": {
-                "api_key": "",
-                "secret_key": "",
                 "requests_per_minute": 60,
                 "requests_per_hour": 1000,
                 "requests_per_day": 5000,
@@ -114,15 +141,26 @@ class SocialAPIManager:
 
         self.save_configs()
 
+    def _load_env_credentials(self) -> None:
+        """Overlay API credentials from environment variables."""
+        for platform, env_mapping in self._ENV_CREDENTIALS.items():
+            if platform not in self.configs:
+                self.configs[platform] = APIConfig(platform=platform, enabled=False)
+
+            config = self.configs[platform]
+            for field_name, env_name in env_mapping.items():
+                env_value = os.getenv(env_name, "").strip()
+                if env_value:
+                    setattr(config, field_name, env_value)
+
+            if config.api_key or config.access_token:
+                config.enabled = True
+
     def save_configs(self):
         """Save configurations to file using centralized utility."""
         config_data = {}
         for platform, config in self.configs.items():
             config_data[platform] = {
-                "api_key": config.api_key,
-                "secret_key": config.secret_key,
-                "access_token": config.access_token,
-                "refresh_token": config.refresh_token,
                 "requests_per_minute": config.requests_per_minute,
                 "requests_per_hour": config.requests_per_hour,
                 "requests_per_day": config.requests_per_day,
@@ -133,7 +171,7 @@ class SocialAPIManager:
 
         written_path = write_json(self.config_file, config_data)
         if os.name != "nt":
-            os.chmod(written_path, 0o600)
+            written_path.chmod(0o600)
 
     def get_config(self, platform: str) -> APIConfig | None:
         """Get configuration for a platform."""
@@ -187,13 +225,10 @@ class SocialAPIManager:
         if config.requests_per_hour > 0 and config.requests_this_hour >= config.requests_per_hour:
             return False
 
-        if (
+        return not (
             config.requests_per_minute > 0
             and config.requests_this_minute >= config.requests_per_minute
-        ):
-            return False
-
-        return True
+        )
 
     def record_request(self, platform: str, success: bool = True, error: str = ""):
         """Record a request for rate limiting tracking."""
@@ -286,6 +321,7 @@ def setup_api_credentials():
     manager = SocialAPIManager()
 
     print("\nThis will help you configure API credentials for music discovery.")
+    print("Credentials are used for this process only; set environment variables for reuse.")
     print("You can skip any platform by pressing Enter without typing anything.\n")
 
     # TikTok
