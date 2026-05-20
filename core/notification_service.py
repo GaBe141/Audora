@@ -8,8 +8,8 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -75,6 +75,15 @@ class NotificationMessage:
 
 
 class EnhancedNotificationService:
+    """Advanced notification system for music discovery events.
+
+    Features:
+    - Multiple notification channels
+    - Smart filtering and deduplication
+    - Template-based messages
+    - Rate limiting and cooldown
+    - Delivery confirmation
+    - Analytics and reporting
     """
 
     _SECRET_CONFIG_KEYS = {
@@ -89,16 +98,6 @@ class EnhancedNotificationService:
         "url",
         "webhook_url",
     }
-    Advanced notification system for music discovery events.
-
-    Features:
-    - Multiple notification channels
-    - Smart filtering and deduplication
-    - Template-based messages
-    - Rate limiting and cooldown
-    - Delivery confirmation
-    - Analytics and reporting
-    """
 
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
