@@ -1,5 +1,6 @@
 """Security tests for notification webhook URL validation."""
 
+import asyncio
 import json
 
 import pytest
@@ -81,8 +82,7 @@ class TestEmailAttachmentSafety:
 class TestSmtpSafety:
     """Validate SMTP credentials are not sent without TLS."""
 
-    @pytest.mark.asyncio
-    async def test_smtp_auth_requires_tls(self):
+    def test_smtp_auth_requires_tls(self):
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -94,18 +94,20 @@ class TestSmtpSafety:
             }
         )
 
-        result = await svc._send_email(
-            message=type(
-                "Message",
-                (),
-                {
-                    "title": "Test",
-                    "content": "Body",
-                    "priority": NotificationPriority.LOW,
-                    "attachments": None,
-                    "template_vars": None,
-                },
-            )()
+        result = asyncio.run(
+            svc._send_email(
+                message=type(
+                    "Message",
+                    (),
+                    {
+                        "title": "Test",
+                        "content": "Body",
+                        "priority": NotificationPriority.LOW,
+                        "attachments": None,
+                        "template_vars": None,
+                    },
+                )()
+            )
         )
 
         assert result == {"success": False, "error": "SMTP authentication requires TLS"}

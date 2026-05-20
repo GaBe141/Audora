@@ -1,6 +1,13 @@
 """Security tests for report output path confinement."""
 
+import sys
+import types
+
 import pytest
+
+extended_platforms = types.ModuleType("integrations.extended_platforms")
+extended_platforms.ExtendedSocialDiscoveryEngine = object
+sys.modules.setdefault("integrations.extended_platforms", extended_platforms)
 
 from core.main_app import ComprehensiveMusicDiscoveryApp
 from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
