@@ -1,0 +1,31 @@
+"""Security tests for report output path confinement."""
+
+import pytest
+
+from core.main_app import ComprehensiveMusicDiscoveryApp
+from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
+
+
+class TestReportPathSafety:
+    """Validate report writers cannot escape the data directory."""
+
+    def test_comprehensive_report_rejects_parent_traversal(self):
+        app = object.__new__(ComprehensiveMusicDiscoveryApp)
+
+        with pytest.raises(ValueError, match="data directory"):
+            app._safe_report_path("../outside.json")
+
+    def test_comprehensive_report_places_plain_filename_under_data(self):
+        app = object.__new__(ComprehensiveMusicDiscoveryApp)
+
+        path = app._safe_report_path("report.json")
+
+        assert path.parent.name == "data"
+        assert path.name == "report.json"
+
+    def test_social_report_rejects_absolute_path_outside_data(self, tmp_path):
+        engine = SocialMusicDiscoveryEngine({})
+
+        with pytest.raises(ValueError, match="data directory"):
+            engine._safe_report_path(str(tmp_path / "outside.json"))
+

@@ -7,6 +7,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -369,6 +370,8 @@ class InstagramMusicAPI:
 
 class SocialMusicDiscoveryEngine:
     """Main engine that coordinates all social media APIs for music discovery."""
+
+    _REPORT_DIR = Path("data")
 
     def __init__(self, config: dict[str, str]):
         """Initialize with API credentials."""
@@ -758,10 +761,29 @@ class SocialMusicDiscoveryEngine:
         """Save discovery report to file using centralized utility."""
         if filepath is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = f"data/social_discovery_report_{timestamp}.json"
+            filepath = f"social_discovery_report_{timestamp}.json"
 
-        saved_path = write_json(filepath, report)
+        saved_path = write_json(self._safe_report_path(filepath), report)
         return str(saved_path)
+
+    def _safe_report_path(self, filepath: str) -> Path:
+        """Resolve a report path under the data directory."""
+        base_dir = self._REPORT_DIR.resolve()
+        requested_path = Path(filepath).expanduser()
+
+        if requested_path.is_absolute():
+            candidate = requested_path.resolve()
+        elif len(requested_path.parts) == 1:
+            candidate = (base_dir / requested_path.name).resolve()
+        else:
+            candidate = (Path.cwd() / requested_path).resolve()
+
+        try:
+            candidate.relative_to(base_dir)
+        except ValueError as e:
+            raise ValueError("Discovery reports must be saved under the data directory") from e
+
+        return candidate
 
 
 # Mock data generator for testing without API keys
