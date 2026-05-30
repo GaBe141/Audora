@@ -3,10 +3,10 @@ Enhanced data persistence layer for music discovery data.
 Handles trending data, viral predictions, and cross-platform analysis.
 """
 
+import hashlib
 import json
 import logging
 import sqlite3
-import hashlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
