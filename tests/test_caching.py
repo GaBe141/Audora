@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+from datetime import datetime
+from decimal import Decimal
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +84,41 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis payload serialization without pickle."""
+
+    def _backend(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_serializes_json_safe_values(self):
+        backend = self._backend()
+        payload = {
+            "artist": "Example",
+            "plays": 100,
+            "created": datetime(2026, 5, 30, 12, 0, 0),
+            "score": Decimal("9.5"),
+        }
+
+        restored = backend._deserialize(backend._serialize(payload))
+
+        assert restored == payload
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._backend()
+        legacy_payload = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "unused",
+                "payload": "unused",
+            }
+        ).encode("utf-8")
+
+        assert backend._deserialize(legacy_payload) is None
 
 
 class TestCachedDecorator:
