@@ -23,6 +23,8 @@ ENHANCED_PACKAGES = [
     "plotly>=5.0.0",
     "requests>=2.34.2",
     "aiohttp>=3.13.5",
+    "idna>=3.17",
+    "urllib3>=2.7.0",
     "aiofiles>=0.8.0",
     # Data science and ML
     "scikit-learn>=1.0.0",
@@ -33,7 +35,7 @@ ENHANCED_PACKAGES = [
     "dash>=2.15.0",
     "dash-bootstrap-components>=2.0.4",
     # Template engine
-    "jinja2>=3.0.0",
+    "jinja2>=3.1.6",
     # Environment management
     "python-dotenv>=1.2.2",
     # Development tools

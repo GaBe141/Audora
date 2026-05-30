@@ -6,8 +6,11 @@ matplotlib==3.10.6
 seaborn==0.13.2
 requests==2.34.2
 aiohttp==3.13.5
+idna==3.17
+urllib3==2.7.0
 beautifulsoup4==4.14.2
 numpy==1.26.4
+Jinja2==3.1.6
 
 # Statistical Analysis and Forecasting
 statsmodels==0.14.5
