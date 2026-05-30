@@ -2,8 +2,11 @@
 
 import time
 
+import pandas as pd
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,37 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis payload serialization without a live Redis server."""
+
+    def test_serializes_plain_json_values(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        payload = {"stats": {"count": 2}, "top_tracks": [{"name": "Song"}]}
+        serialized = backend._serialize(payload)
+
+        assert backend._deserialize(serialized) == payload
+
+    def test_serializes_dataframes_without_pickle(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        df = pd.DataFrame([{"track_name": "Song", "score": 0.9}])
+        serialized = backend._serialize(df)
+        restored = backend._deserialize(serialized)
+
+        assert isinstance(restored, pd.DataFrame)
+        assert restored.to_dict("records") == df.to_dict("records")
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        legacy_envelope = (
+            b'{"v":1,"alg":"HMAC-SHA256","sig":"bad","payload":"gASVBQAAAAAAAABdlC4="}'
+        )
+
+        assert backend._deserialize(legacy_envelope) is None
