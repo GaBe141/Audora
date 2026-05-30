@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,37 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerializationSecurity:
+    """Regression coverage for Redis cache serialization hardening."""
+
+    def _backend(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_serializes_signed_json_without_pickle(self):
+        backend = self._backend()
+        payload = {"artists": ["A", "B"], "count": 2, "raw": b"abc"}
+
+        serialized = backend._serialize(payload)
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["alg"] == "HMAC-SHA256"
+        assert backend._deserialize(serialized) == payload
+
+    def test_rejects_tampered_payloads(self):
+        backend = self._backend()
+        serialized = backend._serialize({"safe": True})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"] = envelope["payload"][:-2] + "xx"
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_legacy_or_malformed_entries(self):
+        backend = self._backend()
+
+        assert backend._deserialize(b"not-json") is None
+        assert backend._deserialize(json.dumps({"v": 1, "payload": ""}).encode("utf-8")) is None
