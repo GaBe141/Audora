@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
+import pandas as pd
+import pytest
+from pandas.testing import assert_frame_equal
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -58,6 +65,52 @@ class TestLocalCacheBackend:
         assert backend.get("d") == 4
         present = sum(1 for k in ("a", "b", "c") if backend.get(k) is not None)
         assert present == 2
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache serialization safety."""
+
+    def _backend(self):
+        return RedisCacheBackend.__new__(RedisCacheBackend)
+
+    def test_json_value_round_trips_without_pickle(self):
+        backend = self._backend()
+        value = {"artist": "Taylor Swift", "scores": [1, 2, 3], "active": True}
+
+        serialized = backend._serialize(value)
+
+        assert json.loads(serialized.decode("utf-8"))["kind"] == "json"
+        assert backend._deserialize(serialized) == value
+
+    def test_bytes_round_trip(self):
+        backend = self._backend()
+        value = b"\x00audora-cache"
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_dataframe_round_trip(self):
+        backend = self._backend()
+        value = pd.DataFrame(
+            [
+                {"track": "One", "score": 95.5},
+                {"track": "Two", "score": 88.0},
+            ]
+        )
+
+        restored = backend._deserialize(backend._serialize(value))
+
+        assert_frame_equal(restored, value)
+
+    def test_legacy_or_malformed_payload_is_rejected(self):
+        backend = self._backend()
+
+        assert backend._deserialize(b"\x80\x04cos\nsystem\n.") is None
+
+    def test_unsupported_objects_are_not_serialized(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            backend._serialize(object())
 
 
 class TestCacheManager:
@@ -118,3 +171,12 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_build_cache_key_uses_sha256_digest(self):
+        manager = CacheManager(backend=LocalCacheBackend(max_size=10))
+
+        cache_key = manager._build_cache_key("prefix", ("arg",), {"kw": "value"})
+
+        digests = cache_key.split(":")[1:]
+        assert len(digests) == 2
+        assert all(len(digest) == 64 for digest in digests)
