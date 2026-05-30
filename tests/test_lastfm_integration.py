@@ -12,11 +12,14 @@ if "integrations.config" not in sys.modules:
     sys.modules["integrations.config"] = _config_mock
 
 from core.exceptions import APIConnectionError, APIResponseError
-from integrations.lastfm_integration import LastFmAPI
+from integrations.lastfm_integration import BASE_URL, LastFmAPI
 
 
 class TestLastFmAPISuccess:
     """Test successful API responses with mocked session.get."""
+
+    def test_base_url_uses_https(self):
+        assert BASE_URL.startswith("https://")
 
     def test_get_top_artists_global_parses_response(self):
         api = LastFmAPI(api_key="test_key")
@@ -89,3 +92,18 @@ class TestLastFmAPIErrorHandling:
         with patch.object(api.session, "get", return_value=mock_response):
             with pytest.raises(APIConnectionError, match="429"):
                 api.get_top_artists_global(limit=5)
+
+    def test_request_errors_redact_api_key(self):
+        import requests
+
+        api = LastFmAPI(api_key="secret_key")
+        error = requests.exceptions.RequestException(
+            "GET http://example.test/?api_key=secret_key&format=json failed"
+        )
+        with patch.object(api.session, "get", side_effect=error):
+            with pytest.raises(APIConnectionError) as exc_info:
+                api.get_top_artists_global(limit=5)
+
+        message = str(exc_info.value)
+        assert "secret_key" not in message
+        assert "api_key=[redacted]" in message

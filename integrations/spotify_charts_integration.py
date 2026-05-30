@@ -9,6 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 
 CHARTS_BASE_URL = "https://charts.spotify.com"
+REQUEST_TIMEOUT = 10
 
 
 class SpotifyChartsAPI:
@@ -49,7 +50,7 @@ class SpotifyChartsAPI:
         url = f"{CHARTS_BASE_URL}/charts/view/regional-{country_code}-daily/{date}"
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
 
             # Parse the HTML
@@ -141,7 +142,7 @@ class SpotifyChartsAPI:
         url = f"{CHARTS_BASE_URL}/charts/view/viral-{country_code}-daily/{date}"
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
 
             BeautifulSoup(response.content, "html.parser")
