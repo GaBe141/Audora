@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import time
 
 import pandas as pd
@@ -13,7 +14,13 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
+REQUEST_TIMEOUT = 10
+
+
+def _sanitize_request_error(error: requests.exceptions.RequestException) -> str:
+    """Remove query-string API keys from request errors before logging."""
+    return re.sub(r"(?i)(api_key=)[^&\s]+", r"\1[redacted]", str(error))
 
 
 class LastFmAPI:
@@ -40,7 +47,7 @@ class LastFmAPI:
         request_params = {"method": method, "api_key": self.api_key, "format": "json", **params}
 
         try:
-            response = self.session.get(BASE_URL, params=request_params, timeout=10)
+            response = self.session.get(BASE_URL, params=request_params, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             data = response.json()
 
@@ -56,9 +63,10 @@ class LastFmAPI:
         except APIResponseError:
             raise
         except requests.exceptions.RequestException as e:
-            logger.error("Last.fm request failed for %s: %s", method, e)
+            safe_error = _sanitize_request_error(e)
+            logger.error("Last.fm request failed for %s: %s", method, safe_error)
             raise APIConnectionError(
-                message=f"Last.fm request failed: {e}",
+                message=f"Last.fm request failed: {safe_error}",
                 details={"method": method},
             ) from e
         except json.JSONDecodeError as e:

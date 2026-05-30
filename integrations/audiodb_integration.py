@@ -1,5 +1,6 @@
 """AudioDB API integration for rich artist profiles and comprehensive music metadata."""
 
+import re
 import time
 from typing import Any
 
@@ -9,6 +10,12 @@ import requests
 # Note: config import is optional for standalone execution
 
 BASE_URL = "https://www.theaudiodb.com/api/v1/json"
+REQUEST_TIMEOUT = 10
+
+
+def _sanitize_request_error(error: requests.exceptions.RequestException) -> str:
+    """Remove AudioDB URL path API keys from request errors before logging."""
+    return re.sub(r"(/api/v1/json/)[^/\s]+", r"\1[redacted]", str(error))
 
 
 class AudioDBAPI:
@@ -41,11 +48,11 @@ class AudioDBAPI:
             url = f"{BASE_URL}/123/{endpoint}"  # Free API key is 123
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"AudioDB API error: {e}")
+            print(f"AudioDB API error: {_sanitize_request_error(e)}")
             return None
 
     def search_artist(self, artist_name: str) -> dict | None:
