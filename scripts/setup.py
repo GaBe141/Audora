@@ -6,6 +6,7 @@ Installs dependencies, configures services, and validates the system.
 
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -20,8 +21,8 @@ ENHANCED_PACKAGES = [
     "matplotlib>=3.5.0",
     "seaborn>=0.11.0",
     "plotly>=5.0.0",
-    "requests>=2.25.0",
-    "aiohttp>=3.8.0",
+    "requests>=2.34.2",
+    "aiohttp>=3.13.5",
     "aiofiles>=0.8.0",
     # Data science and ML
     "scikit-learn>=1.0.0",
@@ -29,15 +30,15 @@ ENHANCED_PACKAGES = [
     # Statistical analysis (optional)
     "statsmodels>=0.13.0",
     # Web framework (for dashboard)
-    "dash>=2.0.0",
-    "dash-bootstrap-components>=1.0.0",
+    "dash>=2.15.0",
+    "dash-bootstrap-components>=2.0.4",
     # Template engine
     "jinja2>=3.0.0",
     # Environment management
-    "python-dotenv>=0.19.0",
+    "python-dotenv>=1.2.2",
     # Development tools
-    "pytest>=7.0.0",
-    "black>=22.0.0",
+    "pytest>=9.0.3",
+    "black>=26.3.1",
     "flake8>=4.0.0",
 ]
 
@@ -130,12 +131,29 @@ class EnhancedMusicDiscoverySetup:
         for directory in directories:
             try:
                 directory.mkdir(parents=True, exist_ok=True)
+                if directory == self.config_dir and os.name != "nt":
+                    os.chmod(directory, 0o700)
                 self.logger.info(f"  Created directory: {directory}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {directory}: {e}")
                 return False
 
         return True
+
+    def _write_private_text(self, path: Path, content: str) -> None:
+        """Write secret-bearing setup files with owner-only permissions."""
+        if os.name == "nt":
+            path.write_text(content, encoding="utf-8")
+            return
+
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.chmod(path, 0o600)
+
+    def _write_private_json(self, path: Path, data: dict[str, Any]) -> None:
+        """Write JSON config that may later contain credentials with mode 0600."""
+        self._write_private_text(path, json.dumps(data, indent=2))
 
     def install_dependencies(self) -> bool:
         """Install Python dependencies."""
@@ -191,8 +209,7 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
-                    json.dump(config_data, f, indent=2)
+                self._write_private_json(config_path, config_data)
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -522,8 +539,7 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
-                f.write(env_template.strip())
+            self._write_private_text(env_path, env_template.strip())
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True

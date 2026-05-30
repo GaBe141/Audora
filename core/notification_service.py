@@ -4,12 +4,14 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -23,6 +25,8 @@ from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+
+DEFAULT_WEBHOOK_TIMEOUT_SECONDS = 10
 
 
 class NotificationPriority(Enum):
@@ -254,6 +258,15 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _webhook_timeout(self, configured_timeout: Any = None) -> aiohttp.ClientTimeout:
+        """Build a bounded aiohttp timeout for outbound notification requests."""
+        try:
+            timeout = float(configured_timeout or DEFAULT_WEBHOOK_TIMEOUT_SECONDS)
+        except (TypeError, ValueError):
+            timeout = DEFAULT_WEBHOOK_TIMEOUT_SECONDS
+
+        return aiohttp.ClientTimeout(total=max(1.0, min(timeout, 60.0)))
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -553,7 +566,7 @@ System status: {{ system_status }}
             msg.attach(MIMEText(text_content, "plain"))
 
             # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            html_content = html.escape(text_content).replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
             # Add attachments
@@ -574,9 +587,15 @@ System status: {{ system_status }}
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
+                if not email_config.get("use_tls", True):
+                    server.quit()
+                    return {
+                        "success": False,
+                        "error": "SMTP authentication requires TLS to avoid plaintext credentials",
+                    }
                 server.login(email_config["username"], email_config["password"])
 
             server.send_message(msg)
@@ -649,8 +668,14 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                aiohttp.ClientSession(
+                    timeout=self._webhook_timeout(slack_config.get("timeout"))
+                ) as session,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -716,8 +741,14 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                aiohttp.ClientSession(
+                    timeout=self._webhook_timeout(discord_config.get("timeout"))
+                ) as session,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -775,9 +806,12 @@ System status: {{ system_status }}
             timeout = webhook_config.get("timeout", 30)
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(timeout=self._webhook_timeout(timeout)) as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
