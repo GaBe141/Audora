@@ -1,9 +1,12 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +121,51 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for safe Redis cache payload encoding."""
+
+    def _backend(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_serializes_json_envelope_without_pickle(self):
+        backend = self._backend()
+        value = {
+            "name": "track",
+            "counts": [1, 2, 3],
+            "flags": {"viral": True},
+            "blob": b"abc",
+            "pair": ("artist", 7),
+            "tags": {"pop", "indie"},
+        }
+
+        serialized = backend._serialize(value)
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["format"] == "audora-json"
+        assert b"\x80" not in serialized
+        assert backend._deserialize(serialized) == value
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        backend = self._backend()
+        legacy_payload = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "unused",
+            "payload": "gASVBgAAAAAAAAB9lC4=",
+        }
+
+        assert backend._deserialize(json.dumps(legacy_payload).encode("utf-8")) is None
+
+    def test_cache_keys_use_sha256_digests(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        expected_args = hashlib.sha256(json.dumps(("arg",), sort_keys=True).encode()).hexdigest()
+        expected_kwargs = hashlib.sha256(
+            json.dumps({"kw": "value"}, sort_keys=True).encode()
+        ).hexdigest()
+
+        assert key == f"prefix:{expected_args}:{expected_kwargs}"
