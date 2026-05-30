@@ -3,6 +3,7 @@
 import json
 import logging
 import time
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pandas as pd
 import requests
@@ -13,7 +14,7 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
 class LastFmAPI:
@@ -56,9 +57,10 @@ class LastFmAPI:
         except APIResponseError:
             raise
         except requests.exceptions.RequestException as e:
-            logger.error("Last.fm request failed for %s: %s", method, e)
+            redacted_error = self._redact_request_error(e)
+            logger.error("Last.fm request failed for %s: %s", method, redacted_error)
             raise APIConnectionError(
-                message=f"Last.fm request failed: {e}",
+                message=f"Last.fm request failed: {redacted_error}",
                 details={"method": method},
             ) from e
         except json.JSONDecodeError as e:
@@ -67,6 +69,34 @@ class LastFmAPI:
                 message=f"Last.fm returned invalid JSON: {e}",
                 details={"method": method},
             ) from e
+
+    def _redact_request_error(self, error: Exception) -> str:
+        """Redact the API key from request errors that include URLs."""
+        message = str(error)
+        if self.api_key:
+            message = message.replace(self.api_key, "[REDACTED]")
+        return self._redact_api_key_query(message)
+
+    def _redact_api_key_query(self, message: str) -> str:
+        """Redact api_key query parameters from URL-like substrings."""
+        parts = message.split()
+        redacted_parts = []
+        for part in parts:
+            if "api_key=" not in part:
+                redacted_parts.append(part)
+                continue
+
+            try:
+                split = urlsplit(part)
+                query = [
+                    (key, "[REDACTED]" if key == "api_key" else value)
+                    for key, value in parse_qsl(split.query, keep_blank_values=True)
+                ]
+                redacted_parts.append(urlunsplit(split._replace(query=urlencode(query))))
+            except ValueError:
+                redacted_parts.append(part.replace("api_key=", "api_key=[REDACTED]&"))
+
+        return " ".join(redacted_parts)
 
     def get_top_artists_global(self, limit: int = 50) -> pd.DataFrame:
         """Get global top artists chart."""
