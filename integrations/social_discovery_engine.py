@@ -7,11 +7,12 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import aiohttp
 
-from core.utils import write_json
+from core.utils import sanitize_filename, write_json
 
 # Import our existing trending schema
 from integrations.trending_schema import TrendingSchema
@@ -754,13 +755,18 @@ class SocialMusicDiscoveryEngine:
 
         return recommendations
 
-    def save_discovery_report(self, report: dict[str, Any], filepath: str = None) -> str:
+    def save_discovery_report(self, report: dict[str, Any], filepath: str | None = None) -> str:
         """Save discovery report to file using centralized utility."""
+        output_dir = Path("data").resolve()
         if filepath is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = f"data/social_discovery_report_{timestamp}.json"
+            filename = f"social_discovery_report_{timestamp}.json"
+        else:
+            filename = sanitize_filename(filepath, "social_discovery_report.json")
 
-        saved_path = write_json(filepath, report)
+        report_path = (output_dir / filename).resolve()
+        report_path.relative_to(output_dir)
+        saved_path = write_json(report_path, report)
         return str(saved_path)
 
 

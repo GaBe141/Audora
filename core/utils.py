@@ -2,11 +2,13 @@
 
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 # Re-export for convenience
 try:
@@ -126,6 +128,12 @@ def get_timestamp_filename(prefix: str = "", suffix: str = "") -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     parts = [p for p in [prefix, timestamp, suffix] if p]
     return "_".join(parts) if len(parts) > 1 else timestamp
+
+
+def sanitize_filename(filename: str, default: str = "report.json") -> str:
+    """Return a basename-only filename safe for generated local reports."""
+    safe_name = _SAFE_FILENAME_RE.sub("_", Path(filename).name).strip("._")
+    return safe_name or default
 
 
 # Data validation helpers
@@ -344,12 +352,15 @@ def save_report(
     # Auto-generate filename if not provided
     if filename is None:
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{prefix}_{timestamp_str}.json"
+        filename = f"{sanitize_filename(prefix, 'report')}_{timestamp_str}.json"
+    else:
+        filename = sanitize_filename(filename)
 
     # Create full path
-    output_path = Path(output_dir)
+    output_path = Path(output_dir).resolve()
     output_path.mkdir(parents=True, exist_ok=True)
-    filepath = output_path / filename
+    filepath = (output_path / filename).resolve()
+    filepath.relative_to(output_path)
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:

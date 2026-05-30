@@ -9,8 +9,8 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -186,12 +186,120 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _to_json_safe(self, value: Any) -> Any:
+        """Convert supported cache values to JSON-safe data without code execution hooks."""
+        if value is None or isinstance(value, (bool, str, int)):
+            return value
+
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise TypeError("Non-finite floats are not supported in Redis cache values")
+            return value
+
+        if isinstance(value, bytes):
+            return {
+                "__audora_type__": "bytes",
+                "data": base64.b64encode(value).decode("ascii"),
+            }
+
+        if isinstance(value, tuple):
+            return {
+                "__audora_type__": "tuple",
+                "items": [self._to_json_safe(item) for item in value],
+            }
+
+        if isinstance(value, list):
+            return [self._to_json_safe(item) for item in value]
+
+        if isinstance(value, dict):
+            converted: dict[str, Any] = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise TypeError("Redis cache dictionaries must use string keys")
+                converted[key] = self._to_json_safe(item)
+            return converted
+
+        # Optional scientific/dataframe support for existing cache callers.
+        try:
+            import numpy as np  # type: ignore[import-not-found]
+
+            if isinstance(value, np.generic):
+                return self._to_json_safe(value.item())
+
+            if isinstance(value, np.ndarray):
+                return {
+                    "__audora_type__": "numpy.ndarray",
+                    "dtype": str(value.dtype),
+                    "data": value.tolist(),
+                }
+        except ImportError:
+            pass
+
+        try:
+            import pandas as pd
+
+            if isinstance(value, pd.DataFrame):
+                return {
+                    "__audora_type__": "pandas.DataFrame",
+                    "orient": "split",
+                    "data": value.to_json(orient="split", date_format="iso"),
+                }
+        except ImportError:
+            pass
+
+        raise TypeError(f"Unsupported Redis cache value type: {type(value).__name__}")
+
+    def _from_json_safe(self, value: Any) -> Any:
+        """Restore values produced by _to_json_safe without unsafe deserialization."""
+        if value is None or isinstance(value, (bool, str, int, float)):
+            return value
+
+        if isinstance(value, list):
+            return [self._from_json_safe(item) for item in value]
+
+        if not isinstance(value, dict):
+            raise TypeError("Invalid cached JSON value")
+
+        value_type = value.get("__audora_type__")
+        if value_type == "bytes":
+            data = value.get("data")
+            if not isinstance(data, str):
+                raise TypeError("Invalid cached bytes payload")
+            return base64.b64decode(data.encode("ascii"), validate=True)
+
+        if value_type == "tuple":
+            items = value.get("items")
+            if not isinstance(items, list):
+                raise TypeError("Invalid cached tuple payload")
+            return tuple(self._from_json_safe(item) for item in items)
+
+        if value_type == "numpy.ndarray":
+            import numpy as np  # type: ignore[import-not-found]
+
+            return np.array(value.get("data", []), dtype=value.get("dtype"))
+
+        if value_type == "pandas.DataFrame":
+            import pandas as pd
+
+            if value.get("orient") != "split" or not isinstance(value.get("data"), str):
+                raise TypeError("Invalid cached DataFrame payload")
+            return pd.read_json(value["data"], orient="split")
+
+        if value_type:
+            raise TypeError(f"Unsupported cached value type marker: {value_type}")
+
+        return {key: self._from_json_safe(item) for key, item in value.items()}
+
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value as signed JSON; never pickle or execute cached data."""
+        payload = json.dumps(
+            self._to_json_safe(value),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
@@ -199,12 +307,12 @@ class RedisCacheBackend(CacheBackend):
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
     def _deserialize(self, value: bytes) -> Any | None:
-        """Deserialize cache value only after signature verification."""
+        """Deserialize signed JSON cache values only after signature verification."""
         try:
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -223,7 +331,7 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return self._from_json_safe(json.loads(payload.decode("utf-8")))
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -337,7 +445,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: JSON-compatible value to cache
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +540,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
