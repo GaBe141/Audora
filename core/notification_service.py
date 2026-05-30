@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -22,7 +23,50 @@ from typing import Any
 from urllib.parse import urlparse
 
 import aiohttp
+from aiohttp.abc import AbstractResolver
 import jinja2  # type: ignore[import-untyped]
+
+
+class StaticWebhookResolver(AbstractResolver):
+    """Resolve a previously validated webhook hostname to pinned IP addresses."""
+
+    def __init__(self, host: str, port: int, addresses: set[str]):
+        self.host = host
+        self.port = port
+        self.addresses = addresses
+
+    async def resolve(
+        self,
+        host: str,
+        port: int = 0,
+        family: int = socket.AF_INET,
+    ) -> list[dict[str, Any]]:
+        if host != self.host or port not in (0, self.port):
+            raise OSError("Unexpected webhook hostname resolution")
+
+        results = []
+        for address in sorted(self.addresses):
+            parsed = ipaddress.ip_address(address)
+            address_family = socket.AF_INET6 if parsed.version == 6 else socket.AF_INET
+            if family not in (0, socket.AF_UNSPEC, address_family):
+                continue
+            results.append(
+                {
+                    "hostname": host,
+                    "host": address,
+                    "port": self.port,
+                    "family": address_family,
+                    "proto": socket.IPPROTO_TCP,
+                    "flags": socket.AI_NUMERICHOST,
+                }
+            )
+
+        if not results:
+            raise OSError("No validated webhook address matched requested family")
+        return results
+
+    async def close(self) -> None:
+        return None
 
 
 class NotificationPriority(Enum):
@@ -91,6 +135,7 @@ class EnhancedNotificationService:
         self.sent_notifications: dict[str, Any] = {}
         self.notification_history: list[dict[str, Any]] = []
         self.failed_deliveries: list[dict[str, Any]] = []
+        self._validated_webhook_targets: dict[str, tuple[str, int, set[str]]] = {}
 
         # Initialize template engine with autoescape enabled for security
         self.template_env = jinja2.Environment(
@@ -233,6 +278,10 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL credentials are not allowed")
+        if parsed.fragment:
+            raise ValueError("Webhook URL fragments are not allowed")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
@@ -253,7 +302,42 @@ class EnhancedNotificationService:
                         "Webhook URL resolves to a private or restricted network address"
                     )
 
+        self._validated_webhook_targets[url.strip()] = (
+            hostname,
+            parsed.port or 443,
+            resolved_ips,
+        )
         return url
+
+    async def _post_webhook_json(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: int = 30,
+        allow_private: bool = False,
+    ) -> tuple[int, str]:
+        """POST JSON to a validated webhook without redirects or DNS re-resolution."""
+        validated_url = self._validate_webhook_url(url, allow_private=allow_private)
+        hostname, port, resolved_ips = self._validated_webhook_targets[validated_url.strip()]
+        resolver = StaticWebhookResolver(hostname, port, resolved_ips)
+        connector = aiohttp.TCPConnector(resolver=resolver, ttl_dns_cache=0)
+
+        async with (
+            aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as session,
+            session.post(
+                validated_url,
+                json=payload,
+                headers=headers,
+                allow_redirects=False,
+            ) as response,
+        ):
+            response_text = await response.text()
+            return response.status, response_text
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -570,17 +654,25 @@ System status: {{ system_status }}
                             )
                             msg.attach(attachment)
 
+            if (
+                email_config.get("username")
+                and email_config.get("password")
+                and not email_config.get("use_tls", True)
+            ):
+                return {"success": False, "error": "SMTP authentication requires TLS"}
+
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            try:
+                if email_config.get("use_tls", True):
+                    server.starttls(context=ssl.create_default_context())
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
-
-            server.send_message(msg)
-            server.quit()
+                server.send_message(msg)
+            finally:
+                server.quit()
 
             self.logger.info(
                 f"Email notification sent to {len(email_config['recipients'])} recipients"
@@ -600,7 +692,6 @@ System status: {{ system_status }}
             return {"success": False, "error": "Slack webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
             # Create Slack message format
             color_map = {
                 NotificationPriority.LOW: "good",
@@ -648,19 +739,18 @@ System status: {{ system_status }}
                 if fields:
                     slack_message["attachments"][0]["fields"] = fields
 
-            async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
-            ):
-                if response.status == 200:
-                    self.logger.info("Slack notification sent successfully")
-                    return {"success": True, "status_code": response.status}
-                else:
-                    error_text = await response.text()
-                    self.logger.error(
-                        f"Slack notification failed: {response.status} - {error_text}"
-                    )
-                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            status, response_text = await self._post_webhook_json(
+                webhook_url,
+                slack_message,
+                timeout=int(slack_config.get("timeout", 30)),
+                allow_private=False,
+            )
+            if status == 200:
+                self.logger.info("Slack notification sent successfully")
+                return {"success": True, "status_code": status}
+            else:
+                self.logger.error(f"Slack notification failed: {status} - {response_text}")
+                return {"success": False, "error": f"HTTP {status}: {response_text}"}
 
         except Exception as e:
             self.logger.error(f"Failed to send Slack notification: {e}")
@@ -675,7 +765,6 @@ System status: {{ system_status }}
             return {"success": False, "error": "Discord webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
             # Format content for Discord
             content = message.content
             if message.template_vars:
@@ -715,19 +804,18 @@ System status: {{ system_status }}
                 if fields:
                     discord_message["embeds"][0]["fields"] = fields
 
-            async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
-            ):
-                if response.status in [200, 204]:
-                    self.logger.info("Discord notification sent successfully")
-                    return {"success": True, "status_code": response.status}
-                else:
-                    error_text = await response.text()
-                    self.logger.error(
-                        f"Discord notification failed: {response.status} - {error_text}"
-                    )
-                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            status, response_text = await self._post_webhook_json(
+                webhook_url,
+                discord_message,
+                timeout=int(discord_config.get("timeout", 30)),
+                allow_private=False,
+            )
+            if status in [200, 204]:
+                self.logger.info("Discord notification sent successfully")
+                return {"success": True, "status_code": status}
+            else:
+                self.logger.error(f"Discord notification failed: {status} - {response_text}")
+                return {"success": False, "error": f"HTTP {status}: {response_text}"}
 
         except Exception as e:
             self.logger.error(f"Failed to send Discord notification: {e}")
@@ -752,9 +840,6 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
-            url = self._validate_webhook_url(
-                url, allow_private=self._allow_private_webhooks()
-            )
             # Prepare payload
             payload = {
                 "title": message.title,
@@ -774,21 +859,19 @@ System status: {{ system_status }}
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
             timeout = webhook_config.get("timeout", 30)
 
-            async with (
-                aiohttp.ClientSession() as session,
-                session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
-                ) as response,
-            ):
-                if 200 <= response.status < 300:
-                    self.logger.info(f"Webhook notification sent successfully: {response.status}")
-                    return {"success": True, "status_code": response.status}
-                else:
-                    error_text = await response.text()
-                    self.logger.error(
-                        f"Webhook notification failed: {response.status} - {error_text}"
-                    )
-                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            status, response_text = await self._post_webhook_json(
+                url,
+                payload,
+                headers=headers,
+                timeout=timeout,
+                allow_private=self._allow_private_webhooks(),
+            )
+            if 200 <= status < 300:
+                self.logger.info(f"Webhook notification sent successfully: {status}")
+                return {"success": True, "status_code": status}
+            else:
+                self.logger.error(f"Webhook notification failed: {status} - {response_text}")
+                return {"success": False, "error": f"HTTP {status}: {response_text}"}
 
         except Exception as e:
             self.logger.error(f"Failed to send webhook notification: {e}")
