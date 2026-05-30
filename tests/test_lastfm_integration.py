@@ -1,18 +1,11 @@
 """Integration tests for Last.fm API client (mocked HTTP)."""
 
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Last.fm module imports from .config which may not exist; provide a minimal mock
-if "integrations.config" not in sys.modules:
-    _config_mock = MagicMock()
-    _config_mock.get_config = lambda: MagicMock(get_lastfm_config=lambda: {"api_key": "test_key"})
-    sys.modules["integrations.config"] = _config_mock
-
 from core.exceptions import APIConnectionError, APIResponseError
-from integrations.lastfm_integration import LastFmAPI
+from integrations.lastfm_integration import BASE_URL, LastFmAPI
 
 
 class TestLastFmAPISuccess:
@@ -42,6 +35,17 @@ class TestLastFmAPISuccess:
         assert df.iloc[0]["name"] == "Artist One"
         assert df.iloc[0]["playcount"] == 100000
         assert "rank" in df.columns
+
+    def test_requests_use_https_endpoint(self):
+        api = LastFmAPI(api_key="test_key")
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"artists": {"artist": []}}
+        with patch.object(api.session, "get", return_value=mock_response) as get_mock:
+            api.get_top_artists_global(limit=5)
+
+        assert BASE_URL.startswith("https://")
+        assert get_mock.call_args.args[0].startswith("https://")
 
     def test_get_top_tracks_global_parses_response(self):
         api = LastFmAPI(api_key="test_key")
