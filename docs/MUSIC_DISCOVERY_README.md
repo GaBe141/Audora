@@ -365,7 +365,7 @@ spotify-insights/
 │   ├── statistical_analysis.py    # Statistical forecasting
 │   └── ...
 ├── config/
-│   ├── social_apis.json           # API configurations
+│   ├── social_api_config.json     # API configurations (ignored; contains secrets)
 │   └── api_template.json          # Configuration template
 ├── data/
 │   ├── reports/                   # Generated reports

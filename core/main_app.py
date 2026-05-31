@@ -18,7 +18,7 @@ from integrations.trending_schema import TrendingSchema
 class ComprehensiveMusicDiscoveryApp:
     """Main application orchestrating all music discovery systems."""
 
-    def __init__(self, config_file: str = "config/social_apis.json"):
+    def __init__(self, config_file: str = "config/social_api_config.json"):
         """Initialize the comprehensive music discovery application."""
         print("🎵 Initializing Comprehensive Music Discovery System")
         print("=" * 60)
