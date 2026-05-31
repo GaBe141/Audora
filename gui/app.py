@@ -4,7 +4,6 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +15,8 @@ from dash import Input, Output, State, ctx, dash_table, dcc, html
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+ALLOWED_DEMOS = {"statistical", "trending", "multi_source", "platform", "all"}
 
 app = dash.Dash(
     __name__,
@@ -345,6 +346,9 @@ app.layout = dbc.Container(
 
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
+    if not all(isinstance(arg, str) for arg in args):
+        return "Error", "Invalid command arguments"
+
     try:
         proc = subprocess.Popen(
             args,
@@ -396,6 +400,8 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
+        if demo_value not in ALLOWED_DEMOS:
+            return "Error", "Invalid demo selection"
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
@@ -561,7 +567,9 @@ def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
     import io
+
     import pandas as pd
+
     df = pd.DataFrame(table_data)
     buf = io.StringIO()
     df.to_csv(buf, index=False)
@@ -622,12 +630,14 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
             return "No URL"
         try:
             import asyncio
+
             from core.notification_service import (
                 EnhancedNotificationService,
                 NotificationChannel,
                 NotificationMessage,
                 NotificationPriority,
             )
+
             svc = EnhancedNotificationService()
             svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
             channel = getattr(NotificationChannel, channel_enum_name)
