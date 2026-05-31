@@ -5,14 +5,18 @@ Includes live trend dashboard, history search, notification settings, and accura
 """
 
 import json
+import os
+import secrets
 import subprocess
 import sys
+from ipaddress import ip_address
 from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import abort, request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -23,6 +27,54 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Audora",
 )
+
+_ALLOWED_DEMOS = {"statistical", "trending", "multi_source", "platform", "all"}
+_ALLOWED_COMMAND_SUFFIXES = {
+    ("--mode", "single"),
+    ("--setup",),
+    ("--validate",),
+    *(("--demo", demo) for demo in _ALLOWED_DEMOS),
+}
+
+
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_loopback(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        return ip_address(value.strip()).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_loopback_request() -> bool:
+    """Treat proxy-forwarded clients as remote unless every visible hop is local."""
+    candidates = [request.remote_addr]
+    forwarded_for = request.headers.get("X-Forwarded-For", "")
+    candidates.extend(part.strip() for part in forwarded_for.split(",") if part.strip())
+    return bool(candidates) and all(_is_loopback(candidate) for candidate in candidates)
+
+
+def _has_valid_gui_token() -> bool:
+    token = os.getenv("AUDORA_GUI_TOKEN", "").strip()
+    if not token:
+        return False
+    auth_header = request.headers.get("Authorization", "")
+    expected = f"Bearer {token}"
+    return secrets.compare_digest(auth_header, expected)
+
+
+@app.server.before_request
+def _enforce_local_or_token_authenticated_access():
+    """Fail closed if this prototyping GUI is exposed beyond loopback."""
+    if _is_loopback_request():
+        return None
+    if _truthy_env("AUDORA_GUI_ALLOW_REMOTE") and _has_valid_gui_token():
+        return None
+    abort(403, description="Audora GUI only accepts loopback requests unless token auth is enabled")
 
 # ---------------------------------------------------------------------------
 # Layout helpers
@@ -345,6 +397,17 @@ app.layout = dbc.Container(
 
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
+    main_path = str(PROJECT_ROOT / "main.py")
+    if (
+        not isinstance(args, list)
+        or len(args) < 3
+        or any(not isinstance(arg, str) for arg in args)
+        or args[0] != sys.executable
+        or args[1] != main_path
+        or tuple(args[2:]) not in _ALLOWED_COMMAND_SUFFIXES
+    ):
+        return "Error", "Rejected unsupported GUI command"
+
     try:
         proc = subprocess.Popen(
             args,
@@ -396,6 +459,8 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
+        if demo_value not in _ALLOWED_DEMOS:
+            return "Error", "Rejected unsupported demo"
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
@@ -589,10 +654,13 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
+            svc._validate_webhook_url(slack_url, allow_private=False)
             svc.config["slack"]["webhook_url"] = slack_url
         if discord_url:
+            svc._validate_webhook_url(discord_url, allow_private=False)
             svc.config["discord"]["webhook_url"] = discord_url
         if webhook_url:
+            svc._validate_webhook_url(webhook_url, allow_private=svc._allow_private_webhooks())
             svc.config["webhook"]["url"] = webhook_url
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
@@ -601,8 +669,10 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
         if smtp_pass:
-            svc.config["email"]["password"] = smtp_pass
+            svc.config["email"]["password"] = ""
         svc.save_config()
+        if smtp_pass:
+            return "Saved (SMTP password not persisted; set SMTP_PASSWORD in the environment)"
         return "Saved"
     except Exception as e:
         return f"Error: {e}"

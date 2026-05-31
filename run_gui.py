@@ -2,6 +2,10 @@
 """
 Audora prototyping GUI - entry point.
 Starts the Dash server at http://127.0.0.1:8050
+
+Remote access is denied by default in gui.app. To expose the GUI intentionally,
+set AUDORA_GUI_ALLOW_REMOTE=1 and require clients to send
+Authorization: Bearer $AUDORA_GUI_TOKEN.
 """
 
 import sys
