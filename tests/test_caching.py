@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +85,53 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+    def test_build_cache_key_uses_sha256_digest(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ("artist",), {"region": "US"})
+        parts = key.split(":")
+        assert len(parts) == 3
+        assert all(len(part) == 64 for part in parts[1:])
+
+
+class TestRedisCacheSerialization:
+    """Regression coverage for safe Redis payload serialization."""
+
+    def test_json_serialization_roundtrip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = {"artist": "Example", "scores": [1, 2, 3], "active": True}
+
+        serialized = backend._serialize(payload)
+
+        assert backend._deserialize(serialized) == payload
+
+    def test_bytes_serialization_roundtrip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = b"\x00audora\xff"
+
+        serialized = backend._serialize(payload)
+
+        assert backend._deserialize(serialized) == payload
+
+    def test_dataframe_serialization_roundtrip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        payload = pd.DataFrame({"artist": ["A", "B"], "score": [99.5, 87.0]})
+
+        serialized = backend._serialize(payload)
+        restored = backend._deserialize(serialized)
+
+        pd.testing.assert_frame_equal(restored, payload)
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        legacy_payload = pickle.dumps({"unsafe": "payload"})
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError, match="not JSON serializable"):
+            backend._serialize(object())
 
 
 class TestCachedDecorator:
