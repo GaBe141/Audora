@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
 import time
 
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,70 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache serialization safety."""
+
+    def _backend(self):
+        return object.__new__(RedisCacheBackend)
+
+    def test_json_values_round_trip_without_pickle(self):
+        backend = self._backend()
+        value = {
+            "tracks": ["Song A", "Song B"],
+            "score": 87.5,
+            "active": True,
+            "metadata": {"source": None},
+        }
+
+        is_valid, result = backend._deserialize(backend._serialize(value))
+
+        assert is_valid is True
+        assert result == value
+
+    def test_bytes_round_trip_without_pickle(self):
+        backend = self._backend()
+        value = b"binary cache payload"
+
+        is_valid, result = backend._deserialize(backend._serialize(value))
+
+        assert is_valid is True
+        assert result == value
+
+    def test_dataframe_round_trip_without_pickle(self):
+        import pandas as pd
+
+        backend = self._backend()
+        value = pd.DataFrame({"track": ["Song A", "Song B"], "score": [80, 92]})
+
+        is_valid, result = backend._deserialize(backend._serialize(value))
+
+        assert is_valid is True
+        pd.testing.assert_frame_equal(result, value)
+
+    def test_rejects_legacy_or_malformed_pickle_payloads(self):
+        backend = self._backend()
+
+        is_valid, result = backend._deserialize(b"\x80\x04cos\nsystem\n.")
+
+        assert is_valid is False
+        assert result is None
+
+    def test_rejects_unsupported_object_types(self):
+        backend = self._backend()
+
+        class Unsupported:
+            pass
+
+        with pytest.raises(TypeError, match="Unsupported Redis cache value type"):
+            backend._serialize(Unsupported())
+
+    def test_cache_key_hashing_uses_sha256(self):
+        manager = CacheManager(backend=LocalCacheBackend())
+
+        key = manager._build_cache_key("fn", ("arg",), {})
+        digest = key.split(":")[-1]
+
+        assert digest == hashlib.sha256(b'["arg"]').hexdigest()
+        assert len(digest) == 64
