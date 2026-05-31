@@ -1,9 +1,9 @@
 """Security tests for notification webhook URL validation."""
 
 import asyncio
+import socket
 import ssl
 from unittest.mock import MagicMock
-import socket
 
 import pytest
 
