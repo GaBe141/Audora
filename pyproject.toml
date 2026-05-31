@@ -1,7 +1,7 @@
 # Audora Music Discovery System - Project Configuration
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=82.0.1", "wheel>=0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -130,8 +130,8 @@ ignore_missing_imports = true
 
 [tool.bandit]
 exclude_dirs = ["tests", "scripts/demo_*", "notebooks", ".venv", "venv"]
-# Skip: B101=assert_used, B601=paramiko, B403=pickle_import, B301=pickle_loads, B324=hashlib_md5, B608=hardcoded_sql
-skips = ["B101", "B601", "B403", "B301", "B324", "B608"]
+# Skip: B101=assert_used, B601=paramiko, B608=hardcoded_sql
+skips = ["B101", "B601", "B608"]
 
 [tool.bandit.assert_used]
 skips = ["*/test_*.py", "*/tests/*.py"]

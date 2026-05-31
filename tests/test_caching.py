@@ -1,10 +1,20 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
+
+
+def _redis_backend_without_connection() -> RedisCacheBackend:
+    return object.__new__(RedisCacheBackend)
 
 
 class TestLocalCacheBackend:
@@ -118,3 +128,49 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Redis cache serialization must not execute attacker-controlled bytes."""
+
+    def test_serializes_json_compatible_values_and_bytes(self):
+        backend = _redis_backend_without_connection()
+        value = {"name": "track", "rankings": [1, 2, 3], "raw": b"abc"}
+
+        decoded = backend._deserialize(backend._serialize(value))
+
+        assert decoded == value
+
+    def test_serializes_pandas_dataframes_without_pickle(self):
+        backend = _redis_backend_without_connection()
+        df = pd.DataFrame({"track": ["a", "b"], "score": [10, 20]})
+
+        decoded = backend._deserialize(backend._serialize(df))
+
+        pd.testing.assert_frame_equal(decoded, df)
+
+    def test_rejects_legacy_pickle_payloads(self):
+        backend = _redis_backend_without_connection()
+
+        assert backend._deserialize(pickle.dumps({"unsafe": True})) is None
+
+    def test_rejects_legacy_signed_pickle_envelopes(self):
+        backend = _redis_backend_without_connection()
+        legacy_payload = b'{"v":1,"alg":"HMAC-SHA256","sig":"x","payload":"e30="}'
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_unsupported_objects_are_not_serialized(self):
+        backend = _redis_backend_without_connection()
+
+        with pytest.raises(TypeError):
+            backend._serialize({object()})
+
+    def test_cache_keys_use_sha256_components(self):
+        cache = CacheManager(backend=LocalCacheBackend())
+
+        key = cache._build_cache_key("prefix", ("artist",), {"region": "US"})
+        digest_parts = key.split(":")[1:]
+
+        assert digest_parts
+        assert all(len(part) == 64 for part in digest_parts)
