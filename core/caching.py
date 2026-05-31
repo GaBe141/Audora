@@ -4,19 +4,21 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
-import base64
+import datetime as dt
 import hashlib
 import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
+
+_TYPE_MARKER = "__audora_type__"
+_JSON_ENVELOPE_VERSION = 2
 
 # Try to import Redis, fall back to local cache if unavailable
 try:
@@ -159,7 +161,7 @@ class RedisCacheBackend(CacheBackend):
             db=db,
             password=password,
             max_connections=max_connections,
-            decode_responses=False,  # Keep binary mode for signed payloads
+            decode_responses=False,  # Keep binary mode for signed JSON payloads
         )
         self._client = redis.Redis(connection_pool=self._pool)
         self._signing_key = self._get_signing_key()
@@ -186,15 +188,119 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
+    def _to_json_safe(self, value: Any) -> Any:
+        """Convert supported cache values into a non-executable JSON structure."""
+        if value is None or isinstance(value, str | int | float | bool):
+            return value
+
+        if isinstance(value, dt.datetime):
+            return {_TYPE_MARKER: "datetime", "value": value.isoformat()}
+
+        if isinstance(value, dt.date):
+            return {_TYPE_MARKER: "date", "value": value.isoformat()}
+
+        if isinstance(value, tuple):
+            return {_TYPE_MARKER: "tuple", "items": [self._to_json_safe(item) for item in value]}
+
+        if isinstance(value, list):
+            return [self._to_json_safe(item) for item in value]
+
+        if isinstance(value, dict):
+            return {
+                _TYPE_MARKER: "dict",
+                "items": [
+                    [self._to_json_safe(key), self._to_json_safe(item)]
+                    for key, item in value.items()
+                ],
+            }
+
+        try:
+            import numpy as np
+
+            if isinstance(value, np.generic):
+                return self._to_json_safe(value.item())
+            if isinstance(value, np.ndarray):
+                return {_TYPE_MARKER: "ndarray", "items": self._to_json_safe(value.tolist())}
+        except ImportError:
+            pass
+
+        try:
+            import pandas as pd
+
+            if isinstance(value, pd.DataFrame):
+                return {
+                    _TYPE_MARKER: "dataframe",
+                    "value": json.loads(value.to_json(orient="split", date_format="iso")),
+                }
+            if isinstance(value, pd.Series):
+                return {
+                    _TYPE_MARKER: "series",
+                    "value": json.loads(value.to_json(orient="split", date_format="iso")),
+                }
+        except ImportError:
+            pass
+
+        raise TypeError(f"Unsupported cache value type: {type(value).__name__}")
+
+    def _from_json_safe(self, value: Any) -> Any:
+        """Rebuild values from the safe JSON cache representation."""
+        if value is None or isinstance(value, str | int | float | bool):
+            return value
+
+        if isinstance(value, list):
+            return [self._from_json_safe(item) for item in value]
+
+        if not isinstance(value, dict):
+            raise TypeError(f"Unsupported serialized cache type: {type(value).__name__}")
+
+        value_type = value.get(_TYPE_MARKER)
+        if value_type == "dict":
+            return {
+                self._from_json_safe(key): self._from_json_safe(item)
+                for key, item in value.get("items", [])
+            }
+        if value_type == "tuple":
+            return tuple(self._from_json_safe(item) for item in value.get("items", []))
+        if value_type == "datetime":
+            return dt.datetime.fromisoformat(value["value"])
+        if value_type == "date":
+            return dt.date.fromisoformat(value["value"])
+        if value_type == "ndarray":
+            return self._from_json_safe(value.get("items", []))
+        if value_type == "dataframe":
+            import pandas as pd
+
+            frame_data = value["value"]
+            return pd.DataFrame(
+                data=frame_data.get("data", []),
+                index=frame_data.get("index"),
+                columns=frame_data.get("columns"),
+            )
+        if value_type == "series":
+            import pandas as pd
+
+            return pd.read_json(json.dumps(value["value"]), orient="split", typ="series")
+
+        raise ValueError("Unsupported cache serialization marker")
+
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value with integrity protection and no executable payloads."""
+        payload_doc = {
+            "format": "audora-json",
+            "data": self._to_json_safe(value),
+        }
+        payload = json.dumps(
+            payload_doc,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": _JSON_ENVELOPE_VERSION,
             "alg": "HMAC-SHA256",
             "sig": signature,
-            "payload": base64.b64encode(payload).decode("ascii"),
+            "payload": payload.decode("utf-8"),
         }
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
@@ -204,7 +310,7 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != _JSON_ENVELOPE_VERSION
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -217,13 +323,18 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with non-string payload")
                 return None
 
-            payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            payload = payload_b64.encode("utf-8")
             expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            payload_doc = json.loads(payload.decode("utf-8"))
+            if not isinstance(payload_doc, dict) or payload_doc.get("format") != "audora-json":
+                logger.warning("Rejected cache entry with invalid payload format")
+                return None
+
+            return self._from_json_safe(payload_doc.get("data"))
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -337,7 +448,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be representable in Audora's safe JSON cache format)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
