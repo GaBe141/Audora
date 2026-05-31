@@ -38,10 +38,10 @@ ENHANCED_PACKAGES = [
     # Template engine
     "jinja2>=3.1.6",
     # Environment management
-    "python-dotenv>=0.19.0",
+    "python-dotenv>=1.2.2",
     # Development tools
     "pytest>=7.0.0",
-    "black>=22.0.0",
+    "black>=26.3.1",
     "flake8>=4.0.0",
 ]
 
@@ -135,7 +135,7 @@ class EnhancedMusicDiscoverySetup:
             try:
                 directory.mkdir(parents=True, exist_ok=True)
                 if directory == self.config_dir and os.name != "nt":
-                    os.chmod(directory, 0o700)
+                    directory.chmod(0o700)
                 self.logger.info(f"  Created directory: {directory}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {directory}: {e}")
@@ -197,10 +197,10 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
+                with config_path.open("w") as f:
                     json.dump(config_data, f, indent=2)
                 if os.name != "nt":
-                    os.chmod(config_path, 0o600)
+                    config_path.chmod(0o600)
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -481,7 +481,7 @@ System Status: {{ system_status }}
         for template_name, template_content in templates.items():
             template_path = self.templates_dir / template_name
             try:
-                with open(template_path, "w") as f:
+                with template_path.open("w") as f:
                     f.write(template_content.strip())
                 self.logger.info(f"  Created template: {template_name}")
             except Exception as e:
@@ -530,10 +530,10 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
+            with env_path.open("w") as f:
                 f.write(env_template.strip())
             if os.name != "nt":
-                os.chmod(env_path, 0o600)
+                env_path.chmod(0o600)
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True
