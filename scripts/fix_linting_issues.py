@@ -9,9 +9,9 @@ import sys
 
 def print_step(step_num: int, description: str):
     """Print formatted step."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Step {step_num}: {description}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
 
 def run_command(cmd: list[str], description: str) -> bool:
