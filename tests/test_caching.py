@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
 
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,52 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache payload safety."""
+
+    def test_json_payload_round_trips_without_pickle(self):
+        backend = object.__new__(RedisCacheBackend)
+        payload = {"tracks": ["a", "b"], "score": 98.5, "fresh": True}
+
+        serialized = backend._serialize(payload)
+
+        assert b"\"type\":\"json\"" in serialized
+        assert backend._deserialize(serialized) == payload
+
+    def test_bytes_payload_round_trips(self):
+        backend = object.__new__(RedisCacheBackend)
+        payload = b"\x00audora-cache"
+
+        assert backend._deserialize(backend._serialize(payload)) == payload
+
+    def test_dataframe_payload_round_trips(self):
+        pd = pytest.importorskip("pandas")
+        backend = object.__new__(RedisCacheBackend)
+        payload = pd.DataFrame([{"track": "Song A", "score": 91}])
+
+        restored = backend._deserialize(backend._serialize(payload))
+
+        pd.testing.assert_frame_equal(restored, payload)
+
+    def test_rejects_legacy_pickle_payloads(self):
+        backend = object.__new__(RedisCacheBackend)
+        legacy_payload = pickle.dumps({"unsafe": "payload"})
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_rejects_unsupported_object_serialization(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError):
+            backend._serialize(object())
+
+    def test_cache_key_uses_sha256_digest_length(self):
+        cache = CacheManager(backend=LocalCacheBackend())
+
+        key = cache._build_cache_key("fn", ({"artist": "A"},), {"limit": 10})
+        digests = key.split(":")[1:]
+
+        assert digests
+        assert all(len(digest) == 64 for digest in digests)
