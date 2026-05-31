@@ -35,7 +35,7 @@ Comprehensive code quality improvements, dependency management, and repository o
 **Type Stubs Installed:**
 
 ```bash
-pip install types-requests types-pandas
+pip install types-requests pandas-stubs
 ```
 
 **Benefits:**
@@ -89,23 +89,24 @@ docs/_build/, site/
 
 ```txt
 # Core - Updated to latest stable
-spotipy==2.24.0 (was >=2.23.0)
+spotipy==2.26.0 (was >=2.23.0)
 pandas==2.3.3 (was >=2.2.2)
 matplotlib==3.10.6 (was >=3.8.4)
 numpy==1.26.4 (was >=1.24.0)
 
 # Analytics - Latest versions
-darts==0.38.0 (was >=0.27.0)
+darts==0.44.1 (was >=0.27.0)
+pytorch-lightning==2.6.5
 scikit-learn==1.7.2 (was >=1.3.0)
 plotly==6.3.1 (was >=5.17.0)
 
 # NEW: Development tools
 mypy==1.18.2
 ruff==0.13.3
-black==25.9.0
+black==26.5.1
 flake8==7.3.0
-types-requests==2.32.0.20241221
-types-pandas==2.3.3.20250110
+types-requests==2.33.0.20260518
+pandas-stubs==2.3.3.260113
 ```
 
 **Benefits:**
