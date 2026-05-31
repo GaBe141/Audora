@@ -42,7 +42,7 @@ class APIConfig:
 class SocialAPIManager:
     """Manages API configurations and rate limiting for all platforms."""
 
-    def __init__(self, config_file: str = "config/social_apis.json"):
+    def __init__(self, config_file: str = "config/social_api_config.json"):
         self.config_file = Path(config_file)
         self.configs: dict[str, APIConfig] = {}
         self.load_configs()

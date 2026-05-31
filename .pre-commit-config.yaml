@@ -4,7 +4,7 @@
 repos:
   # Black - Code formatting
   - repo: https://github.com/psf/black
-    rev: 24.10.0
+    rev: 26.5.1
     hooks:
       - id: black
         name: Format code with Black
@@ -13,7 +13,7 @@ repos:
 
   # Ruff - Fast Python linter
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+    rev: v0.15.15
     hooks:
       - id: ruff
         name: Lint with Ruff
@@ -23,14 +23,14 @@ repos:
 
   # MyPy - Static type checking
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.11.2
+    rev: v2.1.0
     hooks:
       - id: mypy
         name: Type check with MyPy
         additional_dependencies:
-          - types-requests
-          - types-pytz
-          - pandas-stubs
+          - types-requests==2.33.0.20260518
+          - types-pytz==2026.2.0.20260518
+          - pandas-stubs==3.0.3.260530
         args:
           - --ignore-missing-imports
           - --no-strict-optional
@@ -62,12 +62,12 @@ repos:
 
   # Security checks
   - repo: https://github.com/PyCQA/bandit
-    rev: 1.7.10
+    rev: 1.9.4
     hooks:
       - id: bandit
         name: Security check with Bandit
         args: ['-c', 'pyproject.toml']
-        additional_dependencies: ['bandit[toml]']
+        additional_dependencies: ['bandit[toml]==1.9.4']
         exclude: ^(tests/|scripts/demo_)
 
 # Global settings

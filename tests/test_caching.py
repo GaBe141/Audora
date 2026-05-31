@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +84,61 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+    def test_build_cache_key_uses_sha256_digests(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ("artist",), {"region": "US"})
+        parts = key.split(":")
+        assert parts[0] == "prefix"
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+
+
+class TestRedisCacheSerialization:
+    """Redis payloads must be safe to parse even if Redis is tampered with."""
+
+    def test_round_trips_json_compatible_values(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = {"artist": "Example", "scores": [1, 2, 3], "active": True}
+
+        payload = backend._serialize(value)
+
+        assert backend._deserialize(payload) == value
+
+    def test_round_trips_bytes(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = b"\x00audora\xff"
+
+        payload = backend._serialize(value)
+
+        assert backend._deserialize(payload) == value
+
+    def test_round_trips_dataframes(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = pd.DataFrame({"track": ["One", "Two"], "score": [0.9, 0.8]})
+
+        payload = backend._serialize(value)
+        decoded = backend._deserialize(payload)
+
+        pd.testing.assert_frame_equal(decoded, value)
+
+    def test_rejects_legacy_pickle_payloads(self):
+        backend = object.__new__(RedisCacheBackend)
+        legacy_payload = pickle.dumps({"should": "not load"})
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        class Unsupported:
+            pass
+
+        try:
+            backend._serialize(Unsupported())
+        except TypeError as exc:
+            assert "Unsupported Redis cache value type" in str(exc)
+        else:
+            raise AssertionError("unsupported objects must not be serialized")
 
 
 class TestCachedDecorator:
