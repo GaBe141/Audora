@@ -4,12 +4,13 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -23,6 +24,17 @@ from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+
+_SENSITIVE_CONFIG_KEYS = {
+    "authorization",
+    "api_key",
+    "api_secret",
+    "access_token",
+    "refresh_token",
+    "secret",
+    "token",
+    "password",
+}
 
 
 class NotificationPriority(Enum):
@@ -137,11 +149,13 @@ class EnhancedNotificationService:
                 "channel": os.getenv("SLACK_CHANNEL", "#music-trends"),
                 "username": os.getenv("SLACK_USERNAME", "Music Discovery Bot"),
                 "icon_emoji": ":musical_note:",
+                "timeout": 30,
             },
             "discord": {
                 "webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),
                 "username": os.getenv("DISCORD_USERNAME", "Music Discovery"),
                 "avatar_url": "",
+                "timeout": 30,
             },
             "webhook": {
                 "url": os.getenv("CUSTOM_WEBHOOK_URL", ""),
@@ -181,6 +195,24 @@ class EnhancedNotificationService:
 
         return default_config
 
+    def _strip_sensitive_config(self, value: Any) -> Any:
+        """Return a copy of config data with secrets removed before persistence."""
+        if isinstance(value, dict):
+            safe_config = {}
+            for key, item in value.items():
+                normalized_key = key.lower()
+                if (
+                    normalized_key in _SENSITIVE_CONFIG_KEYS
+                    or normalized_key.endswith("_secret")
+                    or "token" in normalized_key
+                ):
+                    continue
+                safe_config[key] = self._strip_sensitive_config(item)
+            return safe_config
+        if isinstance(value, list):
+            return [self._strip_sensitive_config(item) for item in value]
+        return value
+
     def save_config(self, path: str = "config/notification_config.json") -> None:
         """Persist the current channel configuration to a JSON file.
 
@@ -192,12 +224,14 @@ class EnhancedNotificationService:
         # Only save channel-specific sections (not internal runtime state)
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = self._strip_sensitive_config(
+            {k: self.config[k] for k in saveable_keys if k in self.config}
+        )
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -553,7 +587,7 @@ System status: {{ system_status }}
             msg.attach(MIMEText(text_content, "plain"))
 
             # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            html_content = html.escape(text_content, quote=True).replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
             # Add attachments
@@ -648,8 +682,9 @@ System status: {{ system_status }}
                 if fields:
                     slack_message["attachments"][0]["fields"] = fields
 
+            timeout = aiohttp.ClientTimeout(total=slack_config.get("timeout", 30))
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(timeout=timeout) as session,
                 session.post(webhook_url, json=slack_message) as response,
             ):
                 if response.status == 200:
@@ -715,8 +750,9 @@ System status: {{ system_status }}
                 if fields:
                     discord_message["embeds"][0]["fields"] = fields
 
+            timeout = aiohttp.ClientTimeout(total=discord_config.get("timeout", 30))
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(timeout=timeout) as session,
                 session.post(webhook_url, json=discord_message) as response,
             ):
                 if response.status in [200, 204]:

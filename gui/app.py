@@ -4,7 +4,6 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -371,6 +370,20 @@ def _get_data_store():
     return EnhancedMusicDataStore(str(db_path))
 
 
+def _set_validated_webhook_urls(svc, slack_url: str | None, discord_url: str | None, webhook_url: str | None) -> None:
+    """Validate and apply webhook URLs before they are persisted from the GUI."""
+    if slack_url:
+        svc.config["slack"]["webhook_url"] = svc._validate_webhook_url(slack_url, allow_private=False)
+    if discord_url:
+        svc.config["discord"]["webhook_url"] = svc._validate_webhook_url(
+            discord_url, allow_private=False
+        )
+    if webhook_url:
+        svc.config["webhook"]["url"] = svc._validate_webhook_url(
+            webhook_url, allow_private=svc._allow_private_webhooks()
+        )
+
+
 # ---------------------------------------------------------------------------
 # Callbacks — sidebar actions
 # ---------------------------------------------------------------------------
@@ -561,6 +574,7 @@ def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
     import io
+
     import pandas as pd
     df = pd.DataFrame(table_data)
     buf = io.StringIO()
@@ -588,12 +602,7 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
     try:
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
-        if slack_url:
-            svc.config["slack"]["webhook_url"] = slack_url
-        if discord_url:
-            svc.config["discord"]["webhook_url"] = discord_url
-        if webhook_url:
-            svc.config["webhook"]["url"] = webhook_url
+        _set_validated_webhook_urls(svc, slack_url, discord_url, webhook_url)
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
         if smtp_port:
@@ -601,7 +610,7 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
         if smtp_pass:
-            svc.config["email"]["password"] = smtp_pass
+            return "Error: SMTP passwords must be configured with SMTP_PASSWORD"
         svc.save_config()
         return "Saved"
     except Exception as e:
@@ -622,6 +631,7 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
             return "No URL"
         try:
             import asyncio
+
             from core.notification_service import (
                 EnhancedNotificationService,
                 NotificationChannel,
