@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pandas as pd
+import pytest
+from pandas.testing import assert_frame_equal
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,61 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for safe Redis cache payload handling."""
+
+    def _backend(self) -> RedisCacheBackend:
+        return object.__new__(RedisCacheBackend)
+
+    def test_round_trips_json_compatible_values_and_bytes(self):
+        backend = self._backend()
+        value = {"name": "track", "scores": [1, 2.5, None], "payload": b"abc"}
+
+        serialized = backend._serialize(value)
+        assert backend._deserialize(serialized) == value
+
+    def test_round_trips_dataframes_without_pickle(self):
+        backend = self._backend()
+        frame = pd.DataFrame({"track": ["A", "B"], "score": [1.0, 2.0]})
+
+        serialized = backend._serialize(frame)
+        decoded = backend._deserialize(serialized)
+
+        assert_frame_equal(decoded, frame)
+
+    def test_rejects_type_changing_payloads(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError):
+            backend._serialize(("tuple", "would", "become", "list"))
+
+        with pytest.raises(TypeError):
+            backend._serialize({1: "non-string keys would change type"})
+
+    def test_invalid_redis_payload_is_deleted_without_deserializing(self):
+        class FakeClient:
+            def __init__(self):
+                self.deleted = []
+
+            def get(self, _key):
+                return b"not-json"
+
+            def delete(self, key):
+                self.deleted.append(key)
+
+        backend = self._backend()
+        backend._client = FakeClient()
+
+        assert backend.get("cache-key") is None
+        assert backend._client.deleted == ["cache-key"]
+
+    def test_serialized_payload_is_json_envelope(self):
+        backend = self._backend()
+
+        envelope = json.loads(backend._serialize({"track": "A"}).decode("utf-8"))
+
+        assert envelope["v"] == 1
+        assert envelope["type"] == "json"
+        assert "payload" not in envelope

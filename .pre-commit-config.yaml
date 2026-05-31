@@ -4,7 +4,7 @@
 repos:
   # Black - Code formatting
   - repo: https://github.com/psf/black
-    rev: 24.10.0
+    rev: 26.5.1
     hooks:
       - id: black
         name: Format code with Black
@@ -28,9 +28,9 @@ repos:
       - id: mypy
         name: Type check with MyPy
         additional_dependencies:
-          - types-requests
-          - types-pytz
-          - pandas-stubs
+          - types-requests==2.33.0.20260518
+          - types-pytz==2026.2.0.20260518
+          - pandas-stubs==2.3.3.260113
         args:
           - --ignore-missing-imports
           - --no-strict-optional
