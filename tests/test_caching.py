@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -81,6 +86,12 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_cache_key_uses_sha256_digest(self, mock_cache):
+        cache_key = mock_cache._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        _, args_digest, kwargs_digest = cache_key.split(":")
+        assert len(args_digest) == 64
+        assert len(kwargs_digest) == 64
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +129,112 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Redis serialization must avoid unsafe pickle deserialization."""
+
+    def _backend(self):
+        return object.__new__(RedisCacheBackend)
+
+    def test_json_compatible_value_round_trips(self):
+        backend = self._backend()
+        value = {"artists": ["one", "two"], "score": 99.5, "active": True}
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_bytes_round_trip(self):
+        backend = self._backend()
+        value = b"\x00audora\xff"
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_dataframe_round_trip(self):
+        backend = self._backend()
+        value = pd.DataFrame({"track": ["a", "b"], "score": [1.5, 2.5]})
+
+        restored = backend._deserialize(backend._serialize(value))
+
+        pd.testing.assert_frame_equal(restored, value)
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = self._backend()
+
+        assert backend._deserialize(pickle.dumps({"unsafe": "payload"})) is None
+
+    def test_unsupported_object_is_not_serialized(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            backend._serialize(object())
+
+    def test_public_set_get_round_trips_supported_json(self):
+        class FakeRedisClient:
+            def __init__(self):
+                self.values = {}
+
+            def set(self, key, value):
+                self.values[key] = value
+
+            def setex(self, key, ttl, value):
+                self.values[key] = value
+
+            def get(self, key):
+                return self.values.get(key)
+
+            def delete(self, key):
+                self.values.pop(key, None)
+
+        backend = self._backend()
+        backend._client = FakeRedisClient()
+        value = {"artists": ["one", "two"], "score": 99.5, "active": True}
+
+        backend.set("cache-key", value, ttl=60)
+
+        assert backend.get("cache-key") == value
+
+    def test_rejects_non_type_preserving_json_values(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            backend._serialize(("tuple", "would", "become", "list"))
+
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            backend._serialize({1: "integer key would become string"})
+
+    def test_get_rejects_and_deletes_legacy_pickle_payload(self):
+        class FakeRedisClient:
+            def __init__(self):
+                self.deleted_keys = []
+
+            def get(self, key):
+                return pickle.dumps({"unsafe": "payload"})
+
+            def delete(self, key):
+                self.deleted_keys.append(key)
+
+        backend = self._backend()
+        backend._client = FakeRedisClient()
+
+        assert backend.get("cache-key") is None
+        assert backend._client.deleted_keys == ["cache-key"]
+
+    def test_set_does_not_write_unsupported_values(self):
+        class FakeRedisClient:
+            def __init__(self):
+                self.set_calls = []
+                self.setex_calls = []
+
+            def set(self, *args):
+                self.set_calls.append(args)
+
+            def setex(self, *args):
+                self.setex_calls.append(args)
+
+        backend = self._backend()
+        backend._client = FakeRedisClient()
+
+        backend.set("cache-key", object(), ttl=60)
+
+        assert backend._client.set_calls == []
+        assert backend._client.setex_calls == []

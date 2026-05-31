@@ -3,6 +3,7 @@
 import json
 import logging
 import time
+from typing import Any
 
 import pandas as pd
 import requests
@@ -13,7 +14,7 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
 class LastFmAPI:
@@ -55,11 +56,19 @@ class LastFmAPI:
             return data
         except APIResponseError:
             raise
-        except requests.exceptions.RequestException as e:
-            logger.error("Last.fm request failed for %s: %s", method, e)
+        except requests.exceptions.HTTPError as e:
+            status_code = self._safe_http_status(e)
+            logger.error("Last.fm HTTP error on %s: status=%s", method, status_code)
             raise APIConnectionError(
-                message=f"Last.fm request failed: {e}",
-                details={"method": method},
+                message=f"Last.fm request failed with HTTP status {status_code}",
+                details={"method": method, "status_code": status_code},
+            ) from e
+        except requests.exceptions.RequestException as e:
+            error_type = e.__class__.__name__
+            logger.error("Last.fm request failed for %s: %s", method, error_type)
+            raise APIConnectionError(
+                message=f"Last.fm request failed: {error_type}",
+                details={"method": method, "error_type": error_type},
             ) from e
         except json.JSONDecodeError as e:
             logger.error("Last.fm returned invalid JSON for %s: %s", method, e)
@@ -67,6 +76,15 @@ class LastFmAPI:
                 message=f"Last.fm returned invalid JSON: {e}",
                 details={"method": method},
             ) from e
+
+    def _safe_http_status(self, error: requests.exceptions.HTTPError) -> int | str:
+        """Extract HTTP status without logging URLs or query strings."""
+        response: Any = getattr(error, "response", None)
+        if response is not None and getattr(response, "status_code", None):
+            return response.status_code
+
+        error_text = str(error)
+        return int(error_text) if error_text.isdigit() else "unknown"
 
     def get_top_artists_global(self, limit: int = 50) -> pd.DataFrame:
         """Get global top artists chart."""
