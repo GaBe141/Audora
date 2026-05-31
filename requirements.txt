@@ -10,7 +10,7 @@ numpy==1.26.4
 
 # Statistical Analysis and Forecasting
 statsmodels==0.14.5
-darts==0.38.0
+darts==0.44.1
 # Override vulnerable transitive version selected by darts.
 pytorch-lightning==2.6.5
 scikit-learn==1.7.2
