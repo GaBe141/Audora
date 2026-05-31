@@ -241,8 +241,15 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         try:
             with config_path.open("w") as f:
@@ -277,9 +284,7 @@ class EnhancedNotificationService:
         except ValueError:
             return True
 
-    def _validate_webhook_target(
-        self, url: str, *, allow_private: bool = False
-    ) -> WebhookTarget:
+    def _validate_webhook_target(self, url: str, *, allow_private: bool = False) -> WebhookTarget:
         """Validate outbound webhook URL and resolved addresses to reduce SSRF risk."""
         normalized_url = url.strip()
         parsed = urlparse(normalized_url)
