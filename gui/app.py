@@ -4,7 +4,6 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
 import os
 import secrets
 import subprocess
@@ -626,6 +625,7 @@ def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
     import io
+
     import pandas as pd
     df = pd.DataFrame(table_data)
     buf = io.StringIO()
@@ -692,6 +692,7 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
             return "No URL"
         try:
             import asyncio
+
             from core.notification_service import (
                 EnhancedNotificationService,
                 NotificationChannel,
