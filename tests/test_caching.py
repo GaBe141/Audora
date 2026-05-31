@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -81,6 +86,12 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_cache_key_uses_sha256_digest(self, mock_cache):
+        cache_key = mock_cache._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        _, args_digest, kwargs_digest = cache_key.split(":")
+        assert len(args_digest) == 64
+        assert len(kwargs_digest) == 64
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +129,41 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Redis serialization must avoid unsafe pickle deserialization."""
+
+    def _backend(self):
+        return object.__new__(RedisCacheBackend)
+
+    def test_json_compatible_value_round_trips(self):
+        backend = self._backend()
+        value = {"artists": ["one", "two"], "score": 99.5, "active": True}
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_bytes_round_trip(self):
+        backend = self._backend()
+        value = b"\x00audora\xff"
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_dataframe_round_trip(self):
+        backend = self._backend()
+        value = pd.DataFrame({"track": ["a", "b"], "score": [1.5, 2.5]})
+
+        restored = backend._deserialize(backend._serialize(value))
+
+        pd.testing.assert_frame_equal(restored, value)
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = self._backend()
+
+        assert backend._deserialize(pickle.dumps({"unsafe": "payload"})) is None
+
+    def test_unsupported_object_is_not_serialized(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            backend._serialize(object())
