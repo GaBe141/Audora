@@ -20,11 +20,11 @@ ENHANCED_PACKAGES = [
     "matplotlib>=3.5.0",
     "seaborn>=0.11.0",
     "plotly>=5.0.0",
-    "requests>=2.25.0",
-    "aiohttp>=3.8.0",
+    "requests>=2.34.2",
+    "aiohttp>=3.13.5",
     "aiofiles>=0.8.0",
     # Data science and ML
-    "scikit-learn>=1.0.0",
+    "scikit-learn>=1.7.2",
     "scipy>=1.7.0",
     # Statistical analysis (optional)
     "statsmodels>=0.13.0",
@@ -32,12 +32,12 @@ ENHANCED_PACKAGES = [
     "dash>=2.0.0",
     "dash-bootstrap-components>=1.0.0",
     # Template engine
-    "jinja2>=3.0.0",
+    "jinja2>=3.1.6",
     # Environment management
-    "python-dotenv>=0.19.0",
+    "python-dotenv>=1.2.2",
     # Development tools
     "pytest>=7.0.0",
-    "black>=22.0.0",
+    "black>=26.5.1",
     "flake8>=4.0.0",
 ]
 

@@ -74,10 +74,17 @@ class EnhancedMusicDataStore:
         "is_active",
     }
 
-    def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
+    def __init__(
+        self,
+        db_path: str = "enhanced_music_trends.db",
+        backup_dir: str = "backups",
+        export_dir: str = "exports",
+    ):
         self.db_path = db_path
         self.backup_dir = Path(backup_dir)
         self.backup_dir.mkdir(exist_ok=True)
+        self.export_dir = Path(export_dir)
+        self.export_dir.mkdir(exist_ok=True)
         self.logger = logging.getLogger(__name__)
 
         # Initialize cache
@@ -944,6 +951,8 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        export_path = self._resolve_export_path(filepath)
+
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -959,12 +968,31 @@ class EnhancedMusicDataStore:
                 df = pd.read_sql_query(query, conn)
 
             # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            export_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(export_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {export_path}")
 
-        return filepath
+        return str(export_path)
+
+    def _resolve_export_path(self, filepath: str) -> Path:
+        """Resolve CSV exports inside the configured export directory."""
+        export_root = self.export_dir.resolve()
+        requested_path = Path(filepath).expanduser()
+
+        if requested_path.is_absolute():
+            resolved_path = requested_path.resolve()
+        elif requested_path.parts and requested_path.parts[0] == export_root.name:
+            resolved_path = (export_root.parent / requested_path).resolve()
+        else:
+            resolved_path = (export_root / requested_path).resolve()
+
+        try:
+            resolved_path.relative_to(export_root)
+        except ValueError as e:
+            raise ValueError("Export path must be inside the configured export directory") from e
+
+        return resolved_path
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""

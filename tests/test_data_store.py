@@ -107,3 +107,19 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportSecurity:
+    """Test export path confinement."""
+
+    def test_export_to_csv_rejects_paths_outside_export_dir(self, tmp_path):
+        store = EnhancedMusicDataStore(
+            db_path=str(tmp_path / "test_audora.db"),
+            backup_dir=str(tmp_path / "backups"),
+            export_dir=str(tmp_path / "exports"),
+        )
+        try:
+            with pytest.raises(ValueError, match="inside the configured export directory"):
+                store.export_to_csv("trends", str(tmp_path / "outside.csv"))
+        finally:
+            store.close_pool()
