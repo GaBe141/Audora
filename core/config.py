@@ -5,6 +5,7 @@ import sys
 import warnings
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -19,7 +20,7 @@ class SecureConfig:
             env_file: Path to .env file. If None, searches for .env in project root.
         """
         self.project_root = Path(__file__).resolve().parent.parent
-        self.env_file = env_file or (self.project_root / ".env")
+        self.env_file = Path(env_file) if env_file is not None else self.project_root / ".env"
         self._config: dict[str, Any] = {}
         self._load_environment()
 
@@ -30,6 +31,7 @@ class SecureConfig:
                 f"Environment file not found: {self.env_file}\n"
                 "Create a .env file with your API credentials.",
                 UserWarning,
+                stacklevel=2,
             )
             return
 
@@ -44,6 +46,7 @@ class SecureConfig:
                     f"Environment file permissions are too open: {file_mode}\n"
                     f"Consider running: chmod 600 {self.env_file}",
                     UserWarning,
+                    stacklevel=2,
                 )
 
     def get_spotify_config(self) -> dict[str, str]:
@@ -58,7 +61,8 @@ class SecureConfig:
         }
 
         # Validate redirect URI format
-        if not config["redirect_uri"].startswith(("http://localhost", "http://127.0.0.1")):
+        redirect = urlparse(config["redirect_uri"])
+        if redirect.scheme != "http" or redirect.hostname not in {"localhost", "127.0.0.1"}:
             raise ValueError(
                 f"Invalid redirect URI: {config['redirect_uri']}\n"
                 "For development, use http://localhost or http://127.0.0.1"
@@ -80,6 +84,7 @@ class SecureConfig:
                 "Last.fm API key format appears invalid. "
                 "Should be 32 character hexadecimal string.",
                 UserWarning,
+                stacklevel=2,
             )
 
         return {"api_key": api_key, "shared_secret": shared_secret or ""}
@@ -206,7 +211,7 @@ AUDIODB_API_KEY=123
 
             # Set restrictive permissions on Unix-like systems
             if hasattr(os, "chmod") and not sys.platform.startswith("win"):
-                os.chmod(self.env_file, 0o600)
+                self.env_file.chmod(0o600)
 
             print(f"✅ Created template: {self.env_file}")
             print("\n🔑 Next steps:")

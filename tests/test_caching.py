@@ -1,9 +1,13 @@
-"""Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
+"""Tests for core caching (LocalCacheBackend, Redis serialization, CacheManager)."""
 
+import pickle
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -58,6 +62,50 @@ class TestLocalCacheBackend:
         assert backend.get("d") == 4
         present = sum(1 for k in ("a", "b", "c") if backend.get(k) is not None)
         assert present == 2
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache serialization safety."""
+
+    def _backend(self):
+        return object.__new__(RedisCacheBackend)
+
+    def test_json_value_round_trips_without_pickle(self):
+        backend = self._backend()
+        value = {"tracks": [{"name": "Song", "score": 98}], "active": True}
+
+        serialized = backend._serialize(value)
+
+        assert b"pickle" not in serialized.lower()
+        assert backend._deserialize(serialized) == value
+
+    def test_bytes_value_round_trips(self):
+        backend = self._backend()
+        value = b"\x00audora-cache"
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_dataframe_value_round_trips(self):
+        pd = pytest.importorskip("pandas")
+        backend = self._backend()
+        frame = pd.DataFrame({"track": ["Song A", "Song B"], "score": [10, 20]})
+
+        restored = backend._deserialize(backend._serialize(frame))
+
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = self._backend()
+
+        assert backend._deserialize(pickle.dumps({"unsafe": True})) is None
+
+    def test_rejects_unsupported_value_types(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError):
+            backend._serialize({"bad": object()})
 
 
 class TestCacheManager:
@@ -118,3 +166,10 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256_digest(self, mock_cache):
+        cache_key = mock_cache._build_cache_key("prefix", ("artist",), {"region": "US"})
+        digest_parts = cache_key.split(":")[1:]
+
+        assert digest_parts
+        assert all(len(part) == 64 for part in digest_parts)
