@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import hmac
+import json
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,57 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis cache serialization without requiring a Redis server."""
+
+    @staticmethod
+    def _backend() -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_json_serialization_round_trips_supported_values(self):
+        backend = self._backend()
+        value = {
+            "artist": "Bjork",
+            "metrics": {"plays": 100, "score": 98.5},
+            "tags": ("electronic", "art pop"),
+        }
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_json_serialization_round_trips_dataframes(self):
+        backend = self._backend()
+        frame = pd.DataFrame(
+            [
+                {"track": "A", "score": 1.5, "metadata": {"source": "test"}},
+                {"track": "B", "score": 2.5, "metadata": {"source": "test"}},
+            ]
+        )
+
+        restored = backend._deserialize(backend._serialize(frame))
+
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_tampered_payloads(self):
+        backend = self._backend()
+        envelope = json.loads(backend._serialize({"safe": True}).decode("utf-8"))
+        envelope["payload"] = envelope["payload"].replace("true", "false")
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._backend()
+        payload = b"not-json"
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest(),
+            "payload": "bm90LWpzb24=",
+        }
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
