@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,55 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerializationSecurity:
+    """Tests for Redis serialization without unsafe pickle deserialization."""
+
+    def test_serializes_json_safe_values_without_pickle(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        serialized = backend._serialize({"artist": "Nina", "plays": 42, "tags": ("jazz", b"hi")})
+        envelope = json.loads(serialized.decode("utf-8"))
+
+        assert envelope["v"] == 2
+        assert envelope["format"] == "audora-json-cache"
+        assert b"\x80" not in serialized
+        assert backend._deserialize(serialized) == {
+            "artist": "Nina",
+            "plays": 42,
+            "tags": ("jazz", b"hi"),
+        }
+
+    def test_rejects_legacy_signed_pickle_payloads(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        legacy_payload = pickle.dumps({"unsafe": "payload"})
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "not-used-by-version-check",
+            "payload": legacy_payload.hex(),
+        }
+
+        assert backend._deserialize(json.dumps(legacy_envelope).encode("utf-8")) is None
+
+    def test_rejects_unsupported_value_types(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        try:
+            backend._serialize({"unsupported": {"set-values"}})
+        except TypeError as exc:
+            assert "Unsupported Redis cache value type" in str(exc)
+        else:
+            raise AssertionError("Expected unsupported cache values to be rejected")
+
+    def test_cache_key_uses_sha256_digest(self):
+        cache = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+        cache_key = cache._build_cache_key("fn", ("arg",), {"kw": "value"})
+        _, args_digest, kwargs_digest = cache_key.split(":")
+
+        assert len(args_digest) == 64
+        assert len(kwargs_digest) == 64
