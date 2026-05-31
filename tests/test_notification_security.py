@@ -3,6 +3,7 @@
 import asyncio
 import ssl
 from unittest.mock import MagicMock
+import socket
 
 import pytest
 
@@ -30,6 +31,11 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         with pytest.raises(ValueError, match="private or restricted"):
             svc._validate_webhook_url("https://10.0.0.1/webhook")
+
+    def test_rejects_shared_address_space_targets_by_default(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="private or restricted"):
+            svc._validate_webhook_url("https://100.64.0.1/webhook")
 
     def test_rejects_embedded_credentials(self):
         svc = EnhancedNotificationService()
@@ -77,10 +83,10 @@ class TestWebhookRedirectProtection:
         calls = []
         monkeypatch.setattr(
             "core.notification_service.aiohttp.ClientSession",
-            lambda: _FakeSession(calls),
+            lambda **kwargs: _FakeSession(calls),
         )
         svc = EnhancedNotificationService()
-        svc._validate_webhook_url = lambda url, allow_private=False: url
+        svc._webhook_connector = lambda url, allow_private=False: object()
         svc.config["slack"]["webhook_url"] = "https://example.com/slack"
         message = NotificationMessage(
             title="test",
@@ -99,10 +105,10 @@ class TestWebhookRedirectProtection:
         calls = []
         monkeypatch.setattr(
             "core.notification_service.aiohttp.ClientSession",
-            lambda: _FakeSession(calls),
+            lambda **kwargs: _FakeSession(calls),
         )
         svc = EnhancedNotificationService()
-        svc._validate_webhook_url = lambda url, allow_private=False: url
+        svc._webhook_connector = lambda url, allow_private=False: object()
         svc.config["discord"]["webhook_url"] = "https://example.com/discord"
         message = NotificationMessage(
             title="test",
@@ -121,10 +127,10 @@ class TestWebhookRedirectProtection:
         calls = []
         monkeypatch.setattr(
             "core.notification_service.aiohttp.ClientSession",
-            lambda: _FakeSession(calls),
+            lambda **kwargs: _FakeSession(calls),
         )
         svc = EnhancedNotificationService()
-        svc._validate_webhook_url = lambda url, allow_private=False: url
+        svc._webhook_connector = lambda url, allow_private=False: object()
         svc.config["webhook"]["url"] = "https://example.com/custom"
         message = NotificationMessage(
             title="test",
@@ -138,6 +144,45 @@ class TestWebhookRedirectProtection:
         assert calls[0]["allow_redirects"] is False
         assert result["success"] is False
         assert "redirects" in result["error"]
+
+    def test_connector_uses_prevalidated_dns_answers(self, monkeypatch):
+        svc = EnhancedNotificationService()
+        initial_answer = [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", 443),
+            )
+        ]
+        rebound_answer = [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("10.0.0.1", 443),
+            )
+        ]
+        answers = [initial_answer, rebound_answer]
+
+        def fake_getaddrinfo(*args, **kwargs):
+            return answers.pop(0)
+
+        monkeypatch.setattr("core.notification_service.socket.getaddrinfo", fake_getaddrinfo)
+
+        async def resolve_with_connector():
+            connector = svc._webhook_connector("https://example.com/custom", allow_private=False)
+            try:
+                return await connector._resolver.resolve("example.com", 443, socket.AF_INET)
+            finally:
+                await connector.close()
+
+        resolved = asyncio.run(resolve_with_connector())
+
+        assert resolved[0]["host"] == "93.184.216.34"
+        assert answers == [rebound_answer]
 
 
 class TestSmtpTransportSecurity:
@@ -192,4 +237,27 @@ class TestSmtpTransportSecurity:
         assert isinstance(context, ssl.SSLContext)
         assert context.check_hostname is True
         assert context.verify_mode == ssl.CERT_REQUIRED
+        method_order = [call[0] for call in smtp.method_calls]
+        assert method_order.index("starttls") < method_order.index("login")
         smtp.login.assert_called_once_with("user", "secret")
+
+    def test_smtp_login_is_skipped_when_starttls_fails(self, monkeypatch):
+        smtp = MagicMock()
+        smtp.starttls.side_effect = RuntimeError("TLS failed")
+        monkeypatch.setattr("core.notification_service.smtplib.SMTP", lambda *args: smtp)
+        svc = EnhancedNotificationService()
+        svc.config["email"].update(
+            {
+                "smtp_server": "smtp.example.com",
+                "recipients": ["alerts@example.com"],
+                "username": "user",
+                "password": "secret",
+                "use_tls": True,
+            }
+        )
+
+        result = asyncio.run(svc._send_email(self._message()))
+
+        assert result["success"] is False
+        smtp.login.assert_not_called()
+        smtp.send_message.assert_not_called()

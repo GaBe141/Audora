@@ -168,6 +168,31 @@ class TestRedisCacheSerialization:
         with pytest.raises(TypeError, match="JSON-compatible"):
             backend._serialize(object())
 
+    def test_public_set_get_round_trips_supported_json(self):
+        class FakeRedisClient:
+            def __init__(self):
+                self.values = {}
+
+            def set(self, key, value):
+                self.values[key] = value
+
+            def setex(self, key, ttl, value):
+                self.values[key] = value
+
+            def get(self, key):
+                return self.values.get(key)
+
+            def delete(self, key):
+                self.values.pop(key, None)
+
+        backend = self._backend()
+        backend._client = FakeRedisClient()
+        value = {"artists": ["one", "two"], "score": 99.5, "active": True}
+
+        backend.set("cache-key", value, ttl=60)
+
+        assert backend.get("cache-key") == value
+
     def test_rejects_non_type_preserving_json_values(self):
         backend = self._backend()
 
