@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
+import pickle
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,57 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache serialization safety."""
+
+    def test_json_value_round_trips_without_pickle(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = {"artist": "Bjoerk", "scores": [1, 2, 3], "active": True}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_bytes_value_round_trips(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = b"\x00audora\xff"
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_dataframe_value_round_trips(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = pd.DataFrame([{"track": "Song A", "score": 91.5}])
+
+        serialized = backend._serialize(value)
+        result = backend._deserialize(serialized)
+
+        pd.testing.assert_frame_equal(result, value)
+
+    def test_legacy_pickle_envelope_is_rejected(self):
+        backend = object.__new__(RedisCacheBackend)
+        payload = pickle.dumps({"unsafe": "payload"})
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "unused",
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        assert backend._deserialize(json.dumps(legacy_envelope).encode("utf-8")) is None
+
+    def test_unsupported_object_type_is_not_serialized(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        class Unsupported:
+            pass
+
+        try:
+            backend._serialize(Unsupported())
+        except TypeError as exc:
+            assert "Unsupported Redis cache value type" in str(exc)
+        else:
+            raise AssertionError("unsupported object should not serialize")
