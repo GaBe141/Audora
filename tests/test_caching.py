@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +84,55 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+    def test_cache_key_uses_sha256_digest(self, mock_cache):
+        cache_key = mock_cache._build_cache_key("prefix", ("value",), {"limit": 10})
+        parts = cache_key.split(":")
+
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+
+
+class TestRedisCacheSerialization:
+    """Redis cache payloads must not require executable deserialization."""
+
+    def test_json_value_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        serialized = backend._serialize({"artist": "Nina Simone", "scores": [1, 2, 3]})
+
+        assert backend._deserialize(serialized) == {"artist": "Nina Simone", "scores": [1, 2, 3]}
+
+    def test_bytes_value_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        serialized = backend._serialize(b"binary payload")
+
+        assert backend._deserialize(serialized) == b"binary payload"
+
+    def test_dataframe_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        frame = pd.DataFrame({"artist": ["Nina Simone"], "score": [95]})
+
+        restored = backend._deserialize(backend._serialize(frame))
+
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        assert backend._deserialize(pickle.dumps({"unsafe": "payload"})) is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        class Unsupported:
+            pass
+
+        try:
+            backend._serialize(Unsupported())
+        except TypeError as e:
+            assert "JSON-compatible" in str(e)
+        else:
+            raise AssertionError("Expected unsupported object serialization to fail")
 
 
 class TestCachedDecorator:
