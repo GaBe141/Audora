@@ -3,13 +3,14 @@ Configuration management for social media APIs.
 Handles API keys, rate limiting, and platform-specific settings.
 """
 
+import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.utils import read_json, write_json
+from core.utils import read_json
 
 
 @dataclass
@@ -42,6 +43,15 @@ class APIConfig:
 class SocialAPIManager:
     """Manages API configurations and rate limiting for all platforms."""
 
+    _ENV_CREDENTIALS = {
+        "tiktok": {"api_key": "TIKTOK_API_KEY", "secret_key": "TIKTOK_API_SECRET"},
+        "youtube": {"api_key": "YOUTUBE_API_KEY"},
+        "twitter": {"access_token": "TWITTER_BEARER_TOKEN"},
+        "instagram": {"access_token": "INSTAGRAM_ACCESS_TOKEN"},
+        "reddit": {"api_key": "REDDIT_CLIENT_ID", "secret_key": "REDDIT_CLIENT_SECRET"},
+        "tumblr": {"api_key": "TUMBLR_API_KEY", "secret_key": "TUMBLR_API_SECRET"},
+    }
+
     def __init__(self, config_file: str = "config/social_apis.json"):
         self.config_file = Path(config_file)
         self.configs: dict[str, APIConfig] = {}
@@ -56,6 +66,21 @@ class SocialAPIManager:
                 self.configs[platform] = APIConfig(platform=platform, **config_data)
         else:
             self._create_default_configs()
+
+        self._apply_env_credentials()
+
+    def _apply_env_credentials(self):
+        """Load API credentials from environment instead of persisted JSON files."""
+        for platform, field_env_map in self._ENV_CREDENTIALS.items():
+            config = self.configs.setdefault(platform, APIConfig(platform=platform))
+            has_credentials = False
+            for field_name, env_name in field_env_map.items():
+                value = os.getenv(env_name, "").strip()
+                if value:
+                    setattr(config, field_name, value)
+                    has_credentials = True
+            if has_credentials:
+                config.enabled = True
 
     def _create_default_configs(self):
         """Create default configuration template."""
@@ -115,14 +140,13 @@ class SocialAPIManager:
         self.save_configs()
 
     def save_configs(self):
-        """Save configurations to file using centralized utility."""
+        """Save non-sensitive configuration to file.
+
+        API credentials are intentionally not persisted; set them via environment variables.
+        """
         config_data = {}
         for platform, config in self.configs.items():
             config_data[platform] = {
-                "api_key": config.api_key,
-                "secret_key": config.secret_key,
-                "access_token": config.access_token,
-                "refresh_token": config.refresh_token,
                 "requests_per_minute": config.requests_per_minute,
                 "requests_per_hour": config.requests_per_hour,
                 "requests_per_day": config.requests_per_day,
@@ -131,9 +155,20 @@ class SocialAPIManager:
                 "error_count": config.error_count,
             }
 
-        written_path = write_json(self.config_file, config_data)
         if os.name != "nt":
-            os.chmod(written_path, 0o600)
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            self.config_file.parent.chmod(0o700)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(self.config_file, flags, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(config_data, fh, indent=2, ensure_ascii=False, default=str)
+            self.config_file.chmod(0o600)
+        else:
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            with self.config_file.open("w", encoding="utf-8") as fh:
+                json.dump(config_data, fh, indent=2, ensure_ascii=False, default=str)
 
     def get_config(self, platform: str) -> APIConfig | None:
         """Get configuration for a platform."""
@@ -187,13 +222,10 @@ class SocialAPIManager:
         if config.requests_per_hour > 0 and config.requests_this_hour >= config.requests_per_hour:
             return False
 
-        if (
+        return not (
             config.requests_per_minute > 0
             and config.requests_this_minute >= config.requests_per_minute
-        ):
-            return False
-
-        return True
+        )
 
     def record_request(self, platform: str, success: bool = True, error: str = ""):
         """Record a request for rate limiting tracking."""

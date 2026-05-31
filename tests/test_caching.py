@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +126,48 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Redis serialization must never execute pickle payloads."""
+
+    def _backend(self) -> RedisCacheBackend:
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_json_serialization_round_trips_dataframe(self):
+        backend = self._backend()
+        original = pd.DataFrame({"artist": ["A", "B"], "score": [91.5, 88.0]})
+
+        restored = backend._deserialize(backend._serialize(original))
+
+        pd.testing.assert_frame_equal(restored, original)
+
+    def test_json_serialization_round_trips_nested_values(self):
+        backend = self._backend()
+        original = {
+            "name": "track",
+            "scores": [1, 2, 3],
+            "raw": b"payload",
+            "coords": (10, 20),
+        }
+
+        assert backend._deserialize(backend._serialize(original)) == original
+
+    def test_rejects_legacy_signed_pickle_payload(self):
+        backend = self._backend()
+        payload = pickle.dumps({"malicious": "legacy-pickle"})
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": hmac.new(b"test-signing-key", payload, hashlib.sha256).hexdigest(),
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_cache_key_hashing_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ("arg",), {"kw": "value"})
+
+        assert len(key.split(":")[1]) == 64
