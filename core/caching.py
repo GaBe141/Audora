@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from datetime import date, datetime
 from functools import wraps
+from io import StringIO
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -277,14 +278,14 @@ class RedisCacheBackend(CacheBackend):
             data = payload.get("value")
             if not isinstance(data, str):
                 raise ValueError("Invalid pandas DataFrame cache payload")
-            return pd.read_json(data, orient="split")
+            return pd.read_json(StringIO(data), orient="split")
         if payload_type == "pandas_series":
             import pandas as pd
 
             data = payload.get("value")
             if not isinstance(data, str):
                 raise ValueError("Invalid pandas Series cache payload")
-            return pd.read_json(data, typ="series", orient="split")
+            return pd.read_json(StringIO(data), typ="series", orient="split")
         if payload_type == "numpy_array":
             import numpy as np
 
