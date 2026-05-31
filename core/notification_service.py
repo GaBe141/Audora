@@ -9,8 +9,8 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -255,7 +255,7 @@ class EnhancedNotificationService:
         }
         try:
             if os.name != "nt":
-                os.chmod(config_path.parent, 0o700)
+                config_path.parent.chmod(0o700)
                 flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
                 if hasattr(os, "O_NOFOLLOW"):
                     flags |= os.O_NOFOLLOW
@@ -267,7 +267,7 @@ class EnhancedNotificationService:
             with f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")

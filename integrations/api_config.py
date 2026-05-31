@@ -3,8 +3,8 @@ Configuration management for social media APIs.
 Handles API keys, rate limiting, and platform-specific settings.
 """
 
-import os
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -157,14 +157,14 @@ class SocialAPIManager:
 
         if os.name != "nt":
             self.config_file.parent.mkdir(parents=True, exist_ok=True)
-            os.chmod(self.config_file.parent, 0o700)
+            self.config_file.parent.chmod(0o700)
             flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             fd = os.open(self.config_file, flags, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(config_data, fh, indent=2, ensure_ascii=False, default=str)
-            os.chmod(self.config_file, 0o600)
+            self.config_file.chmod(0o600)
         else:
             self.config_file.parent.mkdir(parents=True, exist_ok=True)
             with self.config_file.open("w", encoding="utf-8") as fh:
@@ -222,13 +222,10 @@ class SocialAPIManager:
         if config.requests_per_hour > 0 and config.requests_this_hour >= config.requests_per_hour:
             return False
 
-        if (
+        return not (
             config.requests_per_minute > 0
             and config.requests_this_minute >= config.requests_per_minute
-        ):
-            return False
-
-        return True
+        )
 
     def record_request(self, platform: str, success: bool = True, error: str = ""):
         """Record a request for rate limiting tracking."""
