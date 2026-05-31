@@ -133,7 +133,7 @@ class SocialAPIManager:
 
         written_path = write_json(self.config_file, config_data)
         if os.name != "nt":
-            os.chmod(written_path, 0o600)
+            written_path.chmod(0o600)
 
     def get_config(self, platform: str) -> APIConfig | None:
         """Get configuration for a platform."""
@@ -187,13 +187,10 @@ class SocialAPIManager:
         if config.requests_per_hour > 0 and config.requests_this_hour >= config.requests_per_hour:
             return False
 
-        if (
+        return not (
             config.requests_per_minute > 0
             and config.requests_this_minute >= config.requests_per_minute
-        ):
-            return False
-
-        return True
+        )
 
     def record_request(self, platform: str, success: bool = True, error: str = ""):
         """Record a request for rate limiting tracking."""
