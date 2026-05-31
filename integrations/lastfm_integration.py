@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import time
 
 import pandas as pd
@@ -13,7 +14,7 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
 class LastFmAPI:
@@ -56,9 +57,10 @@ class LastFmAPI:
         except APIResponseError:
             raise
         except requests.exceptions.RequestException as e:
-            logger.error("Last.fm request failed for %s: %s", method, e)
+            safe_error = self._sanitize_error(e)
+            logger.error("Last.fm request failed for %s: %s", method, safe_error)
             raise APIConnectionError(
-                message=f"Last.fm request failed: {e}",
+                message=f"Last.fm request failed: {safe_error}",
                 details={"method": method},
             ) from e
         except json.JSONDecodeError as e:
@@ -67,6 +69,13 @@ class LastFmAPI:
                 message=f"Last.fm returned invalid JSON: {e}",
                 details={"method": method},
             ) from e
+
+    def _sanitize_error(self, error: Exception) -> str:
+        """Remove API keys from request exception messages before logging."""
+        message = str(error)
+        if self.api_key:
+            message = message.replace(self.api_key, "[REDACTED]")
+        return re.sub(r"api_key=([^&\s]+)", "api_key=[REDACTED]", message)
 
     def get_top_artists_global(self, limit: int = 50) -> pd.DataFrame:
         """Get global top artists chart."""

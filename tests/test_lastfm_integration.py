@@ -12,7 +12,12 @@ if "integrations.config" not in sys.modules:
     sys.modules["integrations.config"] = _config_mock
 
 from core.exceptions import APIConnectionError, APIResponseError
-from integrations.lastfm_integration import LastFmAPI
+from integrations.lastfm_integration import BASE_URL, LastFmAPI
+
+
+def test_lastfm_base_url_uses_https():
+    """Last.fm requests must not expose API keys over plaintext HTTP."""
+    assert BASE_URL.startswith("https://")
 
 
 class TestLastFmAPISuccess:
@@ -89,3 +94,20 @@ class TestLastFmAPIErrorHandling:
         with patch.object(api.session, "get", return_value=mock_response):
             with pytest.raises(APIConnectionError, match="429"):
                 api.get_top_artists_global(limit=5)
+
+    def test_http_error_redacts_api_key_from_exception_message(self):
+        import requests
+
+        api = LastFmAPI(api_key="super-secret-key")
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "403 Client Error for url: "
+            "https://ws.audioscrobbler.com/2.0/?method=x&api_key=super-secret-key&format=json"
+        )
+
+        with patch.object(api.session, "get", return_value=mock_response):
+            with pytest.raises(APIConnectionError) as exc_info:
+                api.get_top_artists_global(limit=5)
+
+        assert "super-secret-key" not in str(exc_info.value)
+        assert "api_key=[REDACTED]" in str(exc_info.value)

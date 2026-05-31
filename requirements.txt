@@ -1,10 +1,10 @@
 # Core dependencies
-spotipy==2.24.0
-python-dotenv==1.1.1
+spotipy==2.26.0
+python-dotenv==1.2.2
 pandas==2.3.3
 matplotlib==3.10.6
 seaborn==0.13.2
-requests==2.32.5
+requests==2.34.2
 beautifulsoup4==4.14.2
 numpy==1.26.4
 
@@ -16,21 +16,21 @@ scipy==1.16.2
 plotly==6.3.1
 
 # GUI (prototyping dashboard)
-dash>=2.0.0
+dash==4.1.0
 dash-bootstrap-components>=1.0.0
 
 # Testing
-pytest>=7.0
+pytest>=9.0.3
 pytest-cov>=4.0
 pytest-mock>=3.0
 
 # Development tools
 mypy==1.18.2
 ruff==0.13.3
-black==25.9.0
+black==26.5.1
 flake8==7.3.0
-types-requests==2.32.0.20241221
-types-pandas==2.3.3.20250110
+types-requests==2.33.0.20260518
+pandas-stubs==2.3.3.260113
 
 # Optional - Enhanced forecasting (uncomment if needed)
 # prophet>=1.1.5  # Facebook Prophet (requires additional setup)
