@@ -53,11 +53,15 @@ class TestWebhookUrlValidation:
 
         monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
-        url, connector = svc._prepare_webhook_request("https://example.com/webhook")
-        try:
-            records = asyncio.run(connector._resolver.resolve("example.com", 443))
-        finally:
-            asyncio.run(connector.close())
+        async def prepare_and_resolve():
+            url, connector = svc._prepare_webhook_request("https://example.com/webhook")
+            try:
+                records = await connector._resolver.resolve("example.com", 443)
+                return url, records
+            finally:
+                await connector.close()
+
+        url, records = asyncio.run(prepare_and_resolve())
 
         assert url == "https://example.com/webhook"
         assert records[0]["host"] == "8.8.8.8"
