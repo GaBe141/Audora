@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+from datetime import datetime
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +125,40 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Redis payloads use signed JSON and reject legacy pickle envelopes."""
+
+    def _backend_without_redis(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_signed_json_round_trip_for_supported_types(self):
+        backend = self._backend_without_redis()
+        payload = {
+            "name": "audora",
+            "count": 3,
+            "created_at": datetime(2025, 1, 2, 3, 4, 5),
+            "blob": b"cache bytes",
+            "items": ("one", "two"),
+        }
+
+        serialized = backend._serialize(payload)
+
+        assert backend._deserialize(serialized) == payload
+        assert b"pickle" not in serialized.lower()
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        backend = self._backend_without_redis()
+        legacy_payload = pickle.dumps({"legacy": True})
+        signature = hmac.new(backend._signing_key, legacy_payload, hashlib.sha256).hexdigest()
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(legacy_payload).decode("ascii"),
+        }
+
+        assert backend._deserialize(json.dumps(legacy_envelope).encode("utf-8")) is None
