@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -58,6 +66,57 @@ class TestLocalCacheBackend:
         assert backend.get("d") == 4
         present = sum(1 for k in ("a", "b", "c") if backend.get(k) is not None)
         assert present == 2
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis payload serialization without requiring a Redis server."""
+
+    def _backend(self) -> RedisCacheBackend:
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-cache-signing-key"
+        return backend
+
+    def test_safe_json_roundtrip_for_common_values(self):
+        backend = self._backend()
+        value = {
+            "name": "track",
+            "rank": 1,
+            "scores": [1.2, 3.4],
+            "flags": (True, None),
+        }
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_safe_json_roundtrip_for_dataframe(self):
+        backend = self._backend()
+        df = pd.DataFrame(
+            [
+                {"track_name": "Track One", "score": 85.0},
+                {"track_name": "Track Two", "score": 72.5},
+            ]
+        )
+
+        restored = backend._deserialize(backend._serialize(df))
+
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored, df)
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._backend()
+        payload = pickle.dumps({"unsafe": "legacy"})
+        signature = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        serialized = json.dumps(envelope).encode("utf-8")
+
+        assert backend._deserialize(serialized) is None
 
 
 class TestCacheManager:
