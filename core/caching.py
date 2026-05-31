@@ -198,7 +198,7 @@ class RedisCacheBackend(CacheBackend):
                 if not isinstance(payload, str):
                     logger.warning("Rejected cache DataFrame payload with invalid type")
                     return _INVALID_CACHE_ENTRY
-                return pd.read_json(StringIO(payload), orient="split")
+                return pd.read_json(StringIO(payload), orient="table")
 
             logger.warning("Rejected cache entry with unsupported type: %s", payload_type)
             return _INVALID_CACHE_ENTRY
@@ -209,7 +209,7 @@ class RedisCacheBackend(CacheBackend):
     def _to_safe_payload(self, value: Any) -> tuple[str, Any]:
         """Convert supported cache values into JSON-serializable payloads."""
         if isinstance(value, pd.DataFrame):
-            return "pandas_dataframe", value.to_json(orient="split", date_format="iso")
+            return "pandas_dataframe", value.to_json(orient="table", date_format="iso")
         return "json", self._to_json_safe_value(value)
 
     def _to_json_safe_value(self, value: Any) -> Any:
