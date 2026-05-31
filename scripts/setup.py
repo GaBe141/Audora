@@ -21,7 +21,7 @@ ENHANCED_PACKAGES = [
     "seaborn>=0.11.0",
     "plotly>=5.0.0",
     "requests>=2.25.0",
-    "aiohttp>=3.8.0",
+    "aiohttp>=3.13.5",
     "aiofiles>=0.8.0",
     # Data science and ML
     "scikit-learn>=1.0.0",
@@ -32,7 +32,7 @@ ENHANCED_PACKAGES = [
     "dash>=2.0.0",
     "dash-bootstrap-components>=1.0.0",
     # Template engine
-    "jinja2>=3.0.0",
+    "jinja2>=3.1.6",
     # Environment management
     "python-dotenv>=0.19.0",
     # Development tools
