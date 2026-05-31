@@ -151,7 +151,9 @@ class TestSmtpTransportSecurity:
             channels=[],
         )
 
-    def test_rejects_smtp_auth_without_tls(self):
+    def test_rejects_smtp_auth_without_tls(self, monkeypatch):
+        smtp_factory = MagicMock()
+        monkeypatch.setattr("core.notification_service.smtplib.SMTP", smtp_factory)
         svc = EnhancedNotificationService()
         svc.config["email"].update(
             {
@@ -167,6 +169,7 @@ class TestSmtpTransportSecurity:
 
         assert result["success"] is False
         assert "TLS" in result["error"]
+        smtp_factory.assert_not_called()
 
     def test_starttls_uses_verified_ssl_context(self, monkeypatch):
         smtp = MagicMock()

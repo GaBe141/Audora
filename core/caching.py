@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -246,11 +247,20 @@ class RedisCacheBackend(CacheBackend):
 
     def _is_json_compatible(self, value: Any) -> bool:
         """Return True if value can be round-tripped through JSON without custom hooks."""
-        try:
-            json.dumps(value)
+        if value is None or isinstance(value, (str, bool)):
             return True
-        except (TypeError, ValueError):
-            return False
+        if isinstance(value, int):
+            return True
+        if isinstance(value, float):
+            return math.isfinite(value)
+        if isinstance(value, list):
+            return all(self._is_json_compatible(item) for item in value)
+        if isinstance(value, dict):
+            return all(
+                isinstance(key, str) and self._is_json_compatible(item)
+                for key, item in value.items()
+            )
+        return False
 
     def _is_pandas_dataframe(self, value: Any) -> bool:
         """Avoid importing pandas unless a pandas-like object is being cached."""
@@ -265,7 +275,10 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return self._deserialize(value)
+            deserialized = self._deserialize(value)
+            if deserialized is None:
+                self._client.delete(key)
+            return deserialized
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None

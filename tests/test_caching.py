@@ -167,3 +167,49 @@ class TestRedisCacheSerialization:
 
         with pytest.raises(TypeError, match="JSON-compatible"):
             backend._serialize(object())
+
+    def test_rejects_non_type_preserving_json_values(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            backend._serialize(("tuple", "would", "become", "list"))
+
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            backend._serialize({1: "integer key would become string"})
+
+    def test_get_rejects_and_deletes_legacy_pickle_payload(self):
+        class FakeRedisClient:
+            def __init__(self):
+                self.deleted_keys = []
+
+            def get(self, key):
+                return pickle.dumps({"unsafe": "payload"})
+
+            def delete(self, key):
+                self.deleted_keys.append(key)
+
+        backend = self._backend()
+        backend._client = FakeRedisClient()
+
+        assert backend.get("cache-key") is None
+        assert backend._client.deleted_keys == ["cache-key"]
+
+    def test_set_does_not_write_unsupported_values(self):
+        class FakeRedisClient:
+            def __init__(self):
+                self.set_calls = []
+                self.setex_calls = []
+
+            def set(self, *args):
+                self.set_calls.append(args)
+
+            def setex(self, *args):
+                self.setex_calls.append(args)
+
+        backend = self._backend()
+        backend._client = FakeRedisClient()
+
+        backend.set("cache-key", object(), ttl=60)
+
+        assert backend._client.set_calls == []
+        assert backend._client.setex_calls == []
