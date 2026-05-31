@@ -147,7 +147,7 @@ class EnhancedMusicDiscoverySetup:
         with os.fdopen(fd, "w") as f:
             f.write(content)
         if os.name != "nt":
-            os.chmod(path, 0o600)
+            path.chmod(0o600)
 
     def _write_private_json(self, path: Path, data: dict[str, Any]) -> None:
         """Write sensitive JSON configuration as owner-readable only."""
@@ -158,7 +158,7 @@ class EnhancedMusicDiscoverySetup:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
         if os.name != "nt":
-            os.chmod(path, 0o600)
+            path.chmod(0o600)
 
     def install_dependencies(self) -> bool:
         """Install Python dependencies."""
@@ -495,7 +495,7 @@ System Status: {{ system_status }}
         for template_name, template_content in templates.items():
             template_path = self.templates_dir / template_name
             try:
-                with open(template_path, "w") as f:
+                with template_path.open("w") as f:
                     f.write(template_content.strip())
                 self.logger.info(f"  Created template: {template_name}")
             except Exception as e:
