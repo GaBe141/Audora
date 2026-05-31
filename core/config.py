@@ -5,6 +5,7 @@ import sys
 import warnings
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -58,7 +59,8 @@ class SecureConfig:
         }
 
         # Validate redirect URI format
-        if not config["redirect_uri"].startswith(("http://localhost", "http://127.0.0.1")):
+        redirect = urlparse(config["redirect_uri"])
+        if redirect.scheme != "http" or redirect.hostname not in {"localhost", "127.0.0.1"}:
             raise ValueError(
                 f"Invalid redirect URI: {config['redirect_uri']}\n"
                 "For development, use http://localhost or http://127.0.0.1"
