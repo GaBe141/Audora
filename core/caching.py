@@ -5,12 +5,12 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import hashlib
-from io import StringIO
 import json
 import logging
 import time
 from collections.abc import Callable
 from functools import wraps
+from io import StringIO
 from typing import Any, ParamSpec, TypeVar
 
 import pandas as pd
