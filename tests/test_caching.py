@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+
+import pandas as pd
+import pytest
+from pandas.testing import assert_frame_equal
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,59 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for safe Redis cache serialization."""
+
+    def _backend(self):
+        return object.__new__(RedisCacheBackend)
+
+    def test_json_value_round_trips_without_pickle(self):
+        backend = self._backend()
+        value = {"artist": "Example", "scores": [1, 2, 3], "active": True}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_bytes_value_round_trips(self):
+        backend = self._backend()
+        value = b"\x00audora\xff"
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_dataframe_value_round_trips(self):
+        backend = self._backend()
+        value = pd.DataFrame(
+            {
+                "track": ["Song A", "Song B"],
+                "score": [87.5, 91.0],
+            }
+        )
+
+        serialized = backend._serialize(value)
+
+        assert_frame_equal(backend._deserialize(serialized), value)
+
+    def test_legacy_pickle_payload_is_rejected(self):
+        backend = self._backend()
+        legacy_payload = pickle.dumps({"unsafe": "payload"})
+
+        with pytest.raises(ValueError, match="failed to deserialize"):
+            backend._deserialize(legacy_payload)
+
+    def test_unsupported_object_is_not_serialized(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            backend._serialize(object())
+
+    def test_cache_key_uses_sha256_components(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ("artist",), {"region": "US"})
+        _, args_hash, kwargs_hash = key.split(":")
+
+        assert len(args_hash) == 64
+        assert len(kwargs_hash) == 64
