@@ -6,6 +6,7 @@ Installs dependencies, configures services, and validates the system.
 
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -20,8 +21,9 @@ ENHANCED_PACKAGES = [
     "matplotlib>=3.5.0",
     "seaborn>=0.11.0",
     "plotly>=5.0.0",
-    "requests>=2.25.0",
-    "aiohttp>=3.8.0",
+    "requests>=2.33.0",
+    "urllib3>=2.7.0,<3",
+    "aiohttp>=3.13.5",
     "aiofiles>=0.8.0",
     # Data science and ML
     "scikit-learn>=1.0.0",
@@ -29,15 +31,17 @@ ENHANCED_PACKAGES = [
     # Statistical analysis (optional)
     "statsmodels>=0.13.0",
     # Web framework (for dashboard)
-    "dash>=2.0.0",
+    "dash>=3.2.0,<3.3",
     "dash-bootstrap-components>=1.0.0",
+    "Flask>=3.1.3,<3.2",
+    "Werkzeug>=3.1.6,<3.2",
     # Template engine
-    "jinja2>=3.0.0",
+    "jinja2>=3.1.6",
     # Environment management
-    "python-dotenv>=0.19.0",
+    "python-dotenv>=1.2.2",
     # Development tools
     "pytest>=7.0.0",
-    "black>=22.0.0",
+    "black>=26.3.1",
     "flake8>=4.0.0",
 ]
 
@@ -47,7 +51,7 @@ class EnhancedMusicDiscoverySetup:
 
     def __init__(self):
         self.logger = self._setup_logging()
-        self.project_root = Path(__file__).parent
+        self.project_root = Path(__file__).resolve().parent.parent
         self.config_dir = self.project_root / "config"
         self.data_dir = self.project_root / "data"
         self.logs_dir = self.project_root / "logs"
@@ -130,6 +134,8 @@ class EnhancedMusicDiscoverySetup:
         for directory in directories:
             try:
                 directory.mkdir(parents=True, exist_ok=True)
+                if directory == self.config_dir and os.name != "nt":
+                    directory.chmod(0o700)
                 self.logger.info(f"  Created directory: {directory}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {directory}: {e}")
@@ -191,8 +197,10 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
+                with config_path.open("w") as f:
                     json.dump(config_data, f, indent=2)
+                if os.name != "nt":
+                    config_path.chmod(0o600)
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -473,7 +481,7 @@ System Status: {{ system_status }}
         for template_name, template_content in templates.items():
             template_path = self.templates_dir / template_name
             try:
-                with open(template_path, "w") as f:
+                with template_path.open("w") as f:
                     f.write(template_content.strip())
                 self.logger.info(f"  Created template: {template_name}")
             except Exception as e:
@@ -522,8 +530,10 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
+            with env_path.open("w") as f:
                 f.write(env_template.strip())
+            if os.name != "nt":
+                env_path.chmod(0o600)
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True

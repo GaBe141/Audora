@@ -7,13 +7,12 @@ import time
 import pandas as pd
 import requests
 
+from core.config import get_config
 from core.exceptions import APIConnectionError, APIResponseError
-
-from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
 class LastFmAPI:
