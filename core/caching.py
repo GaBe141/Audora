@@ -254,8 +254,9 @@ class RedisCacheBackend(CacheBackend):
 
     def _is_pandas_dataframe(self, value: Any) -> bool:
         """Avoid importing pandas unless a pandas-like object is being cached."""
-        return value.__class__.__name__ == "DataFrame" and value.__class__.__module__.startswith(
-            "pandas."
+        return value.__class__.__name__ == "DataFrame" and (
+            value.__class__.__module__ == "pandas"
+            or value.__class__.__module__.startswith("pandas.")
         )
 
     def get(self, key: str) -> Any | None:
