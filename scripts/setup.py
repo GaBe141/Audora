@@ -160,7 +160,7 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
+                with config_path.open("w") as f:
                     json.dump(config_data, f, indent=2)
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
@@ -442,7 +442,7 @@ System Status: {{ system_status }}
         for template_name, template_content in templates.items():
             template_path = self.templates_dir / template_name
             try:
-                with open(template_path, "w") as f:
+                with template_path.open("w") as f:
                     f.write(template_content.strip())
                 self.logger.info(f"  Created template: {template_name}")
             except Exception as e:
@@ -491,7 +491,7 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
+            with env_path.open("w") as f:
                 f.write(env_template.strip())
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
