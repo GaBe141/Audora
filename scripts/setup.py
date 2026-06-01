@@ -7,7 +7,7 @@ Installs dependencies, configures services, and validates the system.
 import json
 import logging
 import platform
-import subprocess  # nosec B404 - setup uses fixed argv pip commands only
+import subprocess  # nosec B404
 import sys
 from pathlib import Path
 from typing import Any
@@ -117,7 +117,7 @@ class EnhancedMusicDiscoverySetup:
         # Check if pip is available
         try:
             # Test pip availability
-            subprocess.run(  # nosec B603 - fixed argv, no shell, no user-controlled command
+            subprocess.run(  # nosec B603
                 [sys.executable, "-m", "pip", "--version"], capture_output=True, check=True
             )
         except (subprocess.CalledProcessError, FileNotFoundError):
@@ -129,13 +129,11 @@ class EnhancedMusicDiscoverySetup:
             return False
 
         try:
-            result = (
-                subprocess.run(  # nosec B603 - fixed argv, no shell, reviewed requirements path
-                    [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)],
-                    capture_output=True,
-                    text=True,
-                    timeout=900,
-                )
+            result = subprocess.run(  # nosec B603
+                [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)],
+                capture_output=True,
+                text=True,
+                timeout=900,
             )
         except subprocess.TimeoutExpired:
             self.logger.error("    ❌ Dependency installation timed out")
