@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,39 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests Redis cache serialization without connecting to Redis."""
+
+    def _backend(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-cache-signing-key"
+        return backend
+
+    def test_signed_json_round_trips_common_values(self):
+        backend = self._backend()
+        value = {"artist": "Example", "scores": [1, 2.5], "pair": ("track", "artist")}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+        assert b"pickle" not in serialized.lower()
+
+    def test_tampered_json_payload_is_rejected(self):
+        backend = self._backend()
+        serialized = backend._serialize({"score": 10})
+        envelope = json.loads(serialized.decode("utf-8"))
+        envelope["payload"]["score"] = 99
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_pandas_dataframe_round_trip(self):
+        import pandas as pd
+
+        backend = self._backend()
+        frame = pd.DataFrame([{"track": "A", "score": 1.0}, {"track": "B", "score": 2.0}])
+
+        restored = backend._deserialize(backend._serialize(frame))
+
+        assert restored.to_dict(orient="records") == frame.to_dict(orient="records")
