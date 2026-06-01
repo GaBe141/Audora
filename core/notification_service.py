@@ -190,8 +190,15 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         self._validate_webhook_config(to_save)
         try:
@@ -288,7 +295,9 @@ class EnhancedNotificationService:
         try:
             resolved_path.relative_to(base_dir)
         except ValueError as e:
-            raise ValueError("Email attachments must be under the configured export directory") from e
+            raise ValueError(
+                "Email attachments must be under the configured export directory"
+            ) from e
 
         if not resolved_path.is_file():
             raise ValueError("Email attachment path must point to a file")
@@ -793,9 +802,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
-            url = self._validate_webhook_url(
-                url, allow_private=self._allow_private_webhooks()
-            )
+            url = self._validate_webhook_url(url, allow_private=self._allow_private_webhooks())
             # Prepare payload
             payload = {
                 "title": message.title,
