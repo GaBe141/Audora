@@ -4,15 +4,15 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
-import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
+from datetime import date, datetime
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
@@ -178,7 +178,7 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
+        # Fallback to a process-local random key to prevent unsigned cache injection.
         # This keeps the cache safe by default, with only a reduced cross-process hit rate.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
@@ -188,13 +188,18 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload = json.dumps(
+            self._to_json_safe(value),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
+            "encoding": "audora-json-v1",
             "sig": signature,
-            "payload": base64.b64encode(payload).decode("ascii"),
+            "payload": payload.decode("utf-8"),
         }
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
@@ -204,29 +209,124 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
+                or envelope.get("encoding") != "audora-json-v1"
                 or "sig" not in envelope
                 or "payload" not in envelope
             ):
                 logger.warning("Rejected cache entry with invalid serialization envelope")
                 return None
 
-            payload_b64 = envelope["payload"]
-            if not isinstance(payload_b64, str):
+            payload_text = envelope["payload"]
+            if not isinstance(payload_text, str):
                 logger.warning("Rejected cache entry with non-string payload")
                 return None
 
-            payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            payload = payload_text.encode("utf-8")
             expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return self._from_json_safe(json.loads(payload_text))
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
+
+    def _to_json_safe(self, value: Any) -> Any:
+        """Convert supported cache values to JSON-only structures."""
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+
+        try:
+            import pandas as pd
+
+            if isinstance(value, pd.DataFrame):
+                return {
+                    "__audora_type__": "pandas.DataFrame",
+                    "value": value.to_json(orient="table", date_format="iso"),
+                }
+        except ImportError:
+            pass
+
+        try:
+            import numpy as np
+
+            if isinstance(value, np.generic):
+                return self._to_json_safe(value.item())
+            if isinstance(value, np.ndarray):
+                return {
+                    "__audora_type__": "numpy.ndarray",
+                    "value": self._to_json_safe(value.tolist()),
+                }
+        except ImportError:
+            pass
+
+        if isinstance(value, datetime):
+            return {"__audora_type__": "datetime", "value": value.isoformat()}
+        if isinstance(value, date):
+            return {"__audora_type__": "date", "value": value.isoformat()}
+        if isinstance(value, dict):
+            return {
+                "__audora_type__": "dict",
+                "items": [
+                    [self._to_json_safe(key), self._to_json_safe(item)]
+                    for key, item in value.items()
+                ],
+            }
+        if isinstance(value, list):
+            return {
+                "__audora_type__": "list",
+                "value": [self._to_json_safe(item) for item in value],
+            }
+        if isinstance(value, tuple):
+            return {
+                "__audora_type__": "tuple",
+                "value": [self._to_json_safe(item) for item in value],
+            }
+        if isinstance(value, set):
+            return {
+                "__audora_type__": "set",
+                "value": [self._to_json_safe(item) for item in value],
+            }
+
+        raise TypeError(f"Unsupported cache value type for JSON serialization: {type(value)!r}")
+
+    def _from_json_safe(self, value: Any) -> Any:
+        """Restore values produced by _to_json_safe without executing code."""
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, list):
+            return [self._from_json_safe(item) for item in value]
+        if not isinstance(value, dict) or "__audora_type__" not in value:
+            return value
+
+        value_type = value["__audora_type__"]
+        if value_type == "pandas.DataFrame":
+            import pandas as pd
+
+            return pd.read_json(io.StringIO(value["value"]), orient="table")
+        if value_type == "numpy.ndarray":
+            return self._from_json_safe(value["value"])
+        if value_type == "datetime":
+            return datetime.fromisoformat(value["value"])
+        if value_type == "date":
+            return date.fromisoformat(value["value"])
+        if value_type == "dict":
+            return {
+                self._from_json_safe(key): self._from_json_safe(item)
+                for key, item in value["items"]
+            }
+        if value_type == "list":
+            return [self._from_json_safe(item) for item in value["value"]]
+        if value_type == "tuple":
+            return tuple(self._from_json_safe(item) for item in value["value"])
+        if value_type == "set":
+            return {self._from_json_safe(item) for item in value["value"]}
+
+        logger.warning("Rejected cache entry with unknown JSON type tag: %s", value_type)
+        return None
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
@@ -337,7 +437,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be supported by the JSON-safe serializer)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
