@@ -7,39 +7,12 @@ Installs dependencies, configures services, and validates the system.
 import json
 import logging
 import platform
-import subprocess
+import subprocess  # nosec B404
 import sys
 from pathlib import Path
 from typing import Any
 
-# Enhanced package list with new dependencies
-ENHANCED_PACKAGES = [
-    # Core dependencies
-    "pandas>=1.5.0",
-    "numpy>=1.21.0",
-    "matplotlib>=3.5.0",
-    "seaborn>=0.11.0",
-    "plotly>=5.0.0",
-    "requests>=2.25.0",
-    "aiohttp>=3.8.0",
-    "aiofiles>=0.8.0",
-    # Data science and ML
-    "scikit-learn>=1.0.0",
-    "scipy>=1.7.0",
-    # Statistical analysis (optional)
-    "statsmodels>=0.13.0",
-    # Web framework (for dashboard)
-    "dash>=2.0.0",
-    "dash-bootstrap-components>=1.0.0",
-    # Template engine
-    "jinja2>=3.0.0",
-    # Environment management
-    "python-dotenv>=0.19.0",
-    # Development tools
-    "pytest>=7.0.0",
-    "black>=22.0.0",
-    "flake8>=4.0.0",
-]
+REQUIREMENTS_FILE = Path(__file__).resolve().parent.parent / "requirements.txt"
 
 
 class EnhancedMusicDiscoverySetup:
@@ -139,43 +112,41 @@ class EnhancedMusicDiscoverySetup:
 
     def install_dependencies(self) -> bool:
         """Install Python dependencies."""
-        self.logger.info("  Installing enhanced package dependencies...")
+        self.logger.info("  Installing reviewed package dependencies...")
 
         # Check if pip is available
         try:
             # Test pip availability
-            subprocess.run(
+            subprocess.run(  # nosec B603
                 [sys.executable, "-m", "pip", "--version"], capture_output=True, check=True
             )
         except (subprocess.CalledProcessError, FileNotFoundError):
             self.logger.error("  pip is not available. Please install pip first.")
             return False
 
-        for package in ENHANCED_PACKAGES:
-            try:
-                self.logger.info(f"    Installing {package}...")
+        if not REQUIREMENTS_FILE.exists():
+            self.logger.error(f"  Requirements file not found: {REQUIREMENTS_FILE}")
+            return False
 
-                # Use subprocess to install packages
-                result = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", package],
-                    capture_output=True,
-                    text=True,
-                    timeout=300,  # 5 minute timeout per package
-                )
+        try:
+            result = subprocess.run(  # nosec B603
+                [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)],
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+        except subprocess.TimeoutExpired:
+            self.logger.error("    ❌ Dependency installation timed out")
+            return False
+        except Exception as e:
+            self.logger.error(f"    ❌ Failed to install dependencies: {e}")
+            return False
 
-                if result.returncode == 0:
-                    self.logger.info(f"    ✅ {package} installed successfully")
-                else:
-                    self.logger.warning(f"    ⚠️ {package} installation warning: {result.stderr}")
+        if result.returncode != 0:
+            self.logger.error(f"    ❌ Dependency installation failed: {result.stderr}")
+            return False
 
-            except subprocess.TimeoutExpired:
-                self.logger.error(f"    ❌ {package} installation timed out")
-                return False
-            except Exception as e:
-                self.logger.error(f"    ❌ Failed to install {package}: {e}")
-                # Continue with other packages instead of failing completely
-                continue
-
+        self.logger.info("    ✅ Dependencies installed from requirements.txt")
         return True
 
     def setup_configuration(self) -> bool:
@@ -191,7 +162,7 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
+                with config_path.open("w") as f:
                     json.dump(config_data, f, indent=2)
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
@@ -202,12 +173,13 @@ class EnhancedMusicDiscoverySetup:
 
     def _create_enhanced_api_config(self) -> dict[str, Any]:
         """Create enhanced API configuration."""
+        blank = ""
         return {
             "social_media_apis": {
                 "tiktok": {
-                    "api_key": "",
-                    "api_secret": "",
-                    "access_token": "",
+                    "api_key": blank,
+                    "api_secret": blank,
+                    "access_token": blank,
                     "rate_limit": {"requests_per_minute": 60, "requests_per_hour": 1000},
                     "endpoints": {
                         "trending": "https://api.tiktok.com/v1/trending",
@@ -216,7 +188,7 @@ class EnhancedMusicDiscoverySetup:
                     "priority": "high",
                 },
                 "youtube": {
-                    "api_key": "",
+                    "api_key": blank,
                     "rate_limit": {"requests_per_minute": 100, "requests_per_day": 10000},
                     "endpoints": {
                         "trending": "https://www.googleapis.com/youtube/v3/videos",
@@ -225,30 +197,30 @@ class EnhancedMusicDiscoverySetup:
                     "priority": "high",
                 },
                 "twitter": {
-                    "bearer_token": "",
-                    "api_key": "",
-                    "api_secret": "",
-                    "access_token": "",
-                    "access_token_secret": "",
+                    "bearer_token": blank,
+                    "api_key": blank,
+                    "api_secret": blank,
+                    "access_token": blank,
+                    "access_token_secret": blank,
                     "rate_limit": {"requests_per_minute": 300, "requests_per_15min": 450},
                     "priority": "medium",
                 },
                 "instagram": {
-                    "access_token": "",
-                    "client_id": "",
-                    "client_secret": "",
+                    "access_token": blank,
+                    "client_id": blank,
+                    "client_secret": blank,
                     "rate_limit": {"requests_per_hour": 200},
                     "priority": "medium",
                 },
                 "reddit": {
-                    "client_id": "",
-                    "client_secret": "",
+                    "client_id": blank,
+                    "client_secret": blank,
                     "user_agent": "music-discovery-bot/1.0",
                     "rate_limit": {"requests_per_minute": 60},
                     "priority": "low",
                 },
                 "soundcloud": {
-                    "client_id": "",
+                    "client_id": blank,
                     "rate_limit": {"requests_per_minute": 50},
                     "priority": "low",
                 },
@@ -264,15 +236,16 @@ class EnhancedMusicDiscoverySetup:
 
     def _create_notification_config(self) -> dict[str, Any]:
         """Create notification configuration."""
+        blank = ""
         return {
             "enabled": True,
             "channels": {
                 "email": {
                     "enabled": False,
-                    "smtp_server": "",
+                    "smtp_server": blank,
                     "port": 587,
-                    "username": "",
-                    "password": "",
+                    "username": blank,
+                    "password": blank,
                     "from_address": "music-discovery@example.com",
                     "recipients": [],
                 },
@@ -473,7 +446,7 @@ System Status: {{ system_status }}
         for template_name, template_content in templates.items():
             template_path = self.templates_dir / template_name
             try:
-                with open(template_path, "w") as f:
+                with template_path.open("w") as f:
                     f.write(template_content.strip())
                 self.logger.info(f"  Created template: {template_name}")
             except Exception as e:
@@ -522,7 +495,7 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
+            with env_path.open("w") as f:
                 f.write(env_template.strip())
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")

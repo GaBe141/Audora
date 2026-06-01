@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +84,39 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis cache serialization without requiring a Redis server."""
+
+    def test_serializes_supported_values_as_signed_json(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        df = pd.DataFrame({"track": ["Song"], "score": [99.5]})
+        serialized = backend._serialize({"tracks": df, "tags": ("viral", "new")})
+
+        envelope = json.loads(serialized.decode("utf-8"))
+        assert envelope["v"] == 2
+
+        restored = backend._deserialize(serialized)
+        assert restored["tags"] == ("viral", "new")
+        pd.testing.assert_frame_equal(restored["tracks"], df)
+
+    def test_rejects_legacy_pickle_envelopes(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+
+        legacy_envelope = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "ignored",
+                "payload": "gASVBgAAAAAAAABLAUsChpQu",
+            }
+        ).encode("utf-8")
+
+        assert backend._deserialize(legacy_envelope) is None
 
 
 class TestCachedDecorator:

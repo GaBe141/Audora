@@ -27,3 +27,36 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_save_config_rejects_invalid_webhook_url(self, tmp_path):
+        svc = EnhancedNotificationService()
+        svc.config["slack"]["webhook_url"] = "https://localhost/webhook"
+
+        with pytest.raises(ValueError, match="Localhost"):
+            svc.save_config(str(tmp_path / "notification_config.json"))
+
+
+class TestEmailAttachmentValidation:
+    """Validate attachment path boundaries for email notifications."""
+
+    def test_allows_existing_files_under_export_directory(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        export_dir = tmp_path / "data" / "exports"
+        export_dir.mkdir(parents=True)
+        report_path = export_dir / "report.csv"
+        report_path.write_text("track,score\nSong,99\n", encoding="utf-8")
+
+        svc = EnhancedNotificationService()
+
+        assert svc._resolve_attachment_path(str(report_path)) == report_path.resolve()
+
+    def test_rejects_existing_files_outside_export_directory(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data" / "exports").mkdir(parents=True)
+        secret_path = tmp_path / "secret.txt"
+        secret_path.write_text("do not attach\n", encoding="utf-8")
+
+        svc = EnhancedNotificationService()
+
+        with pytest.raises(ValueError, match="export directory"):
+            svc._resolve_attachment_path(str(secret_path))

@@ -8,8 +8,8 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -190,14 +190,22 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        self._validate_webhook_config(to_save)
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -254,6 +262,47 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _validate_webhook_config(self, config: dict[str, Any]) -> None:
+        """Validate webhook URLs before persisting or using channel config."""
+        allow_private = self._allow_private_webhooks()
+        url_fields = [
+            ("slack", "webhook_url"),
+            ("discord", "webhook_url"),
+            ("webhook", "url"),
+        ]
+
+        for section, field in url_fields:
+            section_config = config.get(section)
+            if not isinstance(section_config, dict):
+                continue
+
+            configured_url = section_config.get(field)
+            if configured_url:
+                section_config[field] = self._validate_webhook_url(
+                    configured_url,
+                    allow_private=allow_private,
+                )
+
+    def _resolve_attachment_path(self, attachment_path: str) -> Path | None:
+        """Resolve email attachments under the approved export directory only."""
+        path = Path(attachment_path)
+        if not path.exists():
+            return None
+
+        base_dir = Path(os.getenv("AUDORA_ATTACHMENT_DIR", "data/exports")).resolve()
+        resolved_path = path.resolve()
+        try:
+            resolved_path.relative_to(base_dir)
+        except ValueError as e:
+            raise ValueError(
+                "Email attachments must be under the configured export directory"
+            ) from e
+
+        if not resolved_path.is_file():
+            raise ValueError("Email attachment path must point to a file")
+
+        return resolved_path
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -559,14 +608,15 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
+                    resolved_attachment = self._resolve_attachment_path(attachment_path)
+                    if resolved_attachment:
+                        with resolved_attachment.open("rb") as f:
                             attachment = MIMEBase("application", "octet-stream")
                             attachment.set_payload(f.read())
                             encoders.encode_base64(attachment)
                             attachment.add_header(
                                 "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
+                                f"attachment; filename= {resolved_attachment.name}",
                             )
                             msg.attach(attachment)
 
@@ -752,9 +802,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
-            url = self._validate_webhook_url(
-                url, allow_private=self._allow_private_webhooks()
-            )
+            url = self._validate_webhook_url(url, allow_private=self._allow_private_webhooks())
             # Prepare payload
             payload = {
                 "title": message.title,

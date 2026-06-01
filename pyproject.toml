@@ -1,7 +1,7 @@
 # Audora Music Discovery System - Project Configuration
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=78.1.1", "wheel==0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
