@@ -103,12 +103,9 @@ def main():
     credential_patterns = ["env_data", "*_keys", "*_secrets", "credentials.*"]
     found_credentials = []
     for pattern in credential_patterns:
-        if pattern.startswith("*"):
-            # Use glob for wildcard patterns
-            from glob import glob
-
-            matches = glob(pattern)
-            found_credentials.extend(matches)
+        if any(char in pattern for char in "*?["):
+            matches = config.project_root.glob(pattern)
+            found_credentials.extend(str(path.relative_to(config.project_root)) for path in matches)
         else:
             # Direct file check
             file_path = config.project_root / pattern
