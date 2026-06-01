@@ -8,9 +8,9 @@ import ipaddress
 import json
 import logging
 import os
+import smtplib
 import socket
 import ssl
-import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
