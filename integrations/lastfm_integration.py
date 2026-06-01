@@ -13,7 +13,7 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
 class LastFmAPI:
@@ -56,9 +56,10 @@ class LastFmAPI:
         except APIResponseError:
             raise
         except requests.exceptions.RequestException as e:
-            logger.error("Last.fm request failed for %s: %s", method, e)
+            sanitized_error = self._redact_secret(str(e))
+            logger.error("Last.fm request failed for %s: %s", method, sanitized_error)
             raise APIConnectionError(
-                message=f"Last.fm request failed: {e}",
+                message=f"Last.fm request failed: {sanitized_error}",
                 details={"method": method},
             ) from e
         except json.JSONDecodeError as e:
@@ -67,6 +68,12 @@ class LastFmAPI:
                 message=f"Last.fm returned invalid JSON: {e}",
                 details={"method": method},
             ) from e
+
+    def _redact_secret(self, text: str) -> str:
+        """Redact this client's API key from exception text before logging."""
+        if not self.api_key:
+            return text
+        return text.replace(self.api_key, "[REDACTED]")
 
     def get_top_artists_global(self, limit: int = 50) -> pd.DataFrame:
         """Get global top artists chart."""

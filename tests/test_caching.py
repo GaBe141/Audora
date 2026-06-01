@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
+import pickle
 import time
 
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,74 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerializationSecurity:
+    """Regression tests for Redis cache serialization security."""
+
+    def _backend(self):
+        return object.__new__(RedisCacheBackend)
+
+    def test_json_envelope_round_trip(self):
+        backend = self._backend()
+        value = {
+            "artist": "Artist A",
+            "scores": [1, 2.5, True, None],
+            "payload": b"binary",
+            "coords": (1, 2),
+        }
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._backend()
+        legacy_payload = pickle.dumps({"danger": "payload"}, protocol=pickle.HIGHEST_PROTOCOL)
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "unused",
+            "payload": base64.b64encode(legacy_payload).decode("ascii"),
+        }
+
+        assert backend._deserialize(json.dumps(legacy_envelope).encode("utf-8")) is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = self._backend()
+
+        class Unsupported:
+            pass
+
+        try:
+            backend._serialize(Unsupported())
+        except TypeError as error:
+            assert "does not support" in str(error)
+        else:
+            raise AssertionError("Unsupported objects must not be serialized")
+
+    def test_invalid_payload_is_deleted_on_read(self):
+        class FakeRedisClient:
+            def __init__(self):
+                self.deleted = []
+
+            def get(self, _key):
+                return b"not-json"
+
+            def delete(self, key):
+                self.deleted.append(key)
+
+        backend = self._backend()
+        backend._client = FakeRedisClient()
+
+        assert backend.get("audora:key") is None
+        assert backend._client.deleted == ["audora:key"]
+
+    def test_cache_keys_use_sha256_digest_length(self):
+        manager = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+
+        key = manager._build_cache_key("prefix", ("artist",), {"region": "US"})
+        digest_parts = key.split(":")[1:]
+
+        assert digest_parts
+        assert all(len(part) == 64 for part in digest_parts)
