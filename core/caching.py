@@ -265,7 +265,7 @@ class RedisCacheBackend(CacheBackend):
         if value_type == "tuple":
             return tuple(self._decode_value(item) for item in value)
         if value_type == "set":
-            return set(self._decode_value(item) for item in value)
+            return {self._decode_value(item) for item in value}
         if value_type == "dict":
             if not isinstance(value, dict):
                 raise ValueError("Invalid dict cache value")
