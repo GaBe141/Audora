@@ -10,7 +10,8 @@ import hmac
 import json
 import logging
 import os
-import pickle  # nosec B403 - Redis payloads are HMAC-verified before deserialization.
+# Redis payloads are HMAC-verified before deserialization.
+import pickle  # nosec B403
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -223,7 +224,8 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)  # nosec B301 - payload authenticity verified above.
+            # Payload authenticity is verified before unsafe deserialization.
+            return pickle.loads(payload)  # nosec B301
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
