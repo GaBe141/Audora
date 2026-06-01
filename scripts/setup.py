@@ -20,8 +20,8 @@ ENHANCED_PACKAGES = [
     "matplotlib>=3.5.0",
     "seaborn>=0.11.0",
     "plotly>=5.0.0",
-    "requests>=2.25.0",
-    "aiohttp>=3.8.0",
+    "requests>=2.32.5",
+    "aiohttp>=3.13.5",
     "aiofiles>=0.8.0",
     # Data science and ML
     "scikit-learn>=1.0.0",
@@ -32,12 +32,12 @@ ENHANCED_PACKAGES = [
     "dash>=2.0.0",
     "dash-bootstrap-components>=1.0.0",
     # Template engine
-    "jinja2>=3.0.0",
+    "jinja2>=3.1.6",
     # Environment management
-    "python-dotenv>=0.19.0",
+    "python-dotenv>=1.1.1",
     # Development tools
     "pytest>=7.0.0",
-    "black>=22.0.0",
+    "black>=26.5.1",
     "flake8>=4.0.0",
 ]
 
@@ -47,7 +47,7 @@ class EnhancedMusicDiscoverySetup:
 
     def __init__(self):
         self.logger = self._setup_logging()
-        self.project_root = Path(__file__).parent
+        self.project_root = Path(__file__).resolve().parent.parent
         self.config_dir = self.project_root / "config"
         self.data_dir = self.project_root / "data"
         self.logs_dir = self.project_root / "logs"
@@ -151,30 +151,38 @@ class EnhancedMusicDiscoverySetup:
             self.logger.error("  pip is not available. Please install pip first.")
             return False
 
-        for package in ENHANCED_PACKAGES:
-            try:
-                self.logger.info(f"    Installing {package}...")
+        requirements_path = self.project_root / "requirements.txt"
+        install_args = (
+            [sys.executable, "-m", "pip", "install", "-r", str(requirements_path)]
+            if requirements_path.exists()
+            else [sys.executable, "-m", "pip", "install", *ENHANCED_PACKAGES]
+        )
 
-                # Use subprocess to install packages
-                result = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", package],
-                    capture_output=True,
-                    text=True,
-                    timeout=300,  # 5 minute timeout per package
-                )
+        try:
+            if requirements_path.exists():
+                self.logger.info(f"    Installing reviewed requirements from {requirements_path}")
+            else:
+                self.logger.info("    requirements.txt missing; installing reviewed fallback list")
 
-                if result.returncode == 0:
-                    self.logger.info(f"    ✅ {package} installed successfully")
-                else:
-                    self.logger.warning(f"    ⚠️ {package} installation warning: {result.stderr}")
+            result = subprocess.run(
+                install_args,
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
 
-            except subprocess.TimeoutExpired:
-                self.logger.error(f"    ❌ {package} installation timed out")
+            if result.returncode == 0:
+                self.logger.info("    ✅ Dependencies installed successfully")
+            else:
+                self.logger.warning(f"    ⚠️ Dependency installation warning: {result.stderr}")
                 return False
-            except Exception as e:
-                self.logger.error(f"    ❌ Failed to install {package}: {e}")
-                # Continue with other packages instead of failing completely
-                continue
+
+        except subprocess.TimeoutExpired:
+            self.logger.error("    ❌ Dependency installation timed out")
+            return False
+        except Exception as e:
+            self.logger.error(f"    ❌ Failed to install dependencies: {e}")
+            return False
 
         return True
 
