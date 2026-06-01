@@ -1,6 +1,7 @@
 """Integration tests for Last.fm API client (mocked HTTP)."""
 
 import sys
+from urllib.parse import urlparse
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,7 +13,12 @@ if "integrations.config" not in sys.modules:
     sys.modules["integrations.config"] = _config_mock
 
 from core.exceptions import APIConnectionError, APIResponseError
-from integrations.lastfm_integration import LastFmAPI
+from integrations.lastfm_integration import BASE_URL, LastFmAPI
+
+
+def test_lastfm_base_url_uses_https():
+    """API keys must not be sent over plaintext HTTP."""
+    assert urlparse(BASE_URL).scheme == "https"
 
 
 class TestLastFmAPISuccess:
