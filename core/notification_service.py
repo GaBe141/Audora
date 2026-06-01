@@ -191,8 +191,15 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         try:
             with config_path.open("w") as f:
@@ -762,9 +769,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
-            url = self._validate_webhook_url(
-                url, allow_private=self._allow_private_webhooks()
-            )
+            url = self._validate_webhook_url(url, allow_private=self._allow_private_webhooks())
             # Prepare payload
             payload = {
                 "title": message.title,

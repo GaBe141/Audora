@@ -260,9 +260,7 @@ class RedisCacheBackend(CacheBackend):
             items = value.get("items")
             if not isinstance(items, list):
                 raise TypeError("Invalid dict cache payload")
-            return {
-                self._from_safe_json(key): self._from_safe_json(item) for key, item in items
-            }
+            return {self._from_safe_json(key): self._from_safe_json(item) for key, item in items}
 
         if value_type == "pandas_dataframe":
             import io

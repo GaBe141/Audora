@@ -28,12 +28,15 @@ app = dash.Dash(
 # Layout helpers
 # ---------------------------------------------------------------------------
 
+
 def _stat_card(card_id: str, label: str) -> dbc.Card:
     return dbc.Card(
-        dbc.CardBody([
-            html.P(label, className="text-muted small mb-1"),
-            html.H4("—", id=card_id, className="mb-0"),
-        ]),
+        dbc.CardBody(
+            [
+                html.P(label, className="text-muted small mb-1"),
+                html.H4("—", id=card_id, className="mb-0"),
+            ]
+        ),
         className="text-center mb-3",
     )
 
@@ -47,15 +50,20 @@ _dashboard_tab = dbc.Tab(
     tab_id="tab-dashboard",
     children=[
         dcc.Interval(id="auto-refresh", interval=30_000, n_intervals=0),
-        dbc.Row([
-            dbc.Col(_stat_card("stat-tracks", "Unique Tracks (7d)"), width=4),
-            dbc.Col(_stat_card("stat-score", "Avg Viral Score"), width=4),
-            dbc.Col(_stat_card("stat-platform", "Most Active Platform"), width=4),
-        ], className="mt-3"),
-        dbc.Row([
-            dbc.Col(dcc.Graph(id="trend-bar", style={"height": "320px"}), width=8),
-            dbc.Col(dcc.Graph(id="platform-pie", style={"height": "320px"}), width=4),
-        ]),
+        dbc.Row(
+            [
+                dbc.Col(_stat_card("stat-tracks", "Unique Tracks (7d)"), width=4),
+                dbc.Col(_stat_card("stat-score", "Avg Viral Score"), width=4),
+                dbc.Col(_stat_card("stat-platform", "Most Active Platform"), width=4),
+            ],
+            className="mt-3",
+        ),
+        dbc.Row(
+            [
+                dbc.Col(dcc.Graph(id="trend-bar", style={"height": "320px"}), width=8),
+                dbc.Col(dcc.Graph(id="platform-pie", style={"height": "320px"}), width=4),
+            ]
+        ),
         html.Hr(),
         dbc.Button(
             "Show / Hide Log",
@@ -100,51 +108,76 @@ _history_tab = dbc.Tab(
     label="History",
     tab_id="tab-history",
     children=[
-        dbc.Row([
-            dbc.Col([
-                html.Label("Platform", className="small text-muted"),
-                dbc.Select(
-                    id="hist-platform",
-                    options=[
-                        {"label": "All", "value": ""},
-                        {"label": "TikTok", "value": "tiktok"},
-                        {"label": "YouTube", "value": "youtube"},
-                        {"label": "Twitter", "value": "twitter"},
-                        {"label": "Last.fm", "value": "lastfm"},
+        dbc.Row(
+            [
+                dbc.Col(
+                    [
+                        html.Label("Platform", className="small text-muted"),
+                        dbc.Select(
+                            id="hist-platform",
+                            options=[
+                                {"label": "All", "value": ""},
+                                {"label": "TikTok", "value": "tiktok"},
+                                {"label": "YouTube", "value": "youtube"},
+                                {"label": "Twitter", "value": "twitter"},
+                                {"label": "Last.fm", "value": "lastfm"},
+                            ],
+                            value="",
+                            className="mb-2",
+                        ),
                     ],
-                    value="",
-                    className="mb-2",
+                    width=2,
                 ),
-            ], width=2),
-            dbc.Col([
-                html.Label("Min Score", className="small text-muted"),
-                dcc.Slider(
-                    id="hist-min-score",
-                    min=0, max=100, step=5, value=0,
-                    marks={0: "0", 50: "50", 100: "100"},
-                    className="mb-2",
+                dbc.Col(
+                    [
+                        html.Label("Min Score", className="small text-muted"),
+                        dcc.Slider(
+                            id="hist-min-score",
+                            min=0,
+                            max=100,
+                            step=5,
+                            value=0,
+                            marks={0: "0", 50: "50", 100: "100"},
+                            className="mb-2",
+                        ),
+                    ],
+                    width=3,
                 ),
-            ], width=3),
-            dbc.Col([
-                html.Label("Days Back", className="small text-muted"),
-                dbc.Input(
-                    id="hist-days",
-                    type="number",
-                    value=30,
-                    min=1,
-                    max=365,
-                    className="mb-2",
+                dbc.Col(
+                    [
+                        html.Label("Days Back", className="small text-muted"),
+                        dbc.Input(
+                            id="hist-days",
+                            type="number",
+                            value=30,
+                            min=1,
+                            max=365,
+                            className="mb-2",
+                        ),
+                    ],
+                    width=2,
                 ),
-            ], width=2),
-            dbc.Col([
-                html.Label("Artist search", className="small text-muted"),
-                dbc.Input(id="hist-artist", placeholder="e.g. Taylor Swift", className="mb-2"),
-            ], width=3),
-            dbc.Col([
-                html.Br(),
-                dbc.Button("Search", id="btn-hist-search", color="primary", className="w-100 mb-2"),
-            ], width=2),
-        ], className="mt-3 align-items-end"),
+                dbc.Col(
+                    [
+                        html.Label("Artist search", className="small text-muted"),
+                        dbc.Input(
+                            id="hist-artist", placeholder="e.g. Taylor Swift", className="mb-2"
+                        ),
+                    ],
+                    width=3,
+                ),
+                dbc.Col(
+                    [
+                        html.Br(),
+                        dbc.Button(
+                            "Search", id="btn-hist-search", color="primary", className="w-100 mb-2"
+                        ),
+                    ],
+                    width=2,
+                ),
+            ],
+            className="mt-3 align-items-end",
+        ),
         dbc.Button(
             "Export CSV",
             id="btn-hist-export",
@@ -176,22 +209,26 @@ _history_tab = dbc.Tab(
 # Tab: Settings (notification channels)
 # ---------------------------------------------------------------------------
 
+
 def _channel_row(label: str, input_id: str, channel_key: str) -> dbc.Row:
-    return dbc.Row([
-        dbc.Col(html.Label(label, className="small text-muted pt-2"), width=2),
-        dbc.Col(dbc.Input(id=input_id, placeholder="https://...", type="url"), width=7),
-        dbc.Col(
-            dbc.Button(
-                "Test",
-                id=f"btn-test-{channel_key}",
-                color="info",
-                size="sm",
-                outline=True,
+    return dbc.Row(
+        [
+            dbc.Col(html.Label(label, className="small text-muted pt-2"), width=2),
+            dbc.Col(dbc.Input(id=input_id, placeholder="https://...", type="url"), width=7),
+            dbc.Col(
+                dbc.Button(
+                    "Test",
+                    id=f"btn-test-{channel_key}",
+                    color="info",
+                    size="sm",
+                    outline=True,
+                ),
+                width=2,
             ),
-            width=2,
-        ),
-        dbc.Col(html.Span("", id=f"test-status-{channel_key}", className="small"), width=1),
-    ], className="mb-2 align-items-center")
+            dbc.Col(html.Span("", id=f"test-status-{channel_key}", className="small"), width=1),
+        ],
+        className="mb-2 align-items-center",
+    )
 
 
 _settings_tab = dbc.Tab(
@@ -204,19 +241,33 @@ _settings_tab = dbc.Tab(
         _channel_row("Custom Webhook", "input-webhook-url", "webhook"),
         html.Hr(),
         html.H6("Email (SMTP)", className="mb-2"),
-        dbc.Row([
-            dbc.Col(dbc.Input(id="input-smtp-host", placeholder="smtp.example.com"), width=4),
-            dbc.Col(dbc.Input(id="input-smtp-port", placeholder="587", type="number", value=587), width=2),
-            dbc.Col(dbc.Input(id="input-smtp-user", placeholder="username"), width=3),
-            dbc.Col(dbc.Input(id="input-smtp-pass", placeholder="password", type="password"), width=3),
-        ], className="mb-2"),
-        dbc.Row([
-            dbc.Col(
-                dbc.Button("Save Settings", id="btn-save-settings", color="primary"),
-                width="auto",
-            ),
-            dbc.Col(html.Span("", id="settings-save-status", className="small pt-2"), width="auto"),
-        ], className="mt-2 align-items-center"),
+        dbc.Row(
+            [
+                dbc.Col(dbc.Input(id="input-smtp-host", placeholder="smtp.example.com"), width=4),
+                dbc.Col(
+                    dbc.Input(id="input-smtp-port", placeholder="587", type="number", value=587),
+                    width=2,
+                ),
+                dbc.Col(dbc.Input(id="input-smtp-user", placeholder="username"), width=3),
+                dbc.Col(
+                    dbc.Input(id="input-smtp-pass", placeholder="password", type="password"),
+                    width=3,
+                ),
+            ],
+            className="mb-2",
+        ),
+        dbc.Row(
+            [
+                dbc.Col(
+                    dbc.Button("Save Settings", id="btn-save-settings", color="primary"),
+                    width="auto",
+                ),
+                dbc.Col(
+                    html.Span("", id="settings-save-status", className="small pt-2"), width="auto"
+                ),
+            ],
+            className="mt-2 align-items-center",
+        ),
     ],
 )
 
@@ -228,40 +279,49 @@ _accuracy_tab = dbc.Tab(
     label="Accuracy",
     tab_id="tab-accuracy",
     children=[
-        dbc.Row([
-            dbc.Col(_stat_card("acc-total", "Predictions Evaluated"), width=3),
-            dbc.Col(_stat_card("acc-pct", "Mean Accuracy"), width=3),
-            dbc.Col(_stat_card("acc-mae", "MAE"), width=3),
-            dbc.Col(_stat_card("acc-rmse", "RMSE"), width=3),
-        ], className="mt-3"),
+        dbc.Row(
+            [
+                dbc.Col(_stat_card("acc-total", "Predictions Evaluated"), width=3),
+                dbc.Col(_stat_card("acc-pct", "Mean Accuracy"), width=3),
+                dbc.Col(_stat_card("acc-mae", "MAE"), width=3),
+                dbc.Col(_stat_card("acc-rmse", "RMSE"), width=3),
+            ],
+            className="mt-3",
+        ),
         dbc.Button(
             "Evaluate Now",
             id="btn-evaluate",
             color="primary",
             className="mb-3",
         ),
-        dbc.Row([
-            dbc.Col(dcc.Graph(id="accuracy-by-platform", style={"height": "300px"}), width=6),
-            dbc.Col(
-                dash_table.DataTable(
-                    id="predictions-table",
-                    columns=[
-                        {"name": "Track", "id": "track_name"},
-                        {"name": "Artist", "id": "artist"},
-                        {"name": "Predicted", "id": "predicted_peak_score"},
-                        {"name": "Actual", "id": "actual_peak_score"},
-                        {"name": "Accuracy", "id": "accuracy_score"},
-                        {"name": "Status", "id": "status"},
-                    ],
-                    data=[],
-                    page_size=10,
-                    style_table={"overflowX": "auto"},
-                    style_cell={"backgroundColor": "#1a1a1a", "color": "#ccc", "fontSize": "13px"},
-                    style_header={"backgroundColor": "#2a2a2a", "fontWeight": "bold"},
+        dbc.Row(
+            [
+                dbc.Col(dcc.Graph(id="accuracy-by-platform", style={"height": "300px"}), width=6),
+                dbc.Col(
+                    dash_table.DataTable(
+                        id="predictions-table",
+                        columns=[
+                            {"name": "Track", "id": "track_name"},
+                            {"name": "Artist", "id": "artist"},
+                            {"name": "Predicted", "id": "predicted_peak_score"},
+                            {"name": "Actual", "id": "actual_peak_score"},
+                            {"name": "Accuracy", "id": "accuracy_score"},
+                            {"name": "Status", "id": "status"},
+                        ],
+                        data=[],
+                        page_size=10,
+                        style_table={"overflowX": "auto"},
+                        style_cell={
+                            "backgroundColor": "#1a1a1a",
+                            "color": "#ccc",
+                            "fontSize": "13px",
+                        },
+                        style_header={"backgroundColor": "#2a2a2a", "fontWeight": "bold"},
+                    ),
+                    width=6,
                 ),
-                width=6,
-            ),
-        ]),
+            ]
+        ),
     ],
 )
 
@@ -273,66 +333,68 @@ app.layout = dbc.Container(
     [
         dcc.Store(id="last-status", data="Idle"),
         dcc.Store(id="last-output", data=""),
-        dbc.Row([
-            # Sidebar
-            dbc.Col(
-                [
-                    html.H4("Audora", className="mb-3"),
-                    html.Hr(),
-                    dbc.Button(
-                        "Run single discovery",
-                        id="btn-discovery",
-                        color="primary",
-                        className="w-100 mb-2",
-                    ),
-                    html.Label("Run demo:", className="mt-2 small text-muted"),
-                    dbc.Select(
-                        id="demo-select",
-                        options=[
-                            {"label": "Statistical", "value": "statistical"},
-                            {"label": "Trending", "value": "trending"},
-                            {"label": "Multi-source", "value": "multi_source"},
-                            {"label": "Platform", "value": "platform"},
-                            {"label": "All demos", "value": "all"},
-                        ],
-                        value="statistical",
-                        className="mb-2",
-                    ),
-                    dbc.Button(
-                        "Run demo",
-                        id="btn-demo",
-                        color="secondary",
-                        className="w-100 mb-2",
-                    ),
-                    dbc.Button(
-                        "Setup",
-                        id="btn-setup",
-                        color="info",
-                        outline=True,
-                        className="w-100 mb-2",
-                    ),
-                    dbc.Button(
-                        "Validate",
-                        id="btn-validate",
-                        color="info",
-                        outline=True,
-                        className="w-100 mb-2",
-                    ),
-                ],
-                width=2,
-                className="pt-4",
-            ),
-            # Main content
-            dbc.Col(
-                dbc.Tabs(
-                    id="main-tabs",
-                    active_tab="tab-dashboard",
-                    children=[_dashboard_tab, _history_tab, _settings_tab, _accuracy_tab],
+        dbc.Row(
+            [
+                # Sidebar
+                dbc.Col(
+                    [
+                        html.H4("Audora", className="mb-3"),
+                        html.Hr(),
+                        dbc.Button(
+                            "Run single discovery",
+                            id="btn-discovery",
+                            color="primary",
+                            className="w-100 mb-2",
+                        ),
+                        html.Label("Run demo:", className="mt-2 small text-muted"),
+                        dbc.Select(
+                            id="demo-select",
+                            options=[
+                                {"label": "Statistical", "value": "statistical"},
+                                {"label": "Trending", "value": "trending"},
+                                {"label": "Multi-source", "value": "multi_source"},
+                                {"label": "Platform", "value": "platform"},
+                                {"label": "All demos", "value": "all"},
+                            ],
+                            value="statistical",
+                            className="mb-2",
+                        ),
+                        dbc.Button(
+                            "Run demo",
+                            id="btn-demo",
+                            color="secondary",
+                            className="w-100 mb-2",
+                        ),
+                        dbc.Button(
+                            "Setup",
+                            id="btn-setup",
+                            color="info",
+                            outline=True,
+                            className="w-100 mb-2",
+                        ),
+                        dbc.Button(
+                            "Validate",
+                            id="btn-validate",
+                            color="info",
+                            outline=True,
+                            className="w-100 mb-2",
+                        ),
+                    ],
+                    width=2,
+                    className="pt-4",
                 ),
-                width=10,
-                className="pt-4",
-            ),
-        ]),
+                # Main content
+                dbc.Col(
+                    dbc.Tabs(
+                        id="main-tabs",
+                        active_tab="tab-dashboard",
+                        children=[_dashboard_tab, _history_tab, _settings_tab, _accuracy_tab],
+                    ),
+                    width=10,
+                    className="pt-4",
+                ),
+            ]
+        ),
     ],
     fluid=True,
     className="p-4",
@@ -342,6 +404,7 @@ app.layout = dbc.Container(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
@@ -367,6 +430,7 @@ def _run_command(args: list[str]) -> tuple[str, str]:
 def _get_data_store():
     """Return an EnhancedMusicDataStore pointed at the default DB path."""
     from core.data_store import EnhancedMusicDataStore
+
     db_path = PROJECT_ROOT / "data" / "enhanced_music_trends.db"
     return EnhancedMusicDataStore(str(db_path))
 
@@ -374,6 +438,7 @@ def _get_data_store():
 # ---------------------------------------------------------------------------
 # Callbacks — sidebar actions
 # ---------------------------------------------------------------------------
+
 
 @app.callback(
     Output("last-status", "data"),
@@ -430,6 +495,7 @@ def toggle_log(n_clicks, is_open):
 # Callbacks — dashboard charts (Phase 2)
 # ---------------------------------------------------------------------------
 
+
 @app.callback(
     Output("stat-tracks", "children"),
     Output("stat-score", "children"),
@@ -463,7 +529,9 @@ def update_dashboard(_n, _status):
     for t in top_tracks:
         p = t.get("platform", "unknown")
         platform_counts[p] = platform_counts.get(p, 0) + 1
-    top_platform = max(platform_counts, key=lambda k: platform_counts[k]) if platform_counts else "—"
+    top_platform = (
+        max(platform_counts, key=lambda k: platform_counts[k]) if platform_counts else "—"
+    )
 
     # --- Trend bar chart ---
     names = [f"{t.get('track_name', '')} — {t.get('artist', '')}" for t in top_tracks]
@@ -509,6 +577,7 @@ def update_dashboard(_n, _status):
 # ---------------------------------------------------------------------------
 # Callbacks — history search (Phase 3)
 # ---------------------------------------------------------------------------
+
 
 @app.callback(
     Output("history-table", "data"),
@@ -562,6 +631,7 @@ def export_csv(_n, table_data):
         raise dash.exceptions.PreventUpdate
     import io
     import pandas as pd
+
     df = pd.DataFrame(table_data)
     buf = io.StringIO()
     df.to_csv(buf, index=False)
@@ -571,6 +641,7 @@ def export_csv(_n, table_data):
 # ---------------------------------------------------------------------------
 # Callbacks — notification settings (Phase 4)
 # ---------------------------------------------------------------------------
+
 
 @app.callback(
     Output("settings-save-status", "children"),
@@ -584,9 +655,12 @@ def export_csv(_n, table_data):
     State("input-smtp-pass", "value"),
     prevent_initial_call=True,
 )
-def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+def save_settings(
+    _n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass
+):
     try:
         from core.notification_service import EnhancedNotificationService
+
         svc = EnhancedNotificationService()
         if slack_url:
             svc.config["slack"]["webhook_url"] = svc._validate_webhook_url(slack_url)
@@ -631,6 +705,7 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
                 NotificationMessage,
                 NotificationPriority,
             )
+
             svc = EnhancedNotificationService()
             svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
             channel = getattr(NotificationChannel, channel_enum_name)
@@ -655,6 +730,7 @@ _test_channel_callback("webhook", "input-webhook-url", "WEBHOOK")
 # Callbacks — accuracy tracking (Phase 5)
 # ---------------------------------------------------------------------------
 
+
 @app.callback(
     Output("acc-total", "children"),
     Output("acc-pct", "children"),
@@ -669,7 +745,9 @@ def evaluate_accuracy(_n):
     try:
         store = _get_data_store()
         metrics = store.evaluate_prediction_accuracy(days_back=30)
-        pred_df = store.get_viral_predictions(confidence_threshold=0.0, status=None, days=30, limit=50)
+        pred_df = store.get_viral_predictions(
+            confidence_threshold=0.0, status=None, days=30, limit=50
+        )
     except Exception as e:
         empty_fig = go.Figure()
         empty_fig.update_layout(paper_bgcolor="#1a1a1a", plot_bgcolor="#1a1a1a", font_color="#ccc")
