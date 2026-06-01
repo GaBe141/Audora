@@ -5,8 +5,12 @@ import asyncio
 import pytest
 
 import core.notification_service as notification_service
-from core.notification_service import EnhancedNotificationService
-from core.notification_service import NotificationChannel, NotificationMessage, NotificationPriority
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
 
 
 class TestWebhookUrlValidation:
