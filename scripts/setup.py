@@ -20,7 +20,7 @@ ENHANCED_PACKAGES = [
     "matplotlib>=3.5.0",
     "seaborn>=0.11.0",
     "plotly>=5.0.0",
-    "requests>=2.32.5",
+    "requests==2.34.2",
     "aiohttp>=3.13.5",
     "aiofiles>=0.8.0",
     # Data science and ML
@@ -34,7 +34,7 @@ ENHANCED_PACKAGES = [
     # Template engine
     "jinja2>=3.1.6",
     # Environment management
-    "python-dotenv>=1.1.1",
+    "python-dotenv==1.2.2",
     # Development tools
     "pytest==9.0.3",
     "black==26.5.1",
