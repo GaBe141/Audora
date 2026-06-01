@@ -36,10 +36,10 @@ ENHANCED_PACKAGES = [
     # Optional Redis cache backend
     "redis==8.0.0",
     # Environment management
-    "python-dotenv>=0.19.0",
+    "python-dotenv==1.2.2",
     # Development tools
     "pytest>=7.0.0",
-    "black>=22.0.0",
+    "black==26.5.1",
     "flake8>=4.0.0",
 ]
 
