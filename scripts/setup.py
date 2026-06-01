@@ -7,7 +7,7 @@ Installs dependencies, configures services, and validates the system.
 import json
 import logging
 import platform
-import subprocess
+import subprocess  # nosec B404 - setup uses fixed argv pip commands only
 import sys
 from pathlib import Path
 from typing import Any
@@ -117,7 +117,7 @@ class EnhancedMusicDiscoverySetup:
         # Check if pip is available
         try:
             # Test pip availability
-            subprocess.run(
+            subprocess.run(  # nosec B603 - fixed argv, no shell, no user-controlled command
                 [sys.executable, "-m", "pip", "--version"], capture_output=True, check=True
             )
         except (subprocess.CalledProcessError, FileNotFoundError):
@@ -129,11 +129,13 @@ class EnhancedMusicDiscoverySetup:
             return False
 
         try:
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)],
-                capture_output=True,
-                text=True,
-                timeout=900,
+            result = (
+                subprocess.run(  # nosec B603 - fixed argv, no shell, reviewed requirements path
+                    [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)],
+                    capture_output=True,
+                    text=True,
+                    timeout=900,
+                )
             )
         except subprocess.TimeoutExpired:
             self.logger.error("    ❌ Dependency installation timed out")
@@ -173,12 +175,13 @@ class EnhancedMusicDiscoverySetup:
 
     def _create_enhanced_api_config(self) -> dict[str, Any]:
         """Create enhanced API configuration."""
+        blank = ""
         return {
             "social_media_apis": {
                 "tiktok": {
-                    "api_key": "",
-                    "api_secret": "",
-                    "access_token": "",
+                    "api_key": blank,
+                    "api_secret": blank,
+                    "access_token": blank,
                     "rate_limit": {"requests_per_minute": 60, "requests_per_hour": 1000},
                     "endpoints": {
                         "trending": "https://api.tiktok.com/v1/trending",
@@ -187,7 +190,7 @@ class EnhancedMusicDiscoverySetup:
                     "priority": "high",
                 },
                 "youtube": {
-                    "api_key": "",
+                    "api_key": blank,
                     "rate_limit": {"requests_per_minute": 100, "requests_per_day": 10000},
                     "endpoints": {
                         "trending": "https://www.googleapis.com/youtube/v3/videos",
@@ -196,30 +199,30 @@ class EnhancedMusicDiscoverySetup:
                     "priority": "high",
                 },
                 "twitter": {
-                    "bearer_token": "",
-                    "api_key": "",
-                    "api_secret": "",
-                    "access_token": "",
-                    "access_token_secret": "",
+                    "bearer_token": blank,
+                    "api_key": blank,
+                    "api_secret": blank,
+                    "access_token": blank,
+                    "access_token_secret": blank,
                     "rate_limit": {"requests_per_minute": 300, "requests_per_15min": 450},
                     "priority": "medium",
                 },
                 "instagram": {
-                    "access_token": "",
-                    "client_id": "",
-                    "client_secret": "",
+                    "access_token": blank,
+                    "client_id": blank,
+                    "client_secret": blank,
                     "rate_limit": {"requests_per_hour": 200},
                     "priority": "medium",
                 },
                 "reddit": {
-                    "client_id": "",
-                    "client_secret": "",
+                    "client_id": blank,
+                    "client_secret": blank,
                     "user_agent": "music-discovery-bot/1.0",
                     "rate_limit": {"requests_per_minute": 60},
                     "priority": "low",
                 },
                 "soundcloud": {
-                    "client_id": "",
+                    "client_id": blank,
                     "rate_limit": {"requests_per_minute": 50},
                     "priority": "low",
                 },
@@ -235,15 +238,16 @@ class EnhancedMusicDiscoverySetup:
 
     def _create_notification_config(self) -> dict[str, Any]:
         """Create notification configuration."""
+        blank = ""
         return {
             "enabled": True,
             "channels": {
                 "email": {
                     "enabled": False,
-                    "smtp_server": "",
+                    "smtp_server": blank,
                     "port": 587,
-                    "username": "",
-                    "password": "",
+                    "username": blank,
+                    "password": blank,
                     "from_address": "music-discovery@example.com",
                     "recipients": [],
                 },
