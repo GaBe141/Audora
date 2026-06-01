@@ -2,8 +2,11 @@
 
 import time
 
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +83,49 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+    def test_cache_key_uses_sha256_components(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", ({"a": 1},), {"b": 2})
+        parts = key.split(":")
+
+        assert parts[0] == "fn"
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache serialization safety."""
+
+    def test_json_roundtrip_without_pickle(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = {"artist": "Example", "scores": [1, 2, 3], "active": True}
+
+        serialized = backend._serialize(value)
+
+        assert b"pickle" not in serialized.lower()
+        assert backend._deserialize(serialized) == value
+
+    def test_bytes_roundtrip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = b"raw-cache-value"
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_rejects_legacy_signed_pickle_payload(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        legacy_payload = (
+            b'{"v":1,"alg":"HMAC-SHA256","sig":"deadbeef","payload":"gASVBQAAAAAAAABLAy4="}'
+        )
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_rejects_unsupported_object_types(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError):
+            backend._serialize(object())
 
 
 class TestCachedDecorator:

@@ -807,11 +807,10 @@ class EnhancedMusicDataStore:
         params.extend(track_ids)
 
         with self.get_connection() as conn:
-            query = f"""
-            UPDATE trends
-            SET {', '.join(set_clauses)}, last_updated = CURRENT_TIMESTAMP
-            WHERE track_id IN ({placeholders})
-            """
+            query = (  # nosec B608 - column names and placeholders are allowlisted above.
+                f"UPDATE trends SET {', '.join(set_clauses)}, last_updated = CURRENT_TIMESTAMP "
+                f"WHERE track_id IN ({placeholders})"
+            )
 
             cursor = conn.cursor()
             cursor.execute(query, params)
@@ -947,15 +946,17 @@ class EnhancedMusicDataStore:
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
-                query = f"""
-                SELECT * FROM {table}
-                WHERE datetime(created_at) >= datetime('now', ?)
-                ORDER BY created_at DESC
-                """
+                query = (  # nosec B608 - table name is validated against valid_tables.
+                    f"SELECT * FROM {table} "
+                    "WHERE datetime(created_at) >= datetime('now', ?) "
+                    "ORDER BY created_at DESC"
+                )
                 df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
             else:
                 # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
+                query = (  # nosec B608 - table name is validated against valid_tables.
+                    f"SELECT * FROM {table} ORDER BY created_at DESC"
+                )
                 df = pd.read_sql_query(query, conn)
 
             # Ensure directory exists
@@ -978,7 +979,7 @@ class EnhancedMusicDataStore:
 
             for table in tables:
                 # Table names are from whitelist, safe to use
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                cursor.execute(f"SELECT COUNT(*) FROM {table}")  # nosec B608
                 table_stats[table] = cursor.fetchone()[0]
 
             # Data quality checks
