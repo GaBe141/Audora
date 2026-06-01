@@ -21,7 +21,7 @@ ENHANCED_PACKAGES = [
     "seaborn>=0.11.0",
     "plotly>=5.0.0",
     "requests>=2.25.0",
-    "aiohttp>=3.8.0",
+    "aiohttp==3.13.5",
     "aiofiles>=0.8.0",
     # Data science and ML
     "scikit-learn>=1.0.0",
@@ -29,10 +29,12 @@ ENHANCED_PACKAGES = [
     # Statistical analysis (optional)
     "statsmodels>=0.13.0",
     # Web framework (for dashboard)
-    "dash>=2.0.0",
-    "dash-bootstrap-components>=1.0.0",
+    "dash==4.1.0",
+    "dash-bootstrap-components==2.0.4",
     # Template engine
-    "jinja2>=3.0.0",
+    "jinja2==3.1.6",
+    # Optional Redis cache backend
+    "redis==8.0.0",
     # Environment management
     "python-dotenv>=0.19.0",
     # Development tools
@@ -677,9 +679,9 @@ ENABLE_NOTIFICATIONS=True
         print("     - python src/advanced_analytics.py")
 
         print("\n3. 📱 Set Up Notifications:")
-        print("   • Configure Slack/Discord webhooks in config/notification_config.json")
-        print("   • Set up email SMTP settings in .env.enhanced")
-        print("   • Test with: python src/notification_service.py")
+        print("   • Configure webhook URLs and SMTP passwords in .env.enhanced")
+        print("   • Store only non-secret notification settings in config/notification_config.json")
+        print("   • Test with: python -m core.notification_service")
 
         print("\n4. 🎯 Start Music Discovery:")
         print("   • Configure APIs: python src/api_config.py")

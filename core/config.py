@@ -173,6 +173,18 @@ LASTFM_SHARED_SECRET=your_lastfm_shared_secret_here
 # Free tier (123) provides basic access, premium unlocks additional features
 AUDIODB_API_KEY=123
 
+# Optional Notification Secrets
+# Keep these in the environment; Audora will not persist webhook URLs or
+# SMTP passwords to config/notification_config.json.
+SMTP_PASSWORD=your_smtp_password_here
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR/WEBHOOK/URL
+CUSTOM_WEBHOOK_URL=https://example.com/audora-webhook
+WEBHOOK_TOKEN=your_custom_webhook_bearer_token_here
+
+# Optional GUI command execution. Only enable for a trusted local session.
+AUDORA_GUI_ENABLE_COMMANDS=0
+
 # Security Notes:
 # - Never commit this file to version control
 # - Keep file permissions restrictive (chmod 600 on Unix systems)

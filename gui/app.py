@@ -5,6 +5,7 @@ Includes live trend dashboard, history search, notification settings, and accura
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -17,12 +18,19 @@ from dash import Input, Output, State, ctx, dash_table, dcc, html
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+GUI_COMMANDS_ENV = "AUDORA_GUI_ENABLE_COMMANDS"
+
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.CYBORG],
     suppress_callback_exceptions=True,
     title="Audora",
 )
+
+
+def _gui_commands_enabled() -> bool:
+    """Return True when local GUI command execution has been explicitly enabled."""
+    return os.getenv(GUI_COMMANDS_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 # ---------------------------------------------------------------------------
 # Layout helpers
@@ -279,11 +287,22 @@ app.layout = dbc.Container(
                 [
                     html.H4("Audora", className="mb-3"),
                     html.Hr(),
+                    dbc.Alert(
+                        [
+                            "Command buttons are disabled by default. Set ",
+                            html.Code(f"{GUI_COMMANDS_ENV}=1"),
+                            " only for a trusted local session.",
+                        ],
+                        color="warning",
+                        className="small py-2",
+                        is_open=not _gui_commands_enabled(),
+                    ),
                     dbc.Button(
                         "Run single discovery",
                         id="btn-discovery",
                         color="primary",
                         className="w-100 mb-2",
+                        disabled=not _gui_commands_enabled(),
                     ),
                     html.Label("Run demo:", className="mt-2 small text-muted"),
                     dbc.Select(
@@ -303,6 +322,7 @@ app.layout = dbc.Container(
                         id="btn-demo",
                         color="secondary",
                         className="w-100 mb-2",
+                        disabled=not _gui_commands_enabled(),
                     ),
                     dbc.Button(
                         "Setup",
@@ -310,6 +330,7 @@ app.layout = dbc.Container(
                         color="info",
                         outline=True,
                         className="w-100 mb-2",
+                        disabled=not _gui_commands_enabled(),
                     ),
                     dbc.Button(
                         "Validate",
@@ -317,6 +338,7 @@ app.layout = dbc.Container(
                         color="info",
                         outline=True,
                         className="w-100 mb-2",
+                        disabled=not _gui_commands_enabled(),
                     ),
                 ],
                 width=2,
@@ -345,6 +367,13 @@ app.layout = dbc.Container(
 
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
+    if not _gui_commands_enabled():
+        return (
+            "Disabled",
+            f"GUI command execution is disabled. Set {GUI_COMMANDS_ENV}=1 "
+            "for a trusted local session before starting the GUI.",
+        )
+
     try:
         proc = subprocess.Popen(
             args,
@@ -588,12 +617,18 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
     try:
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
+        for url in (slack_url, discord_url, webhook_url):
+            if url:
+                svc._validate_webhook_url(url, allow_private=False)
+
+        # Webhook URLs and SMTP passwords are bearer secrets. They are accepted
+        # here only for validation; persistent values must come from environment.
         if slack_url:
-            svc.config["slack"]["webhook_url"] = slack_url
+            svc.config["slack"].pop("webhook_url", None)
         if discord_url:
-            svc.config["discord"]["webhook_url"] = discord_url
+            svc.config["discord"].pop("webhook_url", None)
         if webhook_url:
-            svc.config["webhook"]["url"] = webhook_url
+            svc.config["webhook"].pop("url", None)
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
         if smtp_port:
@@ -601,9 +636,9 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
         if smtp_pass:
-            svc.config["email"]["password"] = smtp_pass
+            svc.config["email"].pop("password", None)
         svc.save_config()
-        return "Saved"
+        return "Saved non-secret settings. Store webhook URLs and SMTP passwords in environment."
     except Exception as e:
         return f"Error: {e}"
 
