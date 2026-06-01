@@ -1,9 +1,19 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -81,6 +91,14 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_build_cache_key_uses_sha256(self):
+        cache = CacheManager(backend=LocalCacheBackend())
+        key = cache._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        parts = key.split(":")
+
+        assert len(parts) == 3
+        assert all(len(digest) == 64 for digest in parts[1:])
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +136,72 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSerialization:
+    """Redis payloads must stay JSON-only and reject legacy pickle envelopes."""
+
+    @staticmethod
+    def _backend() -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-cache-signing-key"
+        return backend
+
+    def test_json_serialization_round_trips_common_values(self):
+        backend = self._backend()
+        value = {
+            "name": "Audora",
+            "count": 3,
+            "bytes": b"abc",
+            "tuple": ("x", 1),
+            "set": {"b", "a"},
+            "nested": [{"ok": True}],
+        }
+
+        encoded = backend._serialize(value)
+        decoded_envelope = json.loads(encoded.decode("utf-8"))
+
+        assert decoded_envelope["v"] == 2
+        assert decoded_envelope["format"] == "json"
+        assert backend._deserialize(encoded) == {
+            "name": "Audora",
+            "count": 3,
+            "bytes": b"abc",
+            "tuple": ("x", 1),
+            "set": {"a", "b"},
+            "nested": [{"ok": True}],
+        }
+
+    def test_dataframe_serialization_round_trips_without_pickle(self):
+        backend = self._backend()
+        frame = pd.DataFrame({"track": ["A", "B"], "score": [1.5, 2.5]})
+
+        restored = backend._deserialize(backend._serialize(frame))
+
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        backend = self._backend()
+        payload = pickle.dumps({"unsafe": "legacy"})
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest(),
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        assert backend._deserialize(json.dumps(legacy_envelope).encode("utf-8")) is None
+
+    def test_rejects_tampered_json_payload(self):
+        backend = self._backend()
+        encoded = backend._serialize({"safe": True})
+        envelope = json.loads(encoded.decode("utf-8"))
+        envelope["payload"]["value"][0][1] = False
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_unsupported_objects_are_not_serialized(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError):
+            backend._serialize(object())
