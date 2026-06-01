@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import smtplib
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -23,6 +24,37 @@ from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+
+
+class RestrictedWebhookResolver(aiohttp.abc.AbstractResolver):
+    """Validate DNS results at connection time for outbound webhook requests."""
+
+    def __init__(self, is_restricted_ip, *, allow_private: bool = False) -> None:
+        self._resolver = aiohttp.DefaultResolver()
+        self._is_restricted_ip = is_restricted_ip
+        self._allow_private = allow_private
+
+    async def resolve(
+        self,
+        host: str,
+        port: int = 0,
+        family: int = socket.AF_INET,
+    ) -> list[dict[str, Any]]:
+        if host.lower() == "localhost":
+            raise ValueError("Localhost webhook URLs are not allowed")
+
+        records = await self._resolver.resolve(host, port, family)
+        if not self._allow_private:
+            for record in records:
+                resolved_host = str(record.get("host", ""))
+                if self._is_restricted_ip(resolved_host):
+                    raise ValueError(
+                        "Webhook URL resolves to a private or restricted network address"
+                    )
+        return records
+
+    async def close(self) -> None:
+        await self._resolver.close()
 
 
 class NotificationPriority(Enum):
@@ -85,6 +117,20 @@ class EnhancedNotificationService:
     - Analytics and reporting
     """
 
+    _SECRET_CONFIG_PATHS = (
+        ("email", "password"),
+        ("slack", "webhook_url"),
+        ("discord", "webhook_url"),
+        ("webhook", "url"),
+        ("webhook", "headers", "Authorization"),
+        ("sms", "api_key"),
+        ("sms", "api_secret"),
+        ("channels", "email", "password"),
+        ("channels", "slack", "webhook_url"),
+        ("channels", "discord", "webhook_url"),
+        ("channels", "webhook", "url"),
+    )
+
     def __init__(self, config_file: str | None = None):
         self.logger = logging.getLogger(__name__)
         self.config = self._load_config(config_file)
@@ -131,6 +177,7 @@ class EnhancedNotificationService:
                 "from_address": os.getenv("SMTP_FROM", "music-discovery@example.com"),
                 "recipients": os.getenv("EMAIL_RECIPIENTS", "").split(","),
                 "use_tls": True,
+                "attachment_directory": os.getenv("AUDORA_ATTACHMENT_DIR", "attachments"),
             },
             "slack": {
                 "webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
@@ -164,8 +211,7 @@ class EnhancedNotificationService:
             try:
                 with Path(config_file).open() as f:
                     user_config = json.load(f)
-                    # Deep merge configurations
-                    self._deep_merge(default_config, user_config)
+                    self._deep_merge(default_config, self._without_file_secrets(user_config))
             except Exception as e:
                 self.logger.error(f"Failed to load config file {config_file}: {e}")
 
@@ -175,7 +221,7 @@ class EnhancedNotificationService:
             try:
                 with default_path.open() as f:
                     user_config = json.load(f)
-                    self._deep_merge(default_config, user_config)
+                    self._deep_merge(default_config, self._without_file_secrets(user_config))
             except Exception as e:
                 self.logger.warning(f"Could not load {default_path}: {e}")
 
@@ -192,7 +238,9 @@ class EnhancedNotificationService:
         # Only save channel-specific sections (not internal runtime state)
         saveable_keys = ["email", "slack", "discord", "webhook", "sms",
                          "default_channels", "rate_limit_per_hour"]
-        to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        to_save = self._without_file_secrets(
+            {k: self.config[k] for k in saveable_keys if k in self.config}
+        )
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
@@ -202,14 +250,45 @@ class EnhancedNotificationService:
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
 
-    def _allow_private_webhooks(self) -> bool:
-        """Whether private network webhook targets are allowed."""
-        return os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+    def _without_file_secrets(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Return a copy of file-backed config with secret-bearing values removed."""
+        sanitized = deepcopy(config)
+        for path in self._SECRET_CONFIG_PATHS:
+            self._remove_nested_key(sanitized, path)
+        self._allowlist_file_webhook_headers(sanitized)
+        return sanitized
+
+    def _remove_nested_key(self, config: dict[str, Any], path: tuple[str, ...]) -> None:
+        """Remove a nested key if it exists in a dictionary."""
+        current: Any = config
+        for key in path[:-1]:
+            if not isinstance(current, dict) or key not in current:
+                return
+            current = current[key]
+        if isinstance(current, dict):
+            current.pop(path[-1], None)
+
+    def _allowlist_file_webhook_headers(self, config: dict[str, Any]) -> None:
+        """Keep only non-secret webhook headers from file-backed configuration."""
+        for path in (("webhook", "headers"), ("channels", "webhook", "headers")):
+            current: Any = config
+            for key in path[:-1]:
+                if not isinstance(current, dict) or key not in current:
+                    current = None
+                    break
+                current = current[key]
+            if not isinstance(current, dict):
+                continue
+
+            headers = current.get(path[-1])
+            if not isinstance(headers, dict):
+                continue
+
+            current[path[-1]] = {
+                key: value
+                for key, value in headers.items()
+                if isinstance(key, str) and key.lower() == "content-type"
+            }
 
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
@@ -254,6 +333,37 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _webhook_connector(self, *, allow_private: bool = False) -> aiohttp.TCPConnector:
+        """Create a connector that revalidates DNS answers for webhook requests."""
+        return aiohttp.TCPConnector(
+            resolver=RestrictedWebhookResolver(
+                self._is_restricted_ip,
+                allow_private=allow_private,
+            )
+        )
+
+    def _resolve_attachment_path(self, attachment_path: str) -> Path:
+        """Resolve an email attachment inside the configured attachment directory."""
+        email_config = self.config.get("email", {})
+        base_dir = Path(
+            email_config.get("attachment_directory")
+            or os.getenv("AUDORA_ATTACHMENT_DIR", "attachments")
+        ).expanduser()
+        if not base_dir.is_absolute():
+            base_dir = Path.cwd() / base_dir
+        base_dir = base_dir.resolve()
+
+        candidate = Path(attachment_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = base_dir / candidate
+        candidate = candidate.resolve()
+
+        if not candidate.is_relative_to(base_dir):
+            raise ValueError("Email attachment path is outside the configured attachment directory")
+        if not candidate.is_file():
+            raise ValueError("Email attachment path does not exist or is not a file")
+        return candidate
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -559,16 +669,16 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    safe_attachment_path = self._resolve_attachment_path(attachment_path)
+                    with safe_attachment_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {safe_attachment_path.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
@@ -649,8 +759,12 @@ System status: {{ system_status }}
                     slack_message["attachments"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                aiohttp.ClientSession(connector=self._webhook_connector()) as session,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -716,8 +830,12 @@ System status: {{ system_status }}
                     discord_message["embeds"][0]["fields"] = fields
 
             async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                aiohttp.ClientSession(connector=self._webhook_connector()) as session,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    allow_redirects=False,
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -752,9 +870,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
-            url = self._validate_webhook_url(
-                url, allow_private=self._allow_private_webhooks()
-            )
+            url = self._validate_webhook_url(url, allow_private=False)
             # Prepare payload
             payload = {
                 "title": message.title,
@@ -775,9 +891,13 @@ System status: {{ system_status }}
             timeout = webhook_config.get("timeout", 30)
 
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(connector=self._webhook_connector()) as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
