@@ -204,12 +204,12 @@ class RedisCacheBackend(CacheBackend):
             return {str(key): self._to_cache_json(item) for key, item in value.items()}
 
         # Pandas and NumPy values appear in trend query caches. Keep support without pickle.
-        if value.__class__.__module__.startswith("pandas.") and hasattr(value, "to_dict"):
+        module = value.__class__.__module__
+        if (module == "pandas" or module.startswith("pandas.")) and hasattr(value, "to_dict"):
             return {
                 "__audora_type__": "pandas.DataFrame",
                 "value": value.to_dict(orient="split"),
             }
-        module = value.__class__.__module__
         if (module == "numpy" or module.startswith("numpy.")) and hasattr(value, "item"):
             return self._to_cache_json(value.item())
         if (module == "numpy" or module.startswith("numpy.")) and hasattr(value, "tolist"):
