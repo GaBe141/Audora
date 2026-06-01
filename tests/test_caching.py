@@ -2,8 +2,13 @@
 
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -81,6 +86,16 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_cache_key_uses_sha256_components(self):
+        cache = CacheManager(backend=LocalCacheBackend())
+
+        cache_key = cache._build_cache_key("prefix", ("value",), {"flag": True})
+        key_parts = cache_key.split(":")
+
+        assert key_parts[0] == "prefix"
+        assert len(key_parts[1]) == 64
+        assert len(key_parts[2]) == 64
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +133,47 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache serialization safety."""
+
+    def _backend(self):
+        return RedisCacheBackend.__new__(RedisCacheBackend)
+
+    def test_round_trips_json_compatible_values(self):
+        backend = self._backend()
+        value = {"artist": "A", "scores": [1, 2, 3], "active": True}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_round_trips_bytes(self):
+        backend = self._backend()
+        value = b"\x00audora\xff"
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_round_trips_dataframes(self):
+        backend = self._backend()
+        df = pd.DataFrame({"track": ["One", "Two"], "score": [91.5, 88.0]})
+
+        serialized = backend._serialize(df)
+        result = backend._deserialize(serialized)
+
+        pd.testing.assert_frame_equal(result, df)
+
+    def test_rejects_legacy_pickle_payloads(self):
+        backend = self._backend()
+        legacy_pickle = b"\x80\x04\x95\n\x00\x00\x00\x00\x00\x00\x00}\x94\x8c\x01x\x94K\x01s."
+
+        assert backend._deserialize(legacy_pickle) is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError):
+            backend._serialize(object())
