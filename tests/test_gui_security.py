@@ -1,12 +1,13 @@
 """Security tests for the optional Dash GUI."""
 
+import importlib
 import sys
 
 import pytest
 
 pytest.importorskip("dash")
 
-from gui import app as gui_app  # noqa: E402
+gui_app = importlib.import_module("gui.app")
 
 
 def test_gui_command_execution_disabled_by_default(monkeypatch):
