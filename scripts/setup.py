@@ -6,6 +6,7 @@ Installs dependencies, configures services, and validates the system.
 
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -20,7 +21,7 @@ ENHANCED_PACKAGES = [
     "matplotlib>=3.5.0",
     "seaborn>=0.11.0",
     "plotly>=5.0.0",
-    "requests>=2.25.0",
+    "requests>=2.34.2",
     "aiohttp>=3.8.0",
     "aiofiles>=0.8.0",
     # Data science and ML
@@ -29,15 +30,15 @@ ENHANCED_PACKAGES = [
     # Statistical analysis (optional)
     "statsmodels>=0.13.0",
     # Web framework (for dashboard)
-    "dash>=2.0.0",
+    "dash>=2.15.0",
     "dash-bootstrap-components>=1.0.0",
     # Template engine
     "jinja2>=3.0.0",
     # Environment management
-    "python-dotenv>=0.19.0",
+    "python-dotenv>=1.2.2",
     # Development tools
-    "pytest>=7.0.0",
-    "black>=22.0.0",
+    "pytest>=9.0.3",
+    "black>=26.5.1",
     "flake8>=4.0.0",
 ]
 
@@ -61,6 +62,24 @@ class EnhancedMusicDiscoverySetup:
             "python_version": sys.version,
             "architecture": platform.architecture()[0],
         }
+
+    def _write_private_text(self, path: Path, content: str) -> None:
+        """Write secret-bearing setup files with owner-only permissions."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        if os.name == "nt":
+            path.write_text(content, encoding="utf-8")
+            return
+
+        flags = os.O_WRONLY | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+
+        fd = os.open(path, flags, 0o600)
+        os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
 
     def _setup_logging(self) -> logging.Logger:
         """Set up logging for setup process."""
@@ -191,8 +210,7 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
-                    json.dump(config_data, f, indent=2)
+                self._write_private_text(config_path, json.dumps(config_data, indent=2) + "\n")
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -522,8 +540,7 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
-                f.write(env_template.strip())
+            self._write_private_text(env_path, env_template.strip() + "\n")
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True
