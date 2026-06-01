@@ -4,12 +4,12 @@
 import sys
 from pathlib import Path
 
-# Add src to path for imports
-src_path = Path(__file__).resolve().parent / "src"
-sys.path.insert(0, str(src_path))
+# Add repository root to path for direct script execution.
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
 
 # Import after path modification
-from src.config import SecureConfig  # noqa: E402
+from core.config import SecureConfig  # noqa: E402
 
 
 def main():
@@ -100,20 +100,17 @@ def main():
         security_checks.append(("⚠️", ".gitignore missing"))
 
     # Check for credential files in current directory
-    credential_patterns = ["env_data", "*_keys", "*_secrets", "credentials.*"]
+    credential_patterns = ["env_data", "*_keys", "*_secrets", "credentials.*", "config/social_apis.json"]
     found_credentials = []
     for pattern in credential_patterns:
         if pattern.startswith("*"):
-            # Use glob for wildcard patterns
-            from glob import glob
-
-            matches = glob(pattern)
-            found_credentials.extend(matches)
+            matches = config.project_root.glob(pattern)
+            found_credentials.extend(str(match) for match in matches)
         else:
             # Direct file check
             file_path = config.project_root / pattern
             if file_path.exists():
-                found_credentials.append(pattern)
+                found_credentials.append(str(file_path))
 
     if found_credentials:
         security_checks.append(
