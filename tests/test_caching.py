@@ -7,8 +7,8 @@ import time
 import pytest
 
 from core.caching import (
-    RedisCacheBackend,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
