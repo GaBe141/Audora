@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -58,6 +63,49 @@ class TestLocalCacheBackend:
         assert backend.get("d") == 4
         present = sum(1 for k in ("a", "b", "c") if backend.get(k) is not None)
         assert present == 2
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache serialization safety."""
+
+    def test_json_serialization_round_trip(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = {"track": "Song", "scores": [1, 2, 3], "viral": True}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_bytes_serialization_round_trip(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = b"binary-cache-value"
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = object.__new__(RedisCacheBackend)
+        legacy_payload = pickle.dumps({"unsafe": "payload"})
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_rejects_signed_pickle_envelope(self):
+        backend = object.__new__(RedisCacheBackend)
+        signed_pickle = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "unused",
+            "payload": "gASVAAAAAAAALg==",
+        }
+
+        assert backend._deserialize(json.dumps(signed_pickle).encode("utf-8")) is None
+
+    def test_unsupported_object_is_not_serialized(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError):
+            backend._serialize(object())
 
 
 class TestCacheManager:
