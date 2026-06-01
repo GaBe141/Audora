@@ -29,16 +29,16 @@ ENHANCED_PACKAGES = [
     # Statistical analysis (optional)
     "statsmodels>=0.13.0",
     # Web framework (for dashboard)
-    "dash>=2.0.0",
-    "dash-bootstrap-components>=1.0.0",
+    "dash==4.1.0",
+    "dash-bootstrap-components==2.0.4",
     # Template engine
     "jinja2>=3.1.6",
     # Environment management
     "python-dotenv>=1.1.1",
     # Development tools
-    "pytest>=7.0.0",
-    "black>=26.5.1",
-    "flake8>=4.0.0",
+    "pytest==9.0.3",
+    "black==26.5.1",
+    "flake8==7.3.0",
 ]
 
 
