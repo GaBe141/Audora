@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,58 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis serialization safety."""
+
+    def _backend(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-cache-signing-key"
+        return backend
+
+    def test_json_serialization_round_trip_for_supported_types(self):
+        backend = self._backend()
+        value = {
+            "name": "Audora",
+            "scores": [1, 2.5, None],
+            "pair": ("track", "artist"),
+            "payload": b"safe-bytes",
+        }
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_dataframe_serialization_round_trip(self):
+        backend = self._backend()
+        frame = pd.DataFrame(
+            [
+                {"track_name": "Song A", "score": 91.5},
+                {"track_name": "Song B", "score": 83.0},
+            ]
+        )
+
+        restored = backend._deserialize(backend._serialize(frame))
+
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_legacy_pickle_payload_is_rejected(self):
+        backend = self._backend()
+
+        assert backend._deserialize(pickle.dumps({"unsafe": "payload"})) is None
+
+    def test_unsupported_object_is_not_serialized(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError):
+            backend._serialize(object())
+
+    def test_cache_key_hashes_use_sha256(self):
+        manager = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+
+        key = manager._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        digests = key.split(":")[1:]
+
+        assert digests
+        assert all(len(digest) == 64 for digest in digests)

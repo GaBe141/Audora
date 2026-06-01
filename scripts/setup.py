@@ -12,34 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Enhanced package list with new dependencies
-ENHANCED_PACKAGES = [
-    # Core dependencies
-    "pandas>=1.5.0",
-    "numpy>=1.21.0",
-    "matplotlib>=3.5.0",
-    "seaborn>=0.11.0",
-    "plotly>=5.0.0",
-    "requests>=2.25.0",
-    "aiohttp>=3.8.0",
-    "aiofiles>=0.8.0",
-    # Data science and ML
-    "scikit-learn>=1.0.0",
-    "scipy>=1.7.0",
-    # Statistical analysis (optional)
-    "statsmodels>=0.13.0",
-    # Web framework (for dashboard)
-    "dash>=2.0.0",
-    "dash-bootstrap-components>=1.0.0",
-    # Template engine
-    "jinja2>=3.0.0",
-    # Environment management
-    "python-dotenv>=0.19.0",
-    # Development tools
-    "pytest>=7.0.0",
-    "black>=22.0.0",
-    "flake8>=4.0.0",
-]
+REQUIREMENTS_FILE = Path(__file__).resolve().parent.parent / "requirements.txt"
 
 
 class EnhancedMusicDiscoverySetup:
@@ -151,30 +124,26 @@ class EnhancedMusicDiscoverySetup:
             self.logger.error("  pip is not available. Please install pip first.")
             return False
 
-        for package in ENHANCED_PACKAGES:
-            try:
-                self.logger.info(f"    Installing {package}...")
+        if not REQUIREMENTS_FILE.exists():
+            self.logger.error(f"  Requirements file not found: {REQUIREMENTS_FILE}")
+            return False
 
-                # Use subprocess to install packages
-                result = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", package],
-                    capture_output=True,
-                    text=True,
-                    timeout=300,  # 5 minute timeout per package
-                )
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            self.logger.error("    ❌ Dependency installation timed out")
+            return False
 
-                if result.returncode == 0:
-                    self.logger.info(f"    ✅ {package} installed successfully")
-                else:
-                    self.logger.warning(f"    ⚠️ {package} installation warning: {result.stderr}")
+        if result.returncode != 0:
+            self.logger.error(f"    ❌ Dependency installation failed: {result.stderr}")
+            return False
 
-            except subprocess.TimeoutExpired:
-                self.logger.error(f"    ❌ {package} installation timed out")
-                return False
-            except Exception as e:
-                self.logger.error(f"    ❌ Failed to install {package}: {e}")
-                # Continue with other packages instead of failing completely
-                continue
+        self.logger.info("    ✅ Dependencies installed successfully")
 
         return True
 
@@ -191,7 +160,7 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
+                with config_path.open("w") as f:
                     json.dump(config_data, f, indent=2)
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
@@ -473,7 +442,7 @@ System Status: {{ system_status }}
         for template_name, template_content in templates.items():
             template_path = self.templates_dir / template_name
             try:
-                with open(template_path, "w") as f:
+                with template_path.open("w") as f:
                     f.write(template_content.strip())
                 self.logger.info(f"  Created template: {template_name}")
             except Exception as e:
@@ -522,7 +491,7 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
+            with env_path.open("w") as f:
                 f.write(env_template.strip())
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
