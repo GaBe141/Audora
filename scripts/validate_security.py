@@ -4,12 +4,12 @@
 import sys
 from pathlib import Path
 
-# Add src to path for imports
-src_path = Path(__file__).resolve().parent / "src"
-sys.path.insert(0, str(src_path))
+# Add repository root to path for imports.
+repo_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(repo_root))
 
 # Import after path modification
-from src.config import SecureConfig  # noqa: E402
+from core.config import SecureConfig  # noqa: E402
 
 
 def main():
@@ -104,10 +104,8 @@ def main():
     found_credentials = []
     for pattern in credential_patterns:
         if pattern.startswith("*"):
-            # Use glob for wildcard patterns
-            from glob import glob
-
-            matches = glob(pattern)
+            # Check wildcard patterns in the repository root only.
+            matches = [str(path.relative_to(config.project_root)) for path in config.project_root.glob(pattern)]
             found_credentials.extend(matches)
         else:
             # Direct file check

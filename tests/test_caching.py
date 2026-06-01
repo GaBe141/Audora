@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,62 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class _FakeRedisClient:
+    """Minimal Redis client fake for malformed-entry cleanup tests."""
+
+    def __init__(self, value: bytes) -> None:
+        self.value = value
+        self.deleted_keys: list[str] = []
+
+    def get(self, _key: str) -> bytes:
+        return self.value
+
+    def delete(self, key: str) -> None:
+        self.deleted_keys.append(key)
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for safe Redis cache serialization."""
+
+    def _backend(self) -> RedisCacheBackend:
+        return object.__new__(RedisCacheBackend)
+
+    def test_json_round_trip(self):
+        backend = self._backend()
+        value = {"artist": "SZA", "scores": [95, 88], "active": True}
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_bytes_round_trip(self):
+        backend = self._backend()
+        value = b"\x00audora-cache"
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_dataframe_round_trip(self):
+        backend = self._backend()
+        value = pd.DataFrame({"track": ["A", "B"], "score": [1.5, 2.5]})
+
+        result = backend._deserialize(backend._serialize(value))
+
+        pd.testing.assert_frame_equal(result, value)
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = self._backend()
+
+        assert backend._deserialize(pickle.dumps({"unsafe": "payload"})) is None
+
+    def test_removes_malformed_redis_entry_on_get(self):
+        backend = self._backend()
+        backend._client = _FakeRedisClient(pickle.dumps({"unsafe": "payload"}))
+
+        assert backend.get("audora:test") is None
+        assert backend._client.deleted_keys == ["audora:test"]
+
+    def test_rejects_unsupported_object_type(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            backend._serialize(object())
