@@ -6,6 +6,7 @@ Installs dependencies, configures services, and validates the system.
 
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -47,7 +48,7 @@ class EnhancedMusicDiscoverySetup:
 
     def __init__(self):
         self.logger = self._setup_logging()
-        self.project_root = Path(__file__).parent
+        self.project_root = Path(__file__).resolve().parent.parent
         self.config_dir = self.project_root / "config"
         self.data_dir = self.project_root / "data"
         self.logs_dir = self.project_root / "logs"
@@ -191,8 +192,10 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
+                with config_path.open("w", encoding="utf-8") as f:
                     json.dump(config_data, f, indent=2)
+                if os.name != "nt":
+                    os.chmod(config_path, 0o600)
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -385,8 +388,9 @@ class EnhancedMusicDiscoverySetup:
         """Initialize the enhanced database."""
         try:
             # Import and initialize the enhanced data store
-            sys.path.append(str(self.project_root / "src"))
-            from data_store import EnhancedMusicDataStore
+            if str(self.project_root) not in sys.path:
+                sys.path.insert(0, str(self.project_root))
+            from core.data_store import EnhancedMusicDataStore
 
             db_path = self.data_dir / "enhanced_music_trends.db"
             data_store = EnhancedMusicDataStore(str(db_path))
@@ -522,8 +526,10 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
+            with env_path.open("w", encoding="utf-8") as f:
                 f.write(env_template.strip())
+            if os.name != "nt":
+                os.chmod(env_path, 0o600)
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True
@@ -594,8 +600,9 @@ ENABLE_NOTIFICATIONS=True
     def _validate_database(self) -> bool:
         """Validate database connectivity."""
         try:
-            sys.path.append(str(self.project_root / "src"))
-            from data_store import EnhancedMusicDataStore
+            if str(self.project_root) not in sys.path:
+                sys.path.insert(0, str(self.project_root))
+            from core.data_store import EnhancedMusicDataStore
 
             db_path = self.data_dir / "enhanced_music_trends.db"
             data_store = EnhancedMusicDataStore(str(db_path))
@@ -611,12 +618,13 @@ ENABLE_NOTIFICATIONS=True
     def _validate_modules(self) -> bool:
         """Validate core modules can be imported."""
         try:
-            sys.path.append(str(self.project_root / "src"))
+            if str(self.project_root) not in sys.path:
+                sys.path.insert(0, str(self.project_root))
 
             # Test imports
-            __import__("resilience")
-            __import__("data_store")
-            __import__("advanced_analytics")
+            __import__("core.resilience")
+            __import__("core.data_store")
+            __import__("analytics.advanced_analytics")
 
             return True
 
@@ -629,24 +637,25 @@ ENABLE_NOTIFICATIONS=True
         self.logger.info("  Running system tests...")
 
         try:
-            sys.path.append(str(self.project_root / "src"))
+            if str(self.project_root) not in sys.path:
+                sys.path.insert(0, str(self.project_root))
 
             # Test 1: Resilience system
-            from resilience import EnhancedResilience
+            from core.resilience import EnhancedResilience
 
             resilience = EnhancedResilience()
             resilience.health_check()  # Test health check
             self.logger.info("    ✅ Resilience system: OK")
 
             # Test 2: Data store
-            from data_store import EnhancedMusicDataStore
+            from core.data_store import EnhancedMusicDataStore
 
             data_store = EnhancedMusicDataStore(":memory:")  # In-memory for testing
             data_store.get_data_quality_report()  # Test database operations
             self.logger.info("    ✅ Data store: OK")
 
             # Test 3: Analytics engine
-            from advanced_analytics import MusicTrendAnalytics
+            from analytics.advanced_analytics import MusicTrendAnalytics
 
             MusicTrendAnalytics()  # Test initialization
             self.logger.info("    ✅ Analytics engine: OK")

@@ -398,7 +398,7 @@ def run_action(
     if triggered == "btn-demo":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
     if triggered == "btn-setup":
-        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
+        return "Blocked", "Setup is CLI-only. Run `python main.py --setup` from a trusted shell."
     if triggered == "btn-validate":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--validate"])
     raise dash.exceptions.PreventUpdate
@@ -589,10 +589,15 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
+            svc._validate_webhook_url(slack_url, allow_private=False)
             svc.config["slack"]["webhook_url"] = slack_url
         if discord_url:
+            svc._validate_webhook_url(discord_url, allow_private=False)
             svc.config["discord"]["webhook_url"] = discord_url
         if webhook_url:
+            svc._validate_webhook_url(
+                webhook_url, allow_private=svc._allow_private_webhooks()
+            )
             svc.config["webhook"]["url"] = webhook_url
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host

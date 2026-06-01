@@ -4,12 +4,12 @@
 import sys
 from pathlib import Path
 
-# Add src to path for imports
-src_path = Path(__file__).resolve().parent / "src"
-sys.path.insert(0, str(src_path))
+# Add the project root to the import path when the script is run directly.
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
 
 # Import after path modification
-from src.config import SecureConfig  # noqa: E402
+from core.config import SecureConfig  # noqa: E402
 
 
 def main():
@@ -131,11 +131,11 @@ def main():
 
     if status["spotify"]["configured"]:
         print("✅ Ready to run Spotify analysis!")
-        print("   Try: python -m src.main")
+        print("   Try: python main.py")
 
         if status["lastfm"]["configured"]:
             print("✅ Ready for global trend comparison!")
-            print("   Try: python -m src.lastfm_main")
+            print("   Try: python main.py --mode single")
         else:
             print("💡 Optional: Configure Last.fm for global trend analysis")
     else:
