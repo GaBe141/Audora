@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import hmac
+import json
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,42 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for JSON-only Redis cache serialization helpers."""
+
+    def _backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_json_serializer_round_trips_basic_values(self):
+        backend = self._backend()
+        value = {"artist": "Taylor Swift", "scores": [1, 2, 3], "metadata": {"rank": 1}}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_json_serializer_round_trips_dataframes(self):
+        backend = self._backend()
+        value = pd.DataFrame([{"artist": "Artist One", "score": 98.5}])
+
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        pd.testing.assert_frame_equal(restored, value)
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._backend()
+        payload = b"legacy-pickle-payload"
+        signature = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": "not-used",
+        }
+
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
