@@ -10,6 +10,7 @@ import hmac
 import json
 import logging
 import os
+
 # Redis payloads are HMAC-verified before deserialization.
 import pickle  # nosec B403
 import time
