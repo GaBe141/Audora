@@ -10,6 +10,7 @@ from core.notification_service import (
     NotificationChannel,
     NotificationMessage,
     NotificationPriority,
+    RestrictedWebhookResolver,
 )
 
 
@@ -63,6 +64,10 @@ class TestNotificationSecretPersistence:
         svc.config["discord"]["webhook_url"] = "https://discord.com/api/webhooks/TOKEN"
         svc.config["webhook"]["url"] = "https://example.com/webhook"
         svc.config["webhook"]["headers"]["Authorization"] = "Bearer secret"
+        svc.config["webhook"]["headers"]["authorization"] = "Bearer lower"
+        svc.config["webhook"]["headers"]["Proxy-Authorization"] = "Bearer proxy"
+        svc.config["webhook"]["headers"]["X-API-Key"] = "api-key-secret"
+        svc.config["webhook"]["headers"]["Content-Type"] = "application/json"
         svc.config["sms"]["api_key"] = "sms-key"
         svc.config["sms"]["api_secret"] = "sms-secret"
 
@@ -75,12 +80,17 @@ class TestNotificationSecretPersistence:
         assert "webhook_url" not in saved["discord"]
         assert "url" not in saved["webhook"]
         assert "Authorization" not in saved["webhook"]["headers"]
+        assert "authorization" not in saved["webhook"]["headers"]
+        assert "Proxy-Authorization" not in saved["webhook"]["headers"]
+        assert "X-API-Key" not in saved["webhook"]["headers"]
+        assert saved["webhook"]["headers"] == {"Content-Type": "application/json"}
         assert "api_key" not in saved["sms"]
         assert "api_secret" not in saved["sms"]
 
     def test_load_config_ignores_secret_values_from_file(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SMTP_PASSWORD", "env-smtp-secret")
         monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/ENV")
+        monkeypatch.setenv("WEBHOOK_TOKEN", "env-webhook-token")
         config_path = tmp_path / "notification_config.json"
         config_path.write_text(
             json.dumps(
@@ -92,6 +102,14 @@ class TestNotificationSecretPersistence:
                     "slack": {
                         "webhook_url": "https://hooks.slack.com/services/FILE",
                     },
+                    "webhook": {
+                        "headers": {
+                            "authorization": "Bearer lower-file",
+                            "Proxy-Authorization": "Bearer proxy-file",
+                            "X-API-Key": "file-api-key",
+                            "Content-Type": "application/json",
+                        },
+                    },
                 }
             )
         )
@@ -101,6 +119,72 @@ class TestNotificationSecretPersistence:
         assert svc.config["email"]["smtp_server"] == "smtp.example.com"
         assert svc.config["email"]["password"] == "env-smtp-secret"
         assert svc.config["slack"]["webhook_url"] == "https://hooks.slack.com/services/ENV"
+        assert svc.config["webhook"]["headers"]["Authorization"] == "Bearer env-webhook-token"
+        assert "authorization" not in svc.config["webhook"]["headers"]
+        assert "Proxy-Authorization" not in svc.config["webhook"]["headers"]
+        assert "X-API-Key" not in svc.config["webhook"]["headers"]
+        assert svc.config["webhook"]["headers"]["Content-Type"] == "application/json"
+
+
+class TestWebhookRequestSafety:
+    """Ensure webhook network requests keep SSRF protections at send time."""
+
+    def test_restricted_resolver_rejects_private_ip_at_connection_time(self):
+        async def _resolve_private_ip():
+            resolver = RestrictedWebhookResolver(lambda ip: ip == "10.0.0.1")
+            try:
+                await resolver.resolve("10.0.0.1", 443)
+            finally:
+                await resolver.close()
+
+        with pytest.raises(ValueError, match="private or restricted"):
+            asyncio.run(_resolve_private_ip())
+
+    def test_custom_webhook_send_disables_redirects(self, monkeypatch):
+        captured: dict[str, object] = {}
+
+        class FakeResponse:
+            status = 204
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return None
+
+        class FakeSession:
+            def __init__(self, **kwargs):
+                captured["session_kwargs"] = kwargs
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return None
+
+            def post(self, url, **kwargs):
+                captured["url"] = url
+                captured["post_kwargs"] = kwargs
+                return FakeResponse()
+
+        svc = EnhancedNotificationService()
+        svc.config["webhook"]["url"] = "https://example.com/webhook"
+        svc._validate_webhook_url = lambda url, allow_private=False: url
+        svc._webhook_connector = lambda: object()
+        monkeypatch.setattr("core.notification_service.aiohttp.ClientSession", FakeSession)
+        msg = NotificationMessage(
+            title="test",
+            content="test",
+            priority=NotificationPriority.LOW,
+            channels=[NotificationChannel.WEBHOOK],
+        )
+
+        result = asyncio.run(svc._send_webhook(msg))
+
+        assert result["success"] is True
+        post_kwargs = captured["post_kwargs"]
+        assert isinstance(post_kwargs, dict)
+        assert post_kwargs["allow_redirects"] is False
 
 
 class TestEmailAttachmentValidation:
