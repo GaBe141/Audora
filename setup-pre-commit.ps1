@@ -36,7 +36,7 @@ Write-Host ""
 # Install pre-commit
 Write-Host "📦 Installing pre-commit..." -ForegroundColor Yellow
 try {
-    python -m pip install --upgrade pre-commit
+    python -m pip install --upgrade pre-commit==4.6.0
     Write-Host "✅ Pre-commit installed successfully" -ForegroundColor Green
 } catch {
     Write-Host "❌ Failed to install pre-commit" -ForegroundColor Red
@@ -47,7 +47,7 @@ try {
 Write-Host ""
 Write-Host "📦 Installing code quality tools..." -ForegroundColor Yellow
 try {
-    python -m pip install --upgrade black ruff mypy bandit
+    python -m pip install --upgrade black==26.5.1 ruff==0.13.3 mypy==1.18.2 "bandit[toml]==1.9.4"
     Write-Host "✅ Tools installed: Black, Ruff, MyPy, Bandit" -ForegroundColor Green
 } catch {
     Write-Host "⚠️  Some tools may not have installed correctly" -ForegroundColor Yellow

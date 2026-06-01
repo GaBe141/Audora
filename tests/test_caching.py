@@ -2,8 +2,13 @@
 
 import time
 
+import pandas as pd
+import pytest
+from pandas.testing import assert_frame_equal
+
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -80,6 +85,43 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for safe Redis cache serialization."""
+
+    def test_json_compatible_values_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        value = {
+            "artist": "Example",
+            "scores": [1, 2, 3],
+            "metadata": {"region": "US", "active": True},
+            "tuple_value": ("a", 1),
+            "raw": b"abc",
+        }
+
+        serialized = backend._serialize(value)
+        assert backend._deserialize(serialized) == value
+
+    def test_dataframe_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        frame = pd.DataFrame({"track": ["a", "b"], "score": [0.4, 0.9]})
+
+        restored = backend._deserialize(backend._serialize(frame))
+
+        assert_frame_equal(restored, frame)
+
+    def test_legacy_pickle_envelope_is_rejected(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        legacy_payload = b'{"v":1,"alg":"HMAC-SHA256","sig":"x","payload":"gASV"}'
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_unsupported_objects_are_not_serialized(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            backend._serialize(object())
 
 
 class TestCachedDecorator:
