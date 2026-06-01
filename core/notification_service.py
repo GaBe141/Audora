@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import socket
+import ssl
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -204,12 +205,12 @@ class EnhancedNotificationService:
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
-        return os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        if os.getenv("AUDORA_ALLOW_PRIVATE_WEBHOOKS"):
+            self.logger.warning(
+                "AUDORA_ALLOW_PRIVATE_WEBHOOKS is no longer supported; "
+                "private webhook targets remain blocked."
+            )
+        return False
 
     def _is_restricted_ip(self, ip: str) -> bool:
         """Return True when the IP belongs to a non-public range."""
@@ -233,6 +234,8 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
@@ -254,6 +257,52 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _validate_smtp_host(self, host: str) -> str:
+        """Validate SMTP host before sending credentials to it."""
+        hostname = host.strip()
+        if not hostname:
+            raise ValueError("SMTP server must include a valid hostname")
+
+        parsed = urlparse(f"//{hostname}")
+        hostname = parsed.hostname or hostname
+        if hostname.lower() == "localhost":
+            raise ValueError("Localhost SMTP servers are not allowed when credentials are configured")
+
+        try:
+            resolved = {
+                info[4][0]
+                for info in socket.getaddrinfo(hostname, parsed.port or 587, proto=socket.IPPROTO_TCP)
+            }
+        except socket.gaierror as e:
+            raise ValueError(f"Could not resolve SMTP hostname: {hostname}") from e
+
+        if any(self._is_restricted_ip(ip) for ip in resolved):
+            raise ValueError("SMTP server resolves to a private or restricted network address")
+
+        return hostname
+
+    def _sanitize_email_header(self, value: Any) -> str:
+        """Strip control characters that can inject additional email headers."""
+        return str(value).replace("\r", " ").replace("\n", " ").strip()
+
+    def _resolve_attachment_path(self, attachment_path: str) -> Path | None:
+        """Resolve an attachment path only if it stays inside the data directory."""
+        path = Path(attachment_path)
+        resolved = path.resolve(strict=False)
+        allowed_root = Path("data").resolve()
+
+        try:
+            resolved.relative_to(allowed_root)
+        except ValueError:
+            self.logger.warning("Rejected email attachment outside data directory: %s", path)
+            return None
+
+        if not resolved.exists() or resolved.is_symlink() or not resolved.is_file():
+            self.logger.warning("Rejected invalid email attachment: %s", path)
+            return None
+
+        return resolved
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -532,9 +581,15 @@ System status: {{ system_status }}
 
         try:
             msg = MIMEMultipart("alternative")
-            msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
-            msg["Subject"] = message.title
+            msg["From"] = self._sanitize_email_header(
+                email_config.get("from_address", "music-discovery@example.com")
+            )
+            msg["To"] = ", ".join(
+                self._sanitize_email_header(recipient)
+                for recipient in email_config["recipients"]
+                if recipient
+            )
+            msg["Subject"] = self._sanitize_email_header(message.title)
 
             # Set priority
             if message.priority in [NotificationPriority.HIGH, NotificationPriority.CRITICAL]:
@@ -559,24 +614,33 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
+                    resolved_attachment = self._resolve_attachment_path(attachment_path)
+                    if resolved_attachment:
+                        with resolved_attachment.open("rb") as f:
                             attachment = MIMEBase("application", "octet-stream")
                             attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename={self._sanitize_email_header(resolved_attachment.name)}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            has_credentials = bool(email_config.get("username") and email_config.get("password"))
+            if has_credentials:
+                if not email_config.get("use_tls", True):
+                    raise ValueError("SMTP authentication requires TLS")
+                smtp_host = self._validate_smtp_host(email_config["smtp_server"])
+            else:
+                smtp_host = email_config["smtp_server"]
+
+            server = smtplib.SMTP(smtp_host, email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
-            if email_config.get("username") and email_config.get("password"):
+            if has_credentials:
                 server.login(email_config["username"], email_config["password"])
 
             server.send_message(msg)
@@ -650,7 +714,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +781,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +841,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:
