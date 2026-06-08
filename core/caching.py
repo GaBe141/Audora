@@ -199,7 +199,7 @@ class RedisCacheBackend(CacheBackend):
             return {"type": "json", "payload": value}
 
         if self._is_pandas_dataframe(value):
-            return {"type": "pandas_dataframe", "payload": value.to_json(orient="split")}
+            return {"type": "pandas_dataframe", "payload": value.to_json(orient="table")}
 
         raise TypeError(f"Unsupported cache value type: {type(value).__name__}")
 
@@ -228,7 +228,7 @@ class RedisCacheBackend(CacheBackend):
             except ImportError:
                 logger.warning("Pandas is unavailable; cannot decode cached DataFrame")
                 return None
-            return pd.read_json(StringIO(payload), orient="split")
+            return pd.read_json(StringIO(payload), orient="table")
 
         raise ValueError(f"Unsupported cache payload type: {payload_type}")
 
