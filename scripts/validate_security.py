@@ -2,19 +2,13 @@
 """Security validation and configuration setup for Spotify Insights."""
 
 import sys
-from pathlib import Path
 
-# Add src to path for imports
-src_path = Path(__file__).resolve().parent / "src"
-sys.path.insert(0, str(src_path))
-
-# Import after path modification
-from src.config import SecureConfig  # noqa: E402
+from core.config import SecureConfig
 
 
 def main():
     """Main security validation and setup routine."""
-    print("🔐 Spotify Insights - Security Configuration Validator")
+    print("🔐 Audora - Security Configuration Validator")
     print("=" * 60)
 
     # Initialize config manager
@@ -131,11 +125,11 @@ def main():
 
     if status["spotify"]["configured"]:
         print("✅ Ready to run Spotify analysis!")
-        print("   Try: python -m src.main")
+        print("   Try: python main.py --mode single")
 
         if status["lastfm"]["configured"]:
             print("✅ Ready for global trend comparison!")
-            print("   Try: python -m src.lastfm_main")
+            print("   Try: python main.py --demo trending")
         else:
             print("💡 Optional: Configure Last.fm for global trend analysis")
     else:
