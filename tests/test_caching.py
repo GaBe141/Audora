@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
 
+import pandas as pd
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -81,6 +86,13 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_build_cache_key_uses_sha256_digests(self):
+        manager = CacheManager(backend=LocalCacheBackend())
+        cache_key = manager._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        _, args_digest, kwargs_digest = cache_key.split(":")
+        assert len(args_digest) == 64
+        assert len(kwargs_digest) == 64
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +130,59 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Security regression tests for Redis cache payload serialization."""
+
+    def _backend(self):
+        return RedisCacheBackend.__new__(RedisCacheBackend)
+
+    def test_json_compatible_values_round_trip_without_pickle(self):
+        backend = self._backend()
+        payload = {"artist": "test", "scores": [1, 2, 3], "active": True}
+
+        serialized = backend._serialize(payload)
+
+        assert b"pickle" not in serialized.lower()
+        assert backend._deserialize(serialized) == payload
+
+    def test_bytes_values_round_trip(self):
+        backend = self._backend()
+        value = b"\x00audora-cache"
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_dataframe_values_round_trip(self):
+        backend = self._backend()
+        frame = pd.DataFrame({"artist": ["A", "B"], "score": [10, 20]})
+
+        restored = backend._deserialize(backend._serialize(frame))
+
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_legacy_pickle_payload_is_rejected(self):
+        backend = self._backend()
+        legacy_payload = pickle.dumps({"unsafe": "legacy"})
+
+        assert backend._deserialize(legacy_payload) is None
+
+    def test_unsupported_objects_are_not_written_to_redis(self):
+        class Unsupported:
+            pass
+
+        class FakeRedisClient:
+            def __init__(self):
+                self.writes = 0
+
+            def set(self, *_args, **_kwargs):
+                self.writes += 1
+
+        backend = self._backend()
+        backend._client = FakeRedisClient()
+
+        backend.set("key", Unsupported())
+
+        assert backend._client.writes == 0
