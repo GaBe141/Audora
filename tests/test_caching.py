@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +122,87 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class FakeRedisClient:
+    """Minimal Redis client test double for serialization behavior."""
+
+    def __init__(self):
+        self.values = {}
+        self.deleted = []
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def set(self, key, value):
+        self.values[key] = value
+
+    def setex(self, key, _ttl, value):
+        self.values[key] = value
+
+    def delete(self, key):
+        self.deleted.append(key)
+        self.values.pop(key, None)
+
+
+class TestRedisCacheSerialization:
+    """Regression coverage for safe Redis serialization."""
+
+    def make_backend(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._client = FakeRedisClient()
+        return backend
+
+    def test_json_round_trip(self):
+        backend = self.make_backend()
+        value = {"track": "Song", "score": 99, "tags": ["viral", "pop"]}
+
+        backend.set("json", value)
+
+        assert backend.get("json") == value
+
+    def test_bytes_round_trip(self):
+        backend = self.make_backend()
+
+        backend.set("bytes", b"raw-bytes")
+
+        assert backend.get("bytes") == b"raw-bytes"
+
+    def test_dataframe_round_trip(self):
+        backend = self.make_backend()
+        frame = pd.DataFrame([{"track": "Song", "score": 99}])
+
+        backend.set("df", frame)
+        restored = backend.get("df")
+
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_legacy_pickle_payload_without_loading(self):
+        backend = self.make_backend()
+        backend._client.values["legacy"] = b"\x80\x04cos\nsystem\n."
+
+        assert backend.get("legacy") is None
+        assert "legacy" in backend._client.deleted
+
+    def test_unsupported_object_is_not_cached(self):
+        backend = self.make_backend()
+
+        backend.set("object", object())
+
+        assert "object" not in backend._client.values
+
+    def test_cache_key_uses_sha256_digest(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        digests = key.split(":")[1:]
+
+        assert digests
+        assert all(len(digest) == 64 for digest in digests)
+
+    def test_rejects_unknown_serialization_envelope(self):
+        backend = self.make_backend()
+        backend._client.values["unknown"] = json.dumps(
+            {"v": 1, "type": "pickle", "payload": "AAAA"}
+        ).encode()
+
+        assert backend.get("unknown") is None
+        assert "unknown" in backend._client.deleted
