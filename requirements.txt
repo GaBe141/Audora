@@ -12,8 +12,7 @@ numpy==1.26.4
 
 # Statistical Analysis and Forecasting
 statsmodels==0.14.5
-darts==0.38.0
-pytorch-lightning==2.6.5
+darts==0.44.1
 scikit-learn==1.7.2
 scipy==1.16.2
 plotly==6.3.1
