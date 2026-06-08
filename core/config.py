@@ -20,7 +20,7 @@ class SecureConfig:
             env_file: Path to .env file. If None, searches for .env in project root.
         """
         self.project_root = Path(__file__).resolve().parent.parent
-        self.env_file = env_file or (self.project_root / ".env")
+        self.env_file = Path(env_file) if env_file else self.project_root / ".env"
         self._config: dict[str, Any] = {}
         self._load_environment()
 
