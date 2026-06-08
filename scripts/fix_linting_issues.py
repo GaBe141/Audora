@@ -3,7 +3,8 @@ Automated Fix Script for Audora Codebase Issues
 Fixes type hints, imports, and code quality issues identified by linters.
 """
 
-import subprocess  # nosec B404 - this maintenance script runs fixed argv lists only.
+# This maintenance script runs fixed argv lists only.
+import subprocess  # nosec B404
 import sys
 
 
