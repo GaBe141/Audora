@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -81,6 +86,16 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_build_cache_key_uses_sha256_digests(self):
+        manager = CacheManager(backend=LocalCacheBackend())
+
+        cache_key = manager._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        parts = cache_key.split(":")
+
+        assert parts[0] == "prefix"
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +133,50 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for Redis cache payload safety."""
+
+    def _backend(self):
+        return object.__new__(RedisCacheBackend)
+
+    def test_json_payload_round_trips_without_pickle(self):
+        backend = self._backend()
+        value = {"artist": "SZA", "score": 91.5, "tags": ["rnb", "viral"]}
+
+        encoded = backend._serialize(value)
+        envelope = json.loads(encoded.decode("utf-8"))
+
+        assert envelope["type"] == "json"
+        assert backend._deserialize(encoded) == value
+
+    def test_bytes_payload_round_trips(self):
+        backend = self._backend()
+        value = b"binary payload"
+
+        encoded = backend._serialize(value)
+
+        assert backend._deserialize(encoded) == value
+
+    def test_dataframe_payload_round_trips(self):
+        pd = pytest.importorskip("pandas")
+        backend = self._backend()
+        value = pd.DataFrame([{"track": "Song A", "score": 88.0}])
+
+        encoded = backend._serialize(value)
+        decoded = backend._deserialize(encoded)
+
+        pd.testing.assert_frame_equal(decoded, value)
+
+    def test_rejects_legacy_or_malformed_payloads(self):
+        backend = self._backend()
+
+        assert backend._deserialize(b"not-json") is None
+        assert backend._deserialize(b'{"v":1,"type":"pickle","payload":"unsafe"}') is None
+
+    def test_unsupported_objects_are_not_serialized(self):
+        backend = self._backend()
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            backend._serialize(object())
