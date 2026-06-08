@@ -5,7 +5,6 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import base64
-from datetime import date, datetime
 import hashlib
 import hmac
 import json
@@ -13,6 +12,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
+from datetime import date, datetime
 from functools import wraps
 from io import StringIO
 from typing import Any, ParamSpec, TypeVar
