@@ -8,8 +8,8 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -197,7 +197,7 @@ class EnhancedNotificationService:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -226,7 +226,13 @@ class EnhancedNotificationService:
         except ValueError:
             return True
 
-    def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
+    def _validate_webhook_url(
+        self,
+        url: str,
+        *,
+        allow_private: bool = False,
+        allowed_hosts: set[str] | None = None,
+    ) -> str:
         """Validate outbound webhook URL to reduce SSRF risk."""
         parsed = urlparse(url.strip())
         if parsed.scheme != "https":
@@ -234,7 +240,10 @@ class EnhancedNotificationService:
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
 
-        hostname = parsed.hostname
+        hostname = parsed.hostname.lower()
+        if allowed_hosts is not None and hostname not in allowed_hosts:
+            raise ValueError("Webhook URL hostname is not allowed for this channel")
+
         if hostname.lower() == "localhost":
             raise ValueError("Localhost webhook URLs are not allowed")
 
@@ -600,7 +609,11 @@ System status: {{ system_status }}
             return {"success": False, "error": "Slack webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            webhook_url = self._validate_webhook_url(
+                webhook_url,
+                allow_private=False,
+                allowed_hosts={"hooks.slack.com", "hooks.slack-gov.com"},
+            )
             # Create Slack message format
             color_map = {
                 NotificationPriority.LOW: "good",
@@ -650,7 +663,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -675,7 +688,11 @@ System status: {{ system_status }}
             return {"success": False, "error": "Discord webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            webhook_url = self._validate_webhook_url(
+                webhook_url,
+                allow_private=False,
+                allowed_hosts={"discord.com", "discordapp.com"},
+            )
             # Format content for Discord
             content = message.content
             if message.template_vars:
@@ -717,7 +734,7 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +794,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
                 if 200 <= response.status < 300:

@@ -12,7 +12,7 @@ if "integrations.config" not in sys.modules:
     sys.modules["integrations.config"] = _config_mock
 
 from core.exceptions import APIConnectionError, APIResponseError
-from integrations.lastfm_integration import LastFmAPI
+from integrations.lastfm_integration import BASE_URL, LastFmAPI
 
 
 class TestLastFmAPISuccess:
@@ -42,6 +42,18 @@ class TestLastFmAPISuccess:
         assert df.iloc[0]["name"] == "Artist One"
         assert df.iloc[0]["playcount"] == 100000
         assert "rank" in df.columns
+
+    def test_make_request_uses_https_endpoint(self):
+        api = LastFmAPI(api_key="test_key")
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"artists": {"artist": []}}
+
+        with patch.object(api.session, "get", return_value=mock_response) as get:
+            api.get_top_artists_global(limit=5)
+
+        assert BASE_URL.startswith("https://")
+        assert get.call_args.args[0].startswith("https://")
 
     def test_get_top_tracks_global_parses_response(self):
         api = LastFmAPI(api_key="test_key")
@@ -76,9 +88,11 @@ class TestLastFmAPIErrorHandling:
         mock_response = MagicMock()
         mock_response.raise_for_status = MagicMock()
         mock_response.json.return_value = {"error": 10, "message": "Invalid API key"}
-        with patch.object(api.session, "get", return_value=mock_response):
-            with pytest.raises(APIResponseError, match="Invalid API key"):
-                api.get_top_artists_global(limit=5)
+        with (
+            patch.object(api.session, "get", return_value=mock_response),
+            pytest.raises(APIResponseError, match="Invalid API key"),
+        ):
+            api.get_top_artists_global(limit=5)
 
     def test_http_error_raises_connection_error(self):
         import requests
@@ -86,6 +100,8 @@ class TestLastFmAPIErrorHandling:
         api = LastFmAPI(api_key="test_key")
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("429")
-        with patch.object(api.session, "get", return_value=mock_response):
-            with pytest.raises(APIConnectionError, match="429"):
-                api.get_top_artists_global(limit=5)
+        with (
+            patch.object(api.session, "get", return_value=mock_response),
+            pytest.raises(APIConnectionError, match="429"),
+        ):
+            api.get_top_artists_global(limit=5)
