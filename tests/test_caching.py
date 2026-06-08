@@ -1,9 +1,19 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import os
+import pickle
 import time
+from datetime import date, datetime
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +128,68 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Tests for the Redis cache's safe signed JSON serialization."""
+
+    def _backend(self):
+        backend = object.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        return backend
+
+    def test_round_trips_json_safe_values(self):
+        backend = self._backend()
+        value = {
+            "artist": "Bjork",
+            "stats": {"plays": 123, "score": 98.5},
+            "seen_at": datetime(2026, 6, 8, 23, 0, 0),
+            "release_date": date(2026, 6, 8),
+            "aliases": ("Bjork", "bjork"),
+            "genres": {"art pop", "electronic"},
+            "raw": b"cache-bytes",
+        }
+
+        restored = backend._deserialize(backend._serialize(value))
+
+        assert restored == value
+
+    def test_round_trips_pandas_dataframe(self):
+        backend = self._backend()
+        df = pd.DataFrame(
+            [
+                {"track": "Song A", "score": 91.5, "metadata": {"platform": "spotify"}},
+                {"track": "Song B", "score": 88.0, "metadata": {"platform": "lastfm"}},
+            ]
+        )
+
+        restored = backend._deserialize(backend._serialize(df))
+
+        pd.testing.assert_frame_equal(restored, df)
+
+    def test_rejects_legacy_pickle_envelope_without_loading(self, monkeypatch):
+        backend = self._backend()
+
+        class Exploit:
+            def __reduce__(self):
+                return (os.system, ("echo unsafe-pickle-loaded",))
+
+        payload = pickle.dumps(Exploit())
+        signature = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        called = False
+
+        def fake_system(_command):
+            nonlocal called
+            called = True
+            return 0
+
+        monkeypatch.setattr(os, "system", fake_system)
+
+        assert backend._deserialize(json.dumps(legacy_envelope).encode("utf-8")) is None
+        assert called is False

@@ -5,15 +5,16 @@ fallback to in-memory caching when Redis is unavailable.
 """
 
 import base64
+from datetime import date, datetime
 import hashlib
 import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
+from io import StringIO
 from typing import Any, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -188,10 +189,14 @@ class RedisCacheBackend(CacheBackend):
 
     def _serialize(self, value: Any) -> bytes:
         """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        payload = json.dumps(
+            self._to_json_compatible(value),
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
@@ -204,7 +209,7 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -223,10 +228,158 @@ class RedisCacheBackend(CacheBackend):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return self._from_json_compatible(json.loads(payload.decode("utf-8")))
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
+
+    def _to_json_compatible(self, value: Any) -> Any:
+        """Convert supported cache values into a JSON-only representation."""
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+
+        if isinstance(value, bytes):
+            return {
+                "__audora_cache_type__": "bytes",
+                "value": base64.b64encode(value).decode("ascii"),
+            }
+
+        if isinstance(value, datetime):
+            return {"__audora_cache_type__": "datetime", "value": value.isoformat()}
+
+        if isinstance(value, date):
+            return {"__audora_cache_type__": "date", "value": value.isoformat()}
+
+        if isinstance(value, tuple):
+            return {
+                "__audora_cache_type__": "tuple",
+                "value": [self._to_json_compatible(item) for item in value],
+            }
+
+        if isinstance(value, set):
+            return {
+                "__audora_cache_type__": "set",
+                "value": [self._to_json_compatible(item) for item in sorted(value, key=repr)],
+            }
+
+        if isinstance(value, list):
+            return [self._to_json_compatible(item) for item in value]
+
+        if isinstance(value, dict):
+            return {
+                "__audora_cache_type__": "dict",
+                "value": [
+                    [self._to_json_compatible(key), self._to_json_compatible(item)]
+                    for key, item in value.items()
+                ],
+            }
+
+        pandas_frame = self._try_serialize_pandas(value)
+        if pandas_frame is not None:
+            return pandas_frame
+
+        numpy_value = self._try_serialize_numpy(value)
+        if numpy_value is not None:
+            return numpy_value
+
+        raise TypeError(f"Unsupported cache value type: {type(value).__name__}")
+
+    def _from_json_compatible(self, value: Any) -> Any:
+        """Restore a value produced by _to_json_compatible."""
+        if isinstance(value, list):
+            return [self._from_json_compatible(item) for item in value]
+
+        if not isinstance(value, dict) or "__audora_cache_type__" not in value:
+            return value
+
+        cache_type = value["__audora_cache_type__"]
+        payload = value.get("value")
+
+        if cache_type == "bytes":
+            return base64.b64decode(payload.encode("ascii"), validate=True)
+
+        if cache_type == "datetime":
+            return datetime.fromisoformat(payload)
+
+        if cache_type == "date":
+            return date.fromisoformat(payload)
+
+        if cache_type == "tuple":
+            return tuple(self._from_json_compatible(item) for item in payload)
+
+        if cache_type == "set":
+            return {self._from_json_compatible(item) for item in payload}
+
+        if cache_type == "dict":
+            return {
+                self._from_json_compatible(key): self._from_json_compatible(item)
+                for key, item in payload
+            }
+
+        if cache_type == "pandas.DataFrame":
+            try:
+                import pandas as pd
+
+                return pd.read_json(StringIO(payload), orient="split")
+            except ImportError as e:
+                raise TypeError("Cannot restore cached pandas DataFrame without pandas") from e
+
+        if cache_type == "pandas.Series":
+            try:
+                import pandas as pd
+
+                return pd.read_json(StringIO(payload), typ="series", orient="split")
+            except ImportError as e:
+                raise TypeError("Cannot restore cached pandas Series without pandas") from e
+
+        if cache_type == "numpy.ndarray":
+            try:
+                import numpy as np
+
+                return np.array(payload["data"], dtype=payload.get("dtype"))
+            except ImportError as e:
+                raise TypeError("Cannot restore cached numpy array without numpy") from e
+
+        raise TypeError(f"Unsupported cache payload type: {cache_type}")
+
+    def _try_serialize_pandas(self, value: Any) -> Any | None:
+        """Serialize pandas objects when pandas is installed and value matches."""
+        try:
+            import pandas as pd
+        except ImportError:
+            return None
+
+        if isinstance(value, pd.DataFrame):
+            return {
+                "__audora_cache_type__": "pandas.DataFrame",
+                "value": value.to_json(orient="split", date_format="iso"),
+            }
+
+        if isinstance(value, pd.Series):
+            return {
+                "__audora_cache_type__": "pandas.Series",
+                "value": value.to_json(orient="split", date_format="iso"),
+            }
+
+        return None
+
+    def _try_serialize_numpy(self, value: Any) -> Any | None:
+        """Serialize numpy objects when numpy is installed and value matches."""
+        try:
+            import numpy as np
+        except ImportError:
+            return None
+
+        if isinstance(value, np.generic):
+            return value.item()
+
+        if isinstance(value, np.ndarray):
+            return {
+                "__audora_cache_type__": "numpy.ndarray",
+                "value": {"data": value.tolist(), "dtype": str(value.dtype)},
+            }
+
+        return None
 
     def get(self, key: str) -> Any | None:
         """Get value from cache."""
@@ -337,7 +490,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable or a supported pandas/numpy object)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +585,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 
