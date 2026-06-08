@@ -98,10 +98,7 @@ def main():
     found_credentials = []
     for pattern in credential_patterns:
         if pattern.startswith("*"):
-            # Use glob for wildcard patterns
-            from glob import glob
-
-            matches = glob(pattern)
+            matches = [str(path) for path in config.project_root.glob(pattern)]
             found_credentials.extend(matches)
         else:
             # Direct file check
