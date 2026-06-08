@@ -2,8 +2,13 @@
 
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CacheManager,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,59 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisCacheSerialization:
+    """Regression tests for non-executable Redis cache serialization."""
+
+    def test_json_compatible_value_round_trip(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = {"artist": "Test Artist", "scores": [1, 2, 3], "active": True}
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_bytes_round_trip(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = b"\x00audora-cache"
+
+        serialized = backend._serialize(value)
+
+        assert backend._deserialize(serialized) == value
+
+    def test_dataframe_round_trip(self):
+        backend = object.__new__(RedisCacheBackend)
+        value = pd.DataFrame({"track": ["Song A", "Song B"], "score": [91.5, 88.0]})
+
+        serialized = backend._serialize(value)
+        restored = backend._deserialize(serialized)
+
+        pd.testing.assert_frame_equal(restored, value)
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        assert backend._deserialize(b"\x80\x04K*.") is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = object.__new__(RedisCacheBackend)
+
+        class Unsupported:
+            pass
+
+        with pytest.raises(TypeError):
+            backend._serialize(Unsupported())
+
+
+class TestCacheKeyHashing:
+    """Regression tests for deterministic cache key hashing."""
+
+    def test_build_cache_key_uses_sha256_digest(self):
+        manager = CacheManager(backend=LocalCacheBackend(), key_prefix="test")
+
+        key = manager._build_cache_key("prefix", ("arg",), {"kw": "value"})
+        digests = key.split(":")[1:]
+
+        assert digests
+        assert all(len(digest) == 64 for digest in digests)
