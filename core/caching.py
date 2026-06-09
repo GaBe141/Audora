@@ -179,6 +179,7 @@ class RedisCacheBackend(CacheBackend):
         elif isinstance(value, pd.DataFrame):
             payload_type = "pandas_dataframe"
             payload = value.to_json(orient="table", date_format="iso")
+            self._validate_dataframe_payload(payload)
         else:
             payload_type = "json"
             payload = self._normalize_json_payload(value)
@@ -205,6 +206,13 @@ class RedisCacheBackend(CacheBackend):
         if hasattr(value, "item") and callable(value.item):
             return value.item()
         raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+    def _validate_dataframe_payload(self, payload: str) -> None:
+        """Reject DataFrames that pandas cannot safely restore from the JSON envelope."""
+        try:
+            pd.read_json(io.StringIO(payload), orient="table")
+        except Exception as e:
+            raise TypeError("DataFrame cannot be safely serialized for Redis cache") from e
 
     def _deserialize(self, value: bytes) -> Any | None:
         """Deserialize cache value from a non-executable serialization envelope."""

@@ -235,14 +235,7 @@ class EnhancedNotificationService:
         """Return True when the IP belongs to a non-public range."""
         try:
             parsed = ipaddress.ip_address(ip)
-            return (
-                parsed.is_private
-                or parsed.is_loopback
-                or parsed.is_link_local
-                or parsed.is_multicast
-                or parsed.is_reserved
-                or parsed.is_unspecified
-            )
+            return parsed.is_multicast or not parsed.is_global
         except ValueError:
             return True
 

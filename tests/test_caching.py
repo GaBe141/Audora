@@ -127,6 +127,15 @@ class TestRedisCacheSerialization:
 
         assert_frame_equal(restored, frame)
 
+    def test_rejects_dataframe_that_cannot_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        frame = pd.DataFrame(
+            {"seen_at": pd.to_datetime(["2024-01-01T12:00:00+02:00"])}
+        )
+
+        with pytest.raises(TypeError, match="DataFrame cannot be safely serialized"):
+            backend._serialize(frame)
+
     def test_rejects_legacy_signed_pickle_without_executing(self):
         backend = RedisCacheBackend.__new__(RedisCacheBackend)
         _pickle_execution_marker.clear()

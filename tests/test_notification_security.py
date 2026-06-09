@@ -76,6 +76,11 @@ class TestWebhookUrlValidation:
         with pytest.raises(ValueError, match="private or restricted"):
             svc._validate_webhook_url("https://10.0.0.1/webhook")
 
+    def test_rejects_shared_address_space_targets_by_default(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="private or restricted"):
+            svc._validate_webhook_url("https://100.64.0.1/webhook")
+
     def test_allows_private_ip_when_explicitly_enabled(self):
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
