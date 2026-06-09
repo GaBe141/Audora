@@ -16,8 +16,8 @@ scipy==1.16.2
 plotly==6.3.1
 
 # GUI (prototyping dashboard)
-dash>=2.0.0
-dash-bootstrap-components>=1.0.0
+dash==4.2.0
+dash-bootstrap-components==2.0.4
 
 # Testing
 pytest>=7.0
