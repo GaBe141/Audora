@@ -255,6 +255,27 @@ class EnhancedNotificationService:
 
         return url
 
+    def _attachment_root(self) -> Path:
+        """Directory from which notification attachments may be read."""
+        return Path(os.getenv("AUDORA_ATTACHMENT_DIR", "data")).expanduser().resolve()
+
+    def _validate_attachment_path(self, attachment_path: str) -> Path:
+        """Validate attachment paths to avoid leaking arbitrary local files."""
+        attachment = Path(attachment_path).expanduser().resolve()
+        root = self._attachment_root()
+
+        try:
+            attachment.relative_to(root)
+        except ValueError as e:
+            raise ValueError(
+                f"Attachment path is outside the allowed directory: {root}"
+            ) from e
+
+        if not attachment.is_file():
+            raise ValueError(f"Attachment path must be an existing file: {attachment}")
+
+        return attachment
+
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
         for key, value in update.items():
@@ -559,16 +580,16 @@ System status: {{ system_status }}
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    safe_attachment = self._validate_attachment_path(attachment_path)
+                    with safe_attachment.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {safe_attachment.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
