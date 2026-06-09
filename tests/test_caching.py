@@ -1,10 +1,32 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
+from pandas.testing import assert_frame_equal
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
+
+_pickle_execution_marker: list[str] = []
+
+
+def _mark_pickle_executed() -> str:
+    _pickle_execution_marker.append("executed")
+    return "executed"
+
+
+class _MaliciousPicklePayload:
+    def __reduce__(self):
+        return (_mark_pickle_executed, ())
 
 
 class TestLocalCacheBackend:
@@ -80,6 +102,61 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+
+class TestRedisCacheSerialization:
+    """Tests for Redis serialization without unsafe pickle deserialization."""
+
+    def test_json_value_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        value = {"track": "Song", "scores": [1, 2.5, True, None]}
+
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_bytes_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        assert backend._deserialize(backend._serialize(b"binary\x00payload")) == b"binary\x00payload"
+
+    def test_dataframe_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        frame = pd.DataFrame({"track": ["Song A", "Song B"], "score": [98.5, 87.0]})
+
+        restored = backend._deserialize(backend._serialize(frame))
+
+        assert_frame_equal(restored, frame)
+
+    def test_rejects_dataframe_that_cannot_round_trip(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        frame = pd.DataFrame(
+            {"seen_at": pd.to_datetime(["2024-01-01T12:00:00+02:00"])}
+        )
+
+        with pytest.raises(TypeError, match="DataFrame cannot be safely serialized"):
+            backend._serialize(frame)
+
+    def test_rejects_legacy_signed_pickle_without_executing(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        _pickle_execution_marker.clear()
+
+        signing_key = b"test-signing-key"
+        payload = pickle.dumps(_MaliciousPicklePayload())
+        legacy_envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": hmac.new(signing_key, payload, hashlib.sha256).hexdigest(),
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+
+        assert backend._deserialize(json.dumps(legacy_envelope).encode("utf-8")) is None
+        assert _pickle_execution_marker == []
+
+    def test_rejects_unsupported_objects(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+
+        with pytest.raises(TypeError):
+            backend._serialize(object())
 
 
 class TestCachedDecorator:

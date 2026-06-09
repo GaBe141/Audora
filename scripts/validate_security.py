@@ -4,12 +4,11 @@
 import sys
 from pathlib import Path
 
-# Add src to path for imports
-src_path = Path(__file__).resolve().parent / "src"
-sys.path.insert(0, str(src_path))
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
 
 # Import after path modification
-from src.config import SecureConfig  # noqa: E402
+from core.config import SecureConfig  # noqa: E402
 
 
 def main():
@@ -104,11 +103,8 @@ def main():
     found_credentials = []
     for pattern in credential_patterns:
         if pattern.startswith("*"):
-            # Use glob for wildcard patterns
-            from glob import glob
-
-            matches = glob(pattern)
-            found_credentials.extend(matches)
+            matches = config.project_root.glob(pattern)
+            found_credentials.extend(str(match) for match in matches)
         else:
             # Direct file check
             file_path = config.project_root / pattern
@@ -131,11 +127,11 @@ def main():
 
     if status["spotify"]["configured"]:
         print("✅ Ready to run Spotify analysis!")
-        print("   Try: python -m src.main")
+        print("   Try: python -m core.main")
 
         if status["lastfm"]["configured"]:
             print("✅ Ready for global trend comparison!")
-            print("   Try: python -m src.lastfm_main")
+            print("   Try: python -m core.lastfm_main")
         else:
             print("💡 Optional: Configure Last.fm for global trend analysis")
     else:
