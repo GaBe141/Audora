@@ -534,6 +534,13 @@ System status: {{ system_status }}
             return {"success": False, "error": "Email not configured"}
 
         try:
+            if (
+                email_config.get("username")
+                and email_config.get("password")
+                and not email_config.get("use_tls", True)
+            ):
+                raise ValueError("Refusing to send SMTP credentials without TLS")
+
             msg = MIMEMultipart("alternative")
             msg["From"] = email_config.get("from_address", "music-discovery@example.com")
             msg["To"] = ", ".join(email_config["recipients"])
@@ -578,8 +585,6 @@ System status: {{ system_status }}
 
             if email_config.get("use_tls", True):
                 server.starttls(context=ssl.create_default_context())
-            elif email_config.get("username") and email_config.get("password"):
-                raise ValueError("Refusing to send SMTP credentials without TLS")
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
