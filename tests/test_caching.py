@@ -16,7 +16,6 @@ from core.caching import (
     RedisCacheBackend,
 )
 
-
 _pickle_execution_marker: list[str] = []
 
 

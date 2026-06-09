@@ -7,9 +7,8 @@ import time
 import pandas as pd
 import requests
 
-from core.exceptions import APIConnectionError, APIResponseError
-
 from core.config import get_config
+from core.exceptions import APIConnectionError, APIResponseError
 
 logger = logging.getLogger(__name__)
 

@@ -8,8 +8,8 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -217,7 +217,7 @@ class EnhancedNotificationService:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -721,19 +721,18 @@ System status: {{ system_status }}
                 if fields:
                     slack_message["attachments"][0]["fields"] = fields
 
-            async with session:
-                async with session.post(
-                    webhook_url, json=slack_message, allow_redirects=False
-                ) as response:
-                    if response.status == 200:
-                        self.logger.info("Slack notification sent successfully")
-                        return {"success": True, "status_code": response.status}
-                    else:
-                        error_text = await response.text()
-                        self.logger.error(
-                            f"Slack notification failed: {response.status} - {error_text}"
-                        )
-                        return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            async with session, session.post(
+                webhook_url, json=slack_message, allow_redirects=False
+            ) as response:
+                if response.status == 200:
+                    self.logger.info("Slack notification sent successfully")
+                    return {"success": True, "status_code": response.status}
+                else:
+                    error_text = await response.text()
+                    self.logger.error(
+                        f"Slack notification failed: {response.status} - {error_text}"
+                    )
+                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
 
         except Exception as e:
             self.logger.error(f"Failed to send Slack notification: {e}")
@@ -788,19 +787,18 @@ System status: {{ system_status }}
                 if fields:
                     discord_message["embeds"][0]["fields"] = fields
 
-            async with session:
-                async with session.post(
-                    webhook_url, json=discord_message, allow_redirects=False
-                ) as response:
-                    if response.status in [200, 204]:
-                        self.logger.info("Discord notification sent successfully")
-                        return {"success": True, "status_code": response.status}
-                    else:
-                        error_text = await response.text()
-                        self.logger.error(
-                            f"Discord notification failed: {response.status} - {error_text}"
-                        )
-                        return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            async with session, session.post(
+                webhook_url, json=discord_message, allow_redirects=False
+            ) as response:
+                if response.status in [200, 204]:
+                    self.logger.info("Discord notification sent successfully")
+                    return {"success": True, "status_code": response.status}
+                else:
+                    error_text = await response.text()
+                    self.logger.error(
+                        f"Discord notification failed: {response.status} - {error_text}"
+                    )
+                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
 
         except Exception as e:
             self.logger.error(f"Failed to send Discord notification: {e}")
@@ -847,23 +845,22 @@ System status: {{ system_status }}
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
             timeout = webhook_config.get("timeout", 30)
 
-            async with session:
-                async with session.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=timeout),
-                    allow_redirects=False,
-                ) as response:
-                    if 200 <= response.status < 300:
-                        self.logger.info(f"Webhook notification sent successfully: {response.status}")
-                        return {"success": True, "status_code": response.status}
-                    else:
-                        error_text = await response.text()
-                        self.logger.error(
-                            f"Webhook notification failed: {response.status} - {error_text}"
-                        )
-                        return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            async with session, session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                allow_redirects=False,
+            ) as response:
+                if 200 <= response.status < 300:
+                    self.logger.info(f"Webhook notification sent successfully: {response.status}")
+                    return {"success": True, "status_code": response.status}
+                else:
+                    error_text = await response.text()
+                    self.logger.error(
+                        f"Webhook notification failed: {response.status} - {error_text}"
+                    )
+                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
 
         except Exception as e:
             self.logger.error(f"Failed to send webhook notification: {e}")
