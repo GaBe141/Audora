@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,19 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportPathConfinement:
+    """CSV export must stay inside the exports directory."""
+
+    def test_export_to_csv_writes_inside_exports(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        written = data_store.export_to_csv("trends", "trends.csv")
+        export_root = Path(data_store.db_path).resolve().parent / "exports"
+        written_path = Path(written).resolve()
+        assert written_path.is_relative_to(export_root)
+        assert written_path.exists()
+
+    def test_export_to_csv_rejects_parent_directory_components(self, data_store):
+        with pytest.raises(ValueError, match="parent directory"):
+            data_store.export_to_csv("trends", "../passwd")

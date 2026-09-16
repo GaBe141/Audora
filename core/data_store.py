@@ -927,10 +927,25 @@ class EnhancedMusicDataStore:
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
 
+    def _resolve_export_path(self, filepath: str) -> Path:
+        """Confine CSV exports to an exports/ directory next to the database."""
+        export_root = Path(self.db_path).resolve().parent / "exports"
+        export_root.mkdir(parents=True, exist_ok=True)
+
+        requested = Path(filepath)
+        if ".." in requested.parts:
+            raise ValueError("CSV export path must not contain parent directory components")
+
+        target = (export_root / requested.name).resolve()
+        if not target.is_relative_to(export_root):
+            raise ValueError("CSV export path must stay inside the exports directory")
+        return target
+
     def export_to_csv(self, table: str, filepath: str, days: int | None = None) -> str:
         """Export table data to CSV.
 
         Note: Table name is validated against whitelist to prevent SQL injection.
+        Export files are confined to an exports/ directory next to the database.
         """
         # Whitelist valid table names to prevent SQL injection
         valid_tables = {
@@ -943,6 +958,8 @@ class EnhancedMusicDataStore:
         }
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
+
+        target = self._resolve_export_path(filepath)
 
         with self.get_connection() as conn:
             if days:
@@ -958,13 +975,10 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(target, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {target}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(target)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
