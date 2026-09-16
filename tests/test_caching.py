@@ -1,10 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+from unittest.mock import MagicMock
 
-from core.caching import (
-    LocalCacheBackend,
-)
+import pandas as pd
+import pytest
+
+from core.caching import LocalCacheBackend, RedisCacheBackend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +122,70 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSafeSerialization:
+    """Redis payloads must be versioned JSON, never pickle."""
+
+    def _backend(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._client = MagicMock()
+        return backend
+
+    def test_json_roundtrip(self):
+        backend = self._backend()
+        payload = backend._serialize({"track": "song", "score": 91})
+        assert b"pickle" not in payload.lower()
+        assert backend._deserialize(payload) == {"track": "song", "score": 91}
+
+    def test_none_roundtrip_is_not_treated_as_unsafe(self):
+        backend = self._backend()
+        payload = backend._serialize(None)
+        backend._client.get.return_value = payload
+        assert backend.get("k") is None
+        backend._client.delete.assert_not_called()
+
+    def test_bytes_roundtrip(self):
+        backend = self._backend()
+        payload = backend._serialize(b"raw-bytes")
+        assert backend._deserialize(payload) == b"raw-bytes"
+
+    def test_dataframe_roundtrip(self):
+        backend = self._backend()
+        frame = pd.DataFrame({"track": ["a"], "score": [1.5]})
+        restored = backend._deserialize(backend._serialize(frame))
+        assert list(restored.columns) == ["track", "score"]
+        assert restored.iloc[0]["track"] == "a"
+
+    def test_rejects_pickle_payload_and_evicts(self):
+        backend = self._backend()
+        backend._client.get.return_value = pickle.dumps({"owned": True})
+        assert backend.get("poison") is None
+        backend._client.delete.assert_called_once_with("poison")
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        backend = self._backend()
+        legacy = json.dumps(
+            {"v": 1, "alg": "HMAC-SHA256", "sig": "abc", "payload": "AAAA"}
+        ).encode("utf-8")
+        backend._client.get.return_value = legacy
+        assert backend.get("legacy") is None
+        backend._client.delete.assert_called_once_with("legacy")
+
+    def test_refuses_unsupported_objects(self):
+        backend = self._backend()
+
+        class Custom:
+            pass
+
+        with pytest.raises(TypeError, match="unsupported type"):
+            backend._serialize(Custom())
+
+    def test_cache_keys_use_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"z": "q"})
+        parts = key.split(":")
+        assert parts[0] == "fn"
+        assert len(parts) == 3
+        for digest in parts[1:]:
+            assert len(digest) == 64
+            int(digest, 16)

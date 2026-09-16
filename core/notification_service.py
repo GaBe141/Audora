@@ -4,12 +4,14 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -197,7 +199,7 @@ class EnhancedNotificationService:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -231,6 +233,8 @@ class EnhancedNotificationService:
         parsed = urlparse(url.strip())
         if parsed.scheme != "https":
             raise ValueError("Webhook URL must use HTTPS")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("Webhook URL must not include embedded credentials")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
 
@@ -254,6 +258,31 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _resolve_allowed_attachment(self, attachment_path: str) -> Path | None:
+        """Return an attachment path only if it is inside an allowlisted directory."""
+        allowed_roots = (
+            Path("exports").resolve(),
+            Path("backups").resolve(),
+            Path("demo_visualizations").resolve(),
+        )
+        try:
+            candidate = Path(attachment_path).resolve()
+        except OSError:
+            return None
+        if not candidate.is_file():
+            self.logger.warning("Rejected missing email attachment: %s", attachment_path)
+            return None
+        for root in allowed_roots:
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                continue
+            return candidate
+        self.logger.warning(
+            "Rejected email attachment outside allowlisted directories: %s", attachment_path
+        )
+        return None
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -552,29 +581,42 @@ System status: {{ system_status }}
 
             msg.attach(MIMEText(text_content, "plain"))
 
-            # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            # Add HTML version with escaped content to prevent HTML injection.
+            escaped_content = html.escape(text_content)
+            html_content = escaped_content.replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
-            # Add attachments
+            # Add attachments from allowlisted directories only.
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    resolved = self._resolve_allowed_attachment(attachment_path)
+                    if resolved is None:
+                        continue
+                    with resolved.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {resolved.name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
+            if (
+                email_config.get("username")
+                and email_config.get("password")
+                and not email_config.get("use_tls", True)
+            ):
+                return {
+                    "success": False,
+                    "error": "SMTP authentication requires TLS",
+                }
+
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -650,8 +692,18 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response,
             ):
+                if 300 <= response.status < 400:
+                    return {
+                        "success": False,
+                        "error": f"Redirects are not allowed: HTTP {response.status}",
+                    }
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -717,8 +769,18 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response,
             ):
+                if 300 <= response.status < 400:
+                    return {
+                        "success": False,
+                        "error": f"Redirects are not allowed: HTTP {response.status}",
+                    }
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -777,9 +839,18 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
+                if 300 <= response.status < 400:
+                    return {
+                        "success": False,
+                        "error": f"Redirects are not allowed: HTTP {response.status}",
+                    }
                 if 200 <= response.status < 300:
                     self.logger.info(f"Webhook notification sent successfully: {response.status}")
                     return {"success": True, "status_code": response.status}
@@ -899,8 +970,6 @@ System status: {{ system_status }}
 
 # Example usage and testing
 if __name__ == "__main__":
-    import asyncio
-
     async def test_notifications():
         """Test the notification system."""
 

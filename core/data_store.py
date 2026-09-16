@@ -958,13 +958,19 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            export_root = Path("exports").resolve()
+            export_root.mkdir(parents=True, exist_ok=True)
+            filename = Path(filepath).name
+            if Path(filename).suffix.lower() != ".csv" or filename.startswith("."):
+                raise ValueError("Export filename must be a non-hidden .csv file")
+            target = (export_root / filename).resolve()
+            if target.parent != export_root:
+                raise ValueError("Export path must be inside the exports directory")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(target, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {target}")
 
-        return filepath
+        return str(target)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
