@@ -107,3 +107,23 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportPathConfinement:
+    """CSV export must not write outside the exports directory."""
+
+    def test_export_to_csv_confines_path_to_exports(self, data_store, sample_trends, tmp_path, monkeypatch):
+        from pathlib import Path
+
+        monkeypatch.chdir(tmp_path)
+        data_store.save_trends_bulk(sample_trends)
+        result = data_store.export_to_csv("trends", "../../secret.csv")
+        export_path = Path(result).resolve()
+        assert export_path.parent == (tmp_path / "exports").resolve()
+        assert export_path.name == "secret.csv"
+        assert not (tmp_path / "secret.csv").exists()
+        assert export_path.exists()
+
+    def test_export_to_csv_rejects_non_csv_filename(self, data_store):
+        with pytest.raises(ValueError, match="csv"):
+            data_store.export_to_csv("trends", "notes.txt")
