@@ -1,10 +1,50 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
+
+
+class _MemoryRedis:
+    """Minimal in-memory Redis stand-in for serialization tests."""
+
+    def __init__(self) -> None:
+        self._data: dict[str, bytes] = {}
+
+    def get(self, key: str) -> bytes | None:
+        return self._data.get(key)
+
+    def set(self, key: str, value: bytes) -> None:
+        self._data[key] = value
+
+    def setex(self, key: str, _ttl: int, value: bytes) -> None:
+        self._data[key] = value
+
+    def delete(self, key: str) -> None:
+        self._data.pop(key, None)
+
+    def exists(self, key: str) -> int:
+        return int(key in self._data)
+
+    def flushdb(self) -> None:
+        self._data.clear()
+
+
+def _redis_backend(signing_key: bytes = b"unit-test-signing-key") -> RedisCacheBackend:
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = signing_key
+    backend._client = _MemoryRedis()
+    return backend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +158,68 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSafeSerialization:
+    """Redis backend must never unpickle attacker-controlled payloads."""
+
+    def test_json_roundtrip(self):
+        backend = _redis_backend()
+        backend.set("k", {"artist": "Nile Rodgers", "score": 91})
+        assert backend.get("k") == {"artist": "Nile Rodgers", "score": 91}
+
+    def test_bytes_roundtrip(self):
+        backend = _redis_backend()
+        backend.set("k", b"binary-cache")
+        assert backend.get("k") == b"binary-cache"
+
+    def test_dataframe_roundtrip(self):
+        backend = _redis_backend()
+        df = pd.DataFrame({"track": ["A", "B"], "score": [1.5, 2.5]})
+        backend.set("k", df)
+        restored = backend.get("k")
+        assert list(restored.columns) == ["track", "score"]
+        assert restored["track"].tolist() == ["A", "B"]
+        assert restored["score"].tolist() == [1.5, 2.5]
+
+    def test_rejects_raw_pickle_payload(self):
+        backend = _redis_backend()
+        backend._client.set("k", pickle.dumps({"owned": True}))
+        assert backend.get("k") is None
+        assert backend._client.get("k") is None
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        backend = _redis_backend()
+        pickled = pickle.dumps(["rce"])
+        signature = hmac.new(backend._signing_key, pickled, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": pickled.hex(),
+        }
+        backend._client.set("k", json.dumps(envelope).encode("utf-8"))
+        assert backend.get("k") is None
+        assert backend._client.get("k") is None
+
+    def test_rejects_tampered_signature(self):
+        backend = _redis_backend()
+        backend.set("k", {"ok": True})
+        raw = json.loads(backend._client.get("k"))
+        raw["d"] = {"ok": False}
+        backend._client.set("k", json.dumps(raw).encode("utf-8"))
+        assert backend.get("k") is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = _redis_backend()
+
+        class NotSerializable:
+            pass
+
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            backend.set("k", NotSerializable())
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"z": 3})
+        assert hashlib.md5(b"not-used").hexdigest() not in key
+        assert len(key.split(":")[-1]) == 64
