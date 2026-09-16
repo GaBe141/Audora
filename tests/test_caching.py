@@ -1,10 +1,52 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
+
+
+class _FakeRedis:
+    """Minimal Redis client stub for serialization tests."""
+
+    def __init__(self) -> None:
+        self.store: dict[bytes | str, bytes] = {}
+
+    def ping(self) -> bool:
+        return True
+
+    def get(self, key: str) -> bytes | None:
+        return self.store.get(key)
+
+    def set(self, key: str, value: bytes) -> None:
+        self.store[key] = value
+
+    def setex(self, key: str, ttl: int, value: bytes) -> None:
+        self.store[key] = value
+
+    def delete(self, key: str) -> None:
+        self.store.pop(key, None)
+
+    def exists(self, key: str) -> int:
+        return int(key in self.store)
+
+    def flushdb(self) -> None:
+        self.store.clear()
+
+
+def _redis_backend() -> RedisCacheBackend:
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = b"unit-test-signing-key"
+    backend._client = _FakeRedis()
+    return backend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +160,74 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ("a",), {"b": 1})
+        args_digest = hashlib.sha256(
+            json.dumps(("a",), sort_keys=True, default=str).encode()
+        ).hexdigest()
+        kwargs_digest = hashlib.sha256(
+            json.dumps({"b": 1}, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert key == f"prefix:{args_digest}:{kwargs_digest}"
+        assert "md5" not in key
+        assert len(args_digest) == 64
+
+
+class TestRedisSafeSerialization:
+    """Redis backend must not pickle; only signed JSON envelopes are accepted."""
+
+    def test_json_round_trip(self):
+        backend = _redis_backend()
+        backend.set("k", {"artist": "Taylor", "year": 2024})
+        assert backend.get("k") == {"artist": "Taylor", "year": 2024}
+
+    def test_bytes_round_trip(self):
+        backend = _redis_backend()
+        backend.set("k", b"\x00\xffbinary")
+        assert backend.get("k") == b"\x00\xffbinary"
+
+    def test_dataframe_round_trip(self):
+        backend = _redis_backend()
+        df = pd.DataFrame({"track": ["a", "b"], "score": [1.0, 2.0]})
+        backend.set("k", df)
+        restored = backend.get("k")
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored.reset_index(drop=True), df)
+
+    def test_rejects_pickle_payloads(self):
+        backend = _redis_backend()
+        backend._client.set("poison", pickle.dumps({"rce": True}))
+        assert backend.get("poison") is None
+        assert backend._client.get("poison") is None
+
+    def test_rejects_unsigned_legacy_envelope(self):
+        backend = _redis_backend()
+        backend._client.set(
+            "legacy",
+            json.dumps({"v": 1, "payload": {"x": 1}}).encode("utf-8"),
+        )
+        assert backend.get("legacy") is None
+
+    def test_rejects_tampered_signature(self):
+        backend = _redis_backend()
+        backend.set("k", {"ok": True})
+        raw = json.loads(backend._client.get("k").decode("utf-8"))
+        raw["payload"] = {"ok": False}
+        backend._client.set("k", json.dumps(raw).encode("utf-8"))
+        assert backend.get("k") is None
+
+    def test_rejects_unsupported_python_objects(self):
+        backend = _redis_backend()
+        backend.set("k", object())
+        assert backend.get("k") is None
+
+    def test_serialized_payload_is_json_not_pickle(self):
+        backend = _redis_backend()
+        backend.set("k", {"safe": True})
+        raw = backend._client.get("k")
+        envelope = json.loads(raw.decode("utf-8"))
+        assert envelope["kind"] == "json"
+        assert envelope["alg"] == "HMAC-SHA256"
+        with pytest.raises(pickle.UnpicklingError):
+            pickle.loads(raw)
