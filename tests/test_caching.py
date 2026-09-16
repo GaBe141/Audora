@@ -118,3 +118,69 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSafeSerialization:
+    """Redis payloads must not use pickle and must reject untrusted envelopes."""
+
+    def test_json_round_trip(self):
+        from core.caching import deserialize_cache_value, serialize_cache_value
+
+        payload = {"track": "Song", "score": 91.5, "tags": ["pop"]}
+        restored = deserialize_cache_value(serialize_cache_value(payload))
+        assert restored == payload
+
+    def test_bytes_round_trip(self):
+        from core.caching import deserialize_cache_value, serialize_cache_value
+
+        payload = b"\x00binary\xffdata"
+        restored = deserialize_cache_value(serialize_cache_value(payload))
+        assert restored == payload
+
+    def test_dataframe_round_trip(self):
+        import pandas as pd
+
+        from core.caching import deserialize_cache_value, serialize_cache_value
+
+        frame = pd.DataFrame({"track": ["a", "b"], "score": [1.0, 2.0]})
+        restored = deserialize_cache_value(serialize_cache_value(frame))
+        assert list(restored.columns) == ["track", "score"]
+        assert restored["track"].tolist() == ["a", "b"]
+        assert restored["score"].tolist() == [1.0, 2.0]
+
+    def test_rejects_malformed_and_legacy_payloads(self):
+        import pytest
+
+        from core.caching import deserialize_cache_value
+
+        with pytest.raises(ValueError):
+            deserialize_cache_value(b"not-json")
+        with pytest.raises(ValueError):
+            deserialize_cache_value(b'{"v": 99, "t": "json", "d": 1}')
+        with pytest.raises(ValueError):
+            deserialize_cache_value(b'{"v": 1, "t": "pickle", "d": "cos\\nsystem"}')
+
+    def test_rejects_unsupported_objects(self):
+        import pytest
+
+        from core.caching import serialize_cache_value
+
+        class NotSerializable:
+            pass
+
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            serialize_cache_value(NotSerializable())
+
+    def test_cache_key_uses_sha256_not_md5(self, mock_cache):
+        import hashlib
+        import json
+
+        key = mock_cache._build_cache_key("fn", (1, 2), {"z": 3})
+        args_digest = hashlib.sha256(
+            json.dumps((1, 2), sort_keys=True, default=str).encode()
+        ).hexdigest()
+        kwargs_digest = hashlib.sha256(
+            json.dumps({"z": 3}, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert key == f"fn:{args_digest}:{kwargs_digest}"
+        assert hashlib.md5(b"not-used").hexdigest() not in key
