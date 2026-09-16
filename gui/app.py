@@ -17,6 +17,10 @@ from dash import Input, Output, State, ctx, dash_table, dcc, html
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+ALLOWED_DEMO_MODES = frozenset(
+    {"statistical", "trending", "multi_source", "platform", "all"}
+)
+
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.CYBORG],
@@ -345,6 +349,8 @@ app.layout = dbc.Container(
 
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
+    if not isinstance(args, list) or not args or not all(isinstance(item, str) for item in args):
+        return "Error", "Invalid command arguments"
     try:
         proc = subprocess.Popen(
             args,
@@ -396,6 +402,8 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
+        if demo_value not in ALLOWED_DEMO_MODES:
+            return "Error", "Invalid demo mode"
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
@@ -589,11 +597,11 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
-            svc.config["slack"]["webhook_url"] = slack_url
+            svc.config["slack"]["webhook_url"] = svc._validate_webhook_url(slack_url)
         if discord_url:
-            svc.config["discord"]["webhook_url"] = discord_url
+            svc.config["discord"]["webhook_url"] = svc._validate_webhook_url(discord_url)
         if webhook_url:
-            svc.config["webhook"]["url"] = webhook_url
+            svc.config["webhook"]["url"] = svc._validate_webhook_url(webhook_url)
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
         if smtp_port:
