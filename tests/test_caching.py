@@ -1,10 +1,24 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
 
-from core.caching import (
-    LocalCacheBackend,
-)
+import pandas as pd
+import pytest
+
+from core.caching import LocalCacheBackend, RedisCacheBackend
+
+
+def _unsigned_redis_backend(signing_key: bytes = b"unit-test-cache-key") -> RedisCacheBackend:
+    """Build a Redis backend without connecting to Redis."""
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = signing_key
+    backend._client = None
+    return backend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +132,66 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ("arg",), {"k": "v"})
+        expected_args = hashlib.sha256(
+            json.dumps(("arg",), sort_keys=True, default=str).encode()
+        ).hexdigest()
+        expected_kwargs = hashlib.sha256(
+            json.dumps({"k": "v"}, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert key == f"prefix:{expected_args}:{expected_kwargs}"
+        assert hashlib.md5(b"not-used").hexdigest() not in key
+
+
+class TestRedisSafeSerialization:
+    """Redis payloads must be JSON envelopes, never pickle.loads."""
+
+    def test_json_roundtrip(self):
+        backend = _unsigned_redis_backend()
+        payload = backend._serialize({"track": "song", "score": 91})
+        assert pickle.dumps({"track": "song"}) not in payload
+        assert backend._deserialize(payload) == {"track": "song", "score": 91}
+
+    def test_bytes_roundtrip(self):
+        backend = _unsigned_redis_backend()
+        payload = backend._serialize(b"binary-cache")
+        assert backend._deserialize(payload) == b"binary-cache"
+
+    def test_dataframe_roundtrip(self):
+        backend = _unsigned_redis_backend()
+        frame = pd.DataFrame({"track": ["a"], "score": [1.5]})
+        restored = backend._deserialize(backend._serialize(frame))
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = _unsigned_redis_backend()
+        assert backend._deserialize(pickle.dumps({"owned": True})) is None
+
+    def test_rejects_tampered_signature(self):
+        backend = _unsigned_redis_backend()
+        envelope = json.loads(backend._serialize({"ok": True}).decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_unsigned_inner_json(self):
+        backend = _unsigned_redis_backend()
+        raw = json.dumps({"t": "json", "d": {"injected": True}}).encode("utf-8")
+        assert backend._deserialize(raw) is None
+
+    def test_rejects_unsupported_object(self):
+        backend = _unsigned_redis_backend()
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            backend._serialize(object())
+
+    def test_signed_payload_uses_hmac(self):
+        backend = _unsigned_redis_backend(b"abc")
+        serialized = backend._serialize("hello")
+        envelope = json.loads(serialized.decode("utf-8"))
+        payload = base64.b64decode(envelope["payload"].encode("ascii"), validate=True)
+        expected = hmac.new(b"abc", payload, hashlib.sha256).hexdigest()
+        assert envelope["sig"] == expected
+        assert envelope["v"] == 1
+        assert envelope["alg"] == "HMAC-SHA256"
