@@ -1,5 +1,8 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+import json
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +110,30 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+    def test_update_trends_bulk_serializes_metadata(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        track_id = sample_trends[0].track_id
+        data_store.update_trends_bulk([track_id], {"metadata": {"source": "unit-test"}})
+        with data_store.get_connection() as conn:
+            row = conn.execute(
+                "SELECT metadata FROM trends WHERE track_id = ?", (track_id,)
+            ).fetchone()
+            assert row is not None
+            assert json.loads(row[0])["source"] == "unit-test"
+
+    def test_export_to_csv_confined_to_exports(self, data_store, sample_trends, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        data_store.save_trends_bulk(sample_trends)
+        exported = data_store.export_to_csv("trends", "trends.csv")
+        export_root = (tmp_path / "exports").resolve()
+        assert Path(exported).resolve().parent == export_root
+        assert Path(exported).exists()
+
+    def test_export_to_csv_rejects_path_traversal(
+        self, data_store, sample_trends, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        data_store.save_trends_bulk(sample_trends)
+        with pytest.raises(ValueError, match="exports directory"):
+            data_store.export_to_csv("trends", str(tmp_path / "outside.csv"))

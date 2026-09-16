@@ -1,9 +1,18 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
+import pickle
 import time
+from unittest.mock import MagicMock
+
+import pytest
 
 from core.caching import (
+    CACHE_HMAC_ALG,
+    REDIS_AVAILABLE,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +127,116 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class _FakeRedis:
+    """Minimal in-memory Redis stand-in for serialization tests."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, bytes] = {}
+
+    def ping(self) -> bool:
+        return True
+
+    def get(self, key: str) -> bytes | None:
+        return self.store.get(key)
+
+    def set(self, key: str, value: bytes) -> bool:
+        self.store[key] = value
+        return True
+
+    def setex(self, key: str, _ttl: int, value: bytes) -> bool:
+        self.store[key] = value
+        return True
+
+    def delete(self, key: str) -> int:
+        return int(self.store.pop(key, None) is not None)
+
+    def flushdb(self) -> bool:
+        self.store.clear()
+        return True
+
+    def exists(self, key: str) -> int:
+        return int(key in self.store)
+
+
+def _make_redis_backend(monkeypatch: pytest.MonkeyPatch) -> tuple[RedisCacheBackend, _FakeRedis]:
+    client = _FakeRedis()
+    monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "unit-test-signing-key")
+    monkeypatch.setattr("core.caching.ConnectionPool", MagicMock())
+    monkeypatch.setattr("core.caching.redis.Redis", MagicMock(return_value=client))
+    return RedisCacheBackend(), client
+
+
+class TestCacheKeyHashing:
+    """Cache keys must use SHA-256 rather than MD5."""
+
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"b": 3})
+        parts = key.split(":")
+        assert parts[0] == "fn"
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+        args_digest = hashlib.sha256(
+            json.dumps((1, 2), sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert parts[1] == args_digest
+
+
+@pytest.mark.skipif(not REDIS_AVAILABLE, reason="redis package is not installed")
+class TestRedisJsonEnvelope:
+    """Redis backend must never unpickle attacker-controlled cache entries."""
+
+    def test_json_round_trip(self, monkeypatch):
+        backend, _client = _make_redis_backend(monkeypatch)
+        backend.set("k", {"track": "song", "score": 9.5})
+        assert backend.get("k") == {"track": "song", "score": 9.5}
+
+    def test_bytes_round_trip(self, monkeypatch):
+        backend, _client = _make_redis_backend(monkeypatch)
+        backend.set("k", b"\x00binary\xff")
+        assert backend.get("k") == b"\x00binary\xff"
+
+    def test_dataframe_round_trip(self, monkeypatch):
+        pandas = pytest.importorskip("pandas")
+        backend, _client = _make_redis_backend(monkeypatch)
+        frame = pandas.DataFrame({"track": ["a", "b"], "score": [1, 2]})
+        backend.set("k", frame)
+        restored = backend.get("k")
+        pandas.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_pickle_payloads(self, monkeypatch):
+        backend, client = _make_redis_backend(monkeypatch)
+        client.store["evil"] = pickle.dumps({"rce": True})
+        assert backend.get("evil") is None
+        assert "evil" not in client.store
+
+    def test_rejects_tampered_signature(self, monkeypatch):
+        backend, client = _make_redis_backend(monkeypatch)
+        backend.set("k", {"ok": True})
+        envelope = json.loads(client.store["k"].decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        client.store["k"] = json.dumps(envelope).encode("utf-8")
+        assert backend.get("k") is None
+        assert "k" not in client.store
+
+    def test_rejects_unsupported_objects(self, monkeypatch):
+        backend, client = _make_redis_backend(monkeypatch)
+
+        class NotSerializable:
+            pass
+
+        backend.set("k", NotSerializable())
+        assert "k" not in client.store
+
+    def test_envelope_is_signed_json(self, monkeypatch):
+        import base64
+
+        backend, client = _make_redis_backend(monkeypatch)
+        backend.set("k", "value")
+        envelope = json.loads(client.store["k"].decode("utf-8"))
+        assert envelope["alg"] == CACHE_HMAC_ALG
+        inner = json.loads(base64.b64decode(envelope["payload"]).decode("utf-8"))
+        assert inner["kind"] == "json"
+        assert inner["data"] == "value"
+
