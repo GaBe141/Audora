@@ -20,6 +20,6 @@ def test_run_command_rejects_non_string_args():
 
 
 def test_allowed_demo_modes_match_cli_choices():
-    assert ALLOWED_DEMO_MODES == frozenset(
+    assert frozenset(
         {"statistical", "trending", "multi_source", "platform", "all"}
-    )
+    ) == ALLOWED_DEMO_MODES
