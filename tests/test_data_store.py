@@ -19,7 +19,11 @@ class TestDataStorePooling:
         assert len(data_store._connection_pool) == 0 or True  # pool may be empty after return
 
     def test_multiple_connections_then_close(self, temp_db_path):
-        store = EnhancedMusicDataStore(db_path=str(temp_db_path))
+        store = EnhancedMusicDataStore(
+            db_path=str(temp_db_path),
+            backup_dir=str(temp_db_path.parent / "backups"),
+            exports_dir=str(temp_db_path.parent / "exports"),
+        )
         with store.get_connection() as c1, store.get_connection() as c2:
             c1.execute("SELECT 1")
             c2.execute("SELECT 1")
@@ -107,3 +111,26 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportToCsv:
+    """CSV export must stay inside the configured exports directory."""
+
+    def test_export_to_csv_writes_under_exports_dir(self, data_store, sample_trends):
+        from pathlib import Path
+
+        data_store.save_trends_bulk(sample_trends)
+        exported = data_store.export_to_csv("trends", "trends.csv")
+        exported_path = Path(exported).resolve()
+        assert exported_path.is_relative_to(data_store.exports_dir.resolve())
+        assert exported_path.exists()
+
+    def test_export_to_csv_rejects_path_traversal(self, data_store, tmp_path, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        outside = tmp_path / "escaped.csv"
+        with pytest.raises(ValueError, match="exports"):
+            data_store.export_to_csv("trends", str(outside))
+
+    def test_export_to_csv_rejects_invalid_table(self, data_store):
+        with pytest.raises(ValueError, match="Invalid table"):
+            data_store.export_to_csv("trends; DROP TABLE trends --", "x.csv")
