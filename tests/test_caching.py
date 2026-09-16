@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +125,49 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisJsonSerialization:
+    """Redis cache values must use signed JSON envelopes, never pickle."""
+
+    def test_json_round_trip(self):
+        key = b"test-signing-key"
+        original = {"track": "Song", "score": 91, "tags": ["pop", "viral"]}
+        raw = serialize_cache_value(original, key)
+        envelope = json.loads(raw.decode("utf-8"))
+        assert envelope["t"] == "json"
+        assert "pickle" not in raw.decode("utf-8").lower()
+        assert deserialize_cache_value(raw, key) == original
+
+    def test_bytes_round_trip(self):
+        key = b"test-signing-key"
+        original = b"\x00binary\xffpayload"
+        restored = deserialize_cache_value(serialize_cache_value(original, key), key)
+        assert restored == original
+
+    def test_dataframe_round_trip(self):
+        key = b"test-signing-key"
+        original = pd.DataFrame({"track": ["A", "B"], "score": [1.5, 2.5]})
+        restored = deserialize_cache_value(serialize_cache_value(original, key), key)
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(original, restored, check_dtype=False)
+
+    def test_rejects_pickle_payloads(self):
+        key = b"test-signing-key"
+        pickled = pickle.dumps({"owned": True})
+        assert deserialize_cache_value(pickled, key) is None
+
+    def test_rejects_tampered_signature(self):
+        key = b"test-signing-key"
+        raw = serialize_cache_value({"ok": True}, key)
+        envelope = json.loads(raw.decode("utf-8"))
+        envelope["d"] = {"ok": False}
+        tampered = json.dumps(envelope).encode("utf-8")
+        assert deserialize_cache_value(tampered, key) is None
+
+    def test_rejects_unsupported_objects(self):
+        class Custom:
+            pass
+
+        with pytest.raises(TypeError):
+            serialize_cache_value(Custom(), b"test-signing-key")
