@@ -4,13 +4,14 @@ from gui.app import ALLOWED_DEMO_MODES, _run_command
 
 
 def test_allowed_demo_modes_match_cli_choices():
-    assert ALLOWED_DEMO_MODES == {
+    expected = {
         "statistical",
         "trending",
         "multi_source",
         "platform",
         "all",
     }
+    assert expected == ALLOWED_DEMO_MODES
 
 
 def test_run_command_rejects_non_list_payloads():

@@ -8,8 +8,8 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
 import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -574,14 +574,17 @@ System status: {{ system_status }}
                             msg.attach(attachment)
 
             # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
-
-            if email_config.get("use_tls", True):
-                server.starttls(context=ssl.create_default_context())
-            elif email_config.get("username") and email_config.get("password"):
+            use_tls = email_config.get("use_tls", True)
+            has_auth = bool(email_config.get("username") and email_config.get("password"))
+            if has_auth and not use_tls:
                 raise ValueError("Refusing SMTP authentication without TLS")
 
-            if email_config.get("username") and email_config.get("password"):
+            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+
+            if use_tls:
+                server.starttls(context=ssl.create_default_context())
+
+            if has_auth:
                 server.login(email_config["username"], email_config["password"])
 
             server.send_message(msg)
