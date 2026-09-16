@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
+from pathlib import Path
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +126,108 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"b": 3})
+        parts = key.split(":")
+        assert parts[0] == "fn"
+        assert all(len(part) == 64 for part in parts[1:])
+
+
+class FakeRedisClient:
+    """Minimal in-memory stand-in for redis.Redis used by RedisCacheBackend tests."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, bytes] = {}
+        self.deleted: list[str] = []
+
+    def get(self, key: str):
+        return self.store.get(key)
+
+    def set(self, key: str, value: bytes) -> None:
+        self.store[key] = value
+
+    def setex(self, key: str, ttl: int, value: bytes) -> None:
+        self.store[key] = value
+
+    def delete(self, key: str) -> None:
+        self.deleted.append(key)
+        self.store.pop(key, None)
+
+
+def _make_redis_backend(signing_key: bytes = b"unit-test-signing-key") -> RedisCacheBackend:
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = signing_key
+    backend._client = FakeRedisClient()
+    return backend
+
+
+class TestRedisJsonEnvelope:
+    """Redis backend must never pickle and must reject tampered/legacy payloads."""
+
+    def test_json_roundtrip(self):
+        backend = _make_redis_backend()
+        backend.set("k", {"track": "Song", "score": 12})
+        assert backend.get("k") == {"track": "Song", "score": 12}
+
+    def test_bytes_roundtrip(self):
+        backend = _make_redis_backend()
+        backend.set("k", b"raw-bytes")
+        assert backend.get("k") == b"raw-bytes"
+
+    def test_dataframe_roundtrip(self):
+        backend = _make_redis_backend()
+        df = pd.DataFrame({"track": ["a", "b"], "score": [1, 2]})
+        backend.set("k", df)
+        got = backend.get("k")
+        assert got is not None
+        pd.testing.assert_frame_equal(df, got, check_dtype=False)
+
+    def test_rejects_unsupported_objects(self):
+        backend = _make_redis_backend()
+
+        class NotSerializable:
+            pass
+
+        backend.set("k", NotSerializable())
+        assert backend._client.store == {}
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = _make_redis_backend()
+        backend._client.store["k"] = b"\x80\x04\x95\x07\x00\x00\x00\x00\x00\x00\x00\x8c\x03rce\x94."
+        assert backend.get("k") is None
+        assert "k" in backend._client.deleted
+
+    def test_rejects_tampered_signature(self):
+        backend = _make_redis_backend()
+        backend.set("k", {"ok": True})
+        envelope = json.loads(backend._client.store["k"])
+        envelope["sig"] = "00" * 32
+        backend._client.store["k"] = json.dumps(envelope).encode("utf-8")
+        assert backend.get("k") is None
+        assert "k" in backend._client.deleted
+
+    def test_rejects_wrong_signing_key(self):
+        writer = _make_redis_backend(b"writer-key")
+        writer.set("k", {"ok": True})
+        reader = _make_redis_backend(b"reader-key")
+        reader._client = writer._client
+        assert reader.get("k") is None
+
+    def test_envelope_is_signed_json_not_pickle(self):
+        backend = _make_redis_backend()
+        backend.set("k", {"ok": True})
+        raw = backend._client.store["k"]
+        envelope = json.loads(raw)
+        body = base64.b64decode(envelope["body"])
+        expected = hmac.new(backend._signing_key, body, hashlib.sha256).hexdigest()
+        assert envelope["alg"] == "HMAC-SHA256"
+        assert envelope["sig"] == expected
+        assert json.loads(body.decode("utf-8"))["kind"] == "json"
+
+    def test_source_does_not_use_pickle(self):
+        source = Path("core/caching.py").read_text(encoding="utf-8")
+        assert "import pickle" not in source
+        assert "pickle.loads" not in source
+        assert "pickle.dumps" not in source
+        assert "hashlib.md5" not in source

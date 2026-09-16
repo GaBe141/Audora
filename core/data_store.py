@@ -74,10 +74,17 @@ class EnhancedMusicDataStore:
         "is_active",
     }
 
-    def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
+    def __init__(
+        self,
+        db_path: str = "enhanced_music_trends.db",
+        backup_dir: str = "backups",
+        exports_dir: str = "exports",
+    ):
         self.db_path = db_path
         self.backup_dir = Path(backup_dir)
         self.backup_dir.mkdir(exist_ok=True)
+        self.exports_dir = Path(exports_dir)
+        self.exports_dir.mkdir(exist_ok=True)
         self.logger = logging.getLogger(__name__)
 
         # Initialize cache
@@ -944,6 +951,15 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        exports_root = self.exports_dir.resolve()
+        exports_root.mkdir(parents=True, exist_ok=True)
+        requested = Path(filepath)
+        target = requested if requested.is_absolute() else (exports_root / requested)
+        resolved_path = target.resolve()
+        if not resolved_path.is_relative_to(exports_root):
+            raise ValueError("CSV exports must be written under the exports/ directory")
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -958,13 +974,10 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(resolved_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {resolved_path}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(resolved_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
