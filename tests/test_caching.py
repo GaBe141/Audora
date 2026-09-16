@@ -1,12 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+from unittest.mock import MagicMock
 
+import pandas as pd
 import pytest
 
-from core.caching import (
-    LocalCacheBackend,
-)
+from core.caching import LocalCacheBackend, RedisCacheBackend
 
 
 class TestLocalCacheBackend:
@@ -126,10 +128,6 @@ class TestRedisSafeSerialization:
     """Redis payloads must be versioned JSON, never pickle."""
 
     def _backend(self):
-        from unittest.mock import MagicMock
-
-        from core.caching import RedisCacheBackend
-
         backend = RedisCacheBackend.__new__(RedisCacheBackend)
         backend._client = MagicMock()
         return backend
@@ -153,8 +151,6 @@ class TestRedisSafeSerialization:
         assert backend._deserialize(payload) == b"raw-bytes"
 
     def test_dataframe_roundtrip(self):
-        import pandas as pd
-
         backend = self._backend()
         frame = pd.DataFrame({"track": ["a"], "score": [1.5]})
         restored = backend._deserialize(backend._serialize(frame))
@@ -162,16 +158,12 @@ class TestRedisSafeSerialization:
         assert restored.iloc[0]["track"] == "a"
 
     def test_rejects_pickle_payload_and_evicts(self):
-        import pickle
-
         backend = self._backend()
         backend._client.get.return_value = pickle.dumps({"owned": True})
         assert backend.get("poison") is None
         backend._client.delete.assert_called_once_with("poison")
 
     def test_rejects_legacy_signed_pickle_envelope(self):
-        import json
-
         backend = self._backend()
         legacy = json.dumps(
             {"v": 1, "alg": "HMAC-SHA256", "sig": "abc", "payload": "AAAA"}

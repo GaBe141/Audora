@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -113,8 +115,6 @@ class TestExportPathConfinement:
     """CSV export must not write outside the exports directory."""
 
     def test_export_to_csv_confines_path_to_exports(self, data_store, sample_trends, tmp_path, monkeypatch):
-        from pathlib import Path
-
         monkeypatch.chdir(tmp_path)
         data_store.save_trends_bulk(sample_trends)
         result = data_store.export_to_csv("trends", "../../secret.csv")
