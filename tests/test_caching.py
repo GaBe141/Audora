@@ -118,3 +118,119 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class _FakeRedis:
+    """Minimal Redis stand-in for serialization tests."""
+
+    def __init__(self) -> None:
+        self.store: dict[bytes | str, bytes] = {}
+
+    def ping(self) -> bool:
+        return True
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def set(self, key, value):
+        self.store[key] = value
+
+    def setex(self, key, ttl, value):
+        self.store[key] = value
+
+    def delete(self, key):
+        self.store.pop(key, None)
+
+    def exists(self, key):
+        return int(key in self.store)
+
+    def flushdb(self):
+        self.store.clear()
+
+
+def _make_redis_backend(signing_key: bytes = b"unit-test-signing-key"):
+    from core.caching import RedisCacheBackend
+
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = signing_key
+    backend._client = _FakeRedis()
+    return backend
+
+
+class TestRedisJsonSerialization:
+    """Redis backend must never pickle; signed JSON envelopes only."""
+
+    def test_json_roundtrip(self):
+        backend = _make_redis_backend()
+        backend.set("k", {"track": "Song", "score": 91})
+        assert backend.get("k") == {"track": "Song", "score": 91}
+
+    def test_bytes_roundtrip(self):
+        backend = _make_redis_backend()
+        backend.set("k", b"binary-cache")
+        assert backend.get("k") == b"binary-cache"
+
+    def test_dataframe_roundtrip(self):
+        import pandas as pd
+
+        backend = _make_redis_backend()
+        frame = pd.DataFrame({"track": ["A"], "score": [80.5]})
+        backend.set("k", frame)
+        loaded = backend.get("k")
+        assert list(loaded.columns) == ["track", "score"]
+        assert loaded.iloc[0]["track"] == "A"
+        assert loaded.iloc[0]["score"] == 80.5
+
+    def test_json_null_roundtrip(self):
+        backend = _make_redis_backend()
+        backend.set("k", None)
+        # Distinguishes a stored JSON null from a missing key by exists()
+        assert backend.exists("k")
+        assert backend.get("k") is None
+
+    def test_rejects_legacy_pickle_payload(self):
+        import base64
+        import hashlib
+        import hmac
+        import json
+        import pickle
+
+        backend = _make_redis_backend()
+        pickled = pickle.dumps({"pwn": True})
+        signature = hmac.new(backend._signing_key, pickled, hashlib.sha256).hexdigest()
+        envelope = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": signature,
+                "payload": base64.b64encode(pickled).decode("ascii"),
+            }
+        ).encode("utf-8")
+        backend._client.set("poison", envelope)
+        assert backend.get("poison") is None
+        assert "poison" not in backend._client.store
+
+    def test_rejects_tampered_signature(self):
+        import json
+
+        backend = _make_redis_backend()
+        backend.set("k", {"ok": True})
+        raw = backend._client.get("k")
+        envelope = json.loads(raw)
+        envelope["sig"] = "0" * 64
+        backend._client.set("k", json.dumps(envelope).encode("utf-8"))
+        assert backend.get("k") is None
+        assert "k" not in backend._client.store
+
+    def test_rejects_unsupported_object_type(self):
+        backend = _make_redis_backend()
+        backend.set("k", object())
+        assert backend.get("k") is None
+
+    def test_cache_keys_use_sha256_not_md5(self, mock_cache):
+        import hashlib
+
+        key = mock_cache._build_cache_key("fn", (1, 2), {"b": 3})
+        assert hashlib.md5(b"not-used").hexdigest() not in key
+        assert all(len(part) == 64 for part in key.split(":")[1:])
+
