@@ -8,8 +8,9 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -17,6 +18,7 @@ from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from enum import Enum
+from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -197,7 +199,7 @@ class EnhancedNotificationService:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -211,18 +213,18 @@ class EnhancedNotificationService:
             "on",
         }
 
+    def _normalize_ip(self, ip: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+        """Unwrap IPv4-mapped IPv6 addresses so private ranges cannot be hidden."""
+        parsed = ipaddress.ip_address(ip)
+        if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
+            return parsed.ipv4_mapped
+        return parsed
+
     def _is_restricted_ip(self, ip: str) -> bool:
-        """Return True when the IP belongs to a non-public range."""
+        """Return True when the IP is not globally routable (private, loopback, CGNAT, etc.)."""
         try:
-            parsed = ipaddress.ip_address(ip)
-            return (
-                parsed.is_private
-                or parsed.is_loopback
-                or parsed.is_link_local
-                or parsed.is_multicast
-                or parsed.is_reserved
-                or parsed.is_unspecified
-            )
+            parsed = self._normalize_ip(ip)
+            return not parsed.is_global
         except ValueError:
             return True
 
@@ -233,9 +235,12 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
 
         hostname = parsed.hostname
-        if hostname.lower() == "localhost":
+        hostname_l = hostname.lower().rstrip(".")
+        if hostname_l == "localhost" or hostname_l.endswith(".localhost"):
             raise ValueError("Localhost webhook URLs are not allowed")
 
         resolved_ips = set()
@@ -254,6 +259,16 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _is_safe_attachment_path(self, attachment_path: str) -> bool:
+        """Allow attachments only when they resolve inside the project root."""
+        project_root = Path(__file__).resolve().parent.parent
+        try:
+            resolved = Path(attachment_path).expanduser().resolve()
+            resolved.relative_to(project_root)
+        except (OSError, ValueError):
+            return False
+        return resolved.is_file()
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -530,6 +545,13 @@ System status: {{ system_status }}
         if not email_config.get("smtp_server") or not email_config.get("recipients"):
             return {"success": False, "error": "Email not configured"}
 
+        if (
+            email_config.get("username")
+            and email_config.get("password")
+            and not email_config.get("use_tls", True)
+        ):
+            return {"success": False, "error": "SMTP authentication requires TLS"}
+
         try:
             msg = MIMEMultipart("alternative")
             msg["From"] = email_config.get("from_address", "music-discovery@example.com")
@@ -552,29 +574,33 @@ System status: {{ system_status }}
 
             msg.attach(MIMEText(text_content, "plain"))
 
-            # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            # Add HTML version if available (escape untrusted template output)
+            html_content = escape(text_content).replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
             # Add attachments
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    if not self._is_safe_attachment_path(attachment_path):
+                        self.logger.warning(
+                            "Skipped attachment outside project root: %s", attachment_path
+                        )
+                        continue
+                    with Path(attachment_path).open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {Path(attachment_path).name}",
+                        )
+                        msg.attach(attachment)
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
             if email_config.get("use_tls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -650,8 +676,16 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url, json=slack_message, allow_redirects=False
+                ) as response,
             ):
+                if 300 <= response.status < 400:
+                    self.logger.error("Slack notification redirect rejected: %s", response.status)
+                    return {
+                        "success": False,
+                        "error": f"Redirect rejected: HTTP {response.status}",
+                    }
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -717,8 +751,18 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url, json=discord_message, allow_redirects=False
+                ) as response,
             ):
+                if 300 <= response.status < 400:
+                    self.logger.error(
+                        "Discord notification redirect rejected: %s", response.status
+                    )
+                    return {
+                        "success": False,
+                        "error": f"Redirect rejected: HTTP {response.status}",
+                    }
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -777,9 +821,19 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
+                if 300 <= response.status < 400:
+                    self.logger.error("Webhook notification redirect rejected: %s", response.status)
+                    return {
+                        "success": False,
+                        "error": f"Redirect rejected: HTTP {response.status}",
+                    }
                 if 200 <= response.status < 300:
                     self.logger.info(f"Webhook notification sent successfully: {response.status}")
                     return {"success": True, "status_code": response.status}
