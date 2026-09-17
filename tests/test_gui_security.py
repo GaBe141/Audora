@@ -1,9 +1,14 @@
 """Security tests for GUI subprocess allowlisting."""
 
+import importlib
 import sys
 from pathlib import Path
 
-from gui.app import ALLOWED_DEMO_MODES, PROJECT_ROOT, _run_command, run_action
+gui_app = importlib.import_module("gui.app")
+ALLOWED_DEMO_MODES = gui_app.ALLOWED_DEMO_MODES
+PROJECT_ROOT = gui_app.PROJECT_ROOT
+_run_command = gui_app._run_command
+run_action = gui_app.run_action
 
 
 def test_run_command_rejects_non_main_payload():
@@ -19,20 +24,21 @@ def test_run_command_rejects_non_string_arguments():
 
 
 def test_demo_modes_are_strictly_allowlisted():
-    assert ALLOWED_DEMO_MODES == {
+    expected_modes = {
         "statistical",
         "trending",
         "multi_source",
         "platform",
         "all",
     }
+    assert expected_modes == ALLOWED_DEMO_MODES
 
 
 def test_run_action_rejects_unknown_demo_mode(monkeypatch):
     class _Triggered:
         triggered_id = "btn-demo"
 
-    monkeypatch.setattr("gui.app.ctx", _Triggered)
+    monkeypatch.setattr(gui_app, "ctx", _Triggered())
     status, output = run_action(1, 1, 0, 0, "not-a-real-demo; rm -rf /")
     assert status == "Error"
     assert output == "Invalid demo mode"
@@ -48,8 +54,8 @@ def test_run_action_allowlisted_demo_invokes_main(monkeypatch):
     class _Triggered:
         triggered_id = "btn-demo"
 
-    monkeypatch.setattr("gui.app.ctx", _Triggered)
-    monkeypatch.setattr("gui.app._run_command", _fake_run)
+    monkeypatch.setattr(gui_app, "ctx", _Triggered())
+    monkeypatch.setattr(gui_app, "_run_command", _fake_run)
     status, output = run_action(0, 1, 0, 0, "statistical")
     assert status == "Done (exit 0)"
     assert captured["args"] == [
