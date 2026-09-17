@@ -1,9 +1,19 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+from unittest.mock import MagicMock
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +128,70 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_keys_use_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1,), {"b": 2})
+        assert "md5" not in key
+        # two SHA-256 hex digests plus prefix
+        parts = key.split(":")
+        assert parts[0] == "fn"
+        assert all(len(part) == 64 for part in parts[1:])
+
+
+class TestRedisSafeSerialization:
+    """Redis backend must never pickle; only signed JSON envelopes are accepted."""
+
+    def _backend(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        backend._client = MagicMock()
+        return backend
+
+    def test_json_roundtrip(self):
+        backend = self._backend()
+        payload = backend._serialize({"track": "Song", "score": 91})
+        assert b"pickle" not in payload
+        assert backend._deserialize(payload) == {"track": "Song", "score": 91}
+
+    def test_bytes_roundtrip(self):
+        backend = self._backend()
+        payload = backend._serialize(b"binary-cache")
+        assert backend._deserialize(payload) == b"binary-cache"
+
+    def test_dataframe_roundtrip(self):
+        backend = self._backend()
+        frame = pd.DataFrame({"track": ["a", "b"], "score": [1.5, 2.5]})
+        restored = backend._deserialize(backend._serialize(frame))
+        assert restored is not None
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = self._backend()
+        pickled = pickle.dumps({"pwn": True})
+        signature = hmac.new(backend._signing_key, pickled, hashlib.sha256).hexdigest()
+        legacy = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": signature,
+                "payload": base64.b64encode(pickled).decode("ascii"),
+            }
+        ).encode("utf-8")
+        assert backend._deserialize(legacy) is None
+
+    def test_rejects_tampered_signature(self):
+        backend = self._backend()
+        envelope = json.loads(backend._serialize({"ok": True}))
+        envelope["sig"] = "0" * 64
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = self._backend()
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            backend._serialize(object())
+
+    def test_get_deletes_invalid_payload(self):
+        backend = self._backend()
+        backend._client.get.return_value = b"not-json"
+        assert backend.get("audora:bad") is None
+        backend._client.delete.assert_called_once_with("audora:bad")
