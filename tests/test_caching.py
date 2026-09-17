@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,88 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class _FakeRedis:
+    """Minimal in-memory Redis stand-in for serialization tests."""
+
+    def __init__(self) -> None:
+        self.store: dict[bytes | str, bytes] = {}
+
+    def ping(self) -> bool:
+        return True
+
+    def get(self, key: str) -> bytes | None:
+        return self.store.get(key)
+
+    def set(self, key: str, value: bytes) -> None:
+        self.store[key] = value
+
+    def setex(self, key: str, ttl: int, value: bytes) -> None:
+        self.store[key] = value
+
+    def delete(self, key: str) -> None:
+        self.store.pop(key, None)
+
+    def exists(self, key: str) -> int:
+        return 1 if key in self.store else 0
+
+    def flushdb(self) -> None:
+        self.store.clear()
+
+
+def _make_redis_backend() -> RedisCacheBackend:
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = b"unit-test-signing-key"
+    backend._client = _FakeRedis()
+    return backend
+
+
+class TestRedisJsonSerialization:
+    """Redis backend must never pickle; only signed JSON envelopes are accepted."""
+
+    def test_json_roundtrip(self):
+        backend = _make_redis_backend()
+        payload = {"track": "Song", "score": 91.5, "tags": ["pop", "new"]}
+        backend.set("k", payload)
+        assert backend.get("k") == payload
+        raw = backend._client.get("k")
+        assert raw is not None
+        assert b"pickle" not in raw.lower()
+        assert b'"kind":"json"' in raw or b'"kind": "json"' in raw
+
+    def test_bytes_roundtrip(self):
+        backend = _make_redis_backend()
+        backend.set("k", b"\x00secret\xff")
+        assert backend.get("k") == b"\x00secret\xff"
+
+    def test_dataframe_roundtrip(self):
+        backend = _make_redis_backend()
+        frame = pd.DataFrame({"track": ["a", "b"], "score": [1.0, 2.0]})
+        backend.set("k", frame)
+        restored = backend.get("k")
+        assert restored is not None
+        pd.testing.assert_frame_equal(
+            restored.reset_index(drop=True), frame, check_dtype=False
+        )
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = _make_redis_backend()
+        backend._client.set("k", pickle.dumps({"owned": True}))
+        assert backend.get("k") is None
+        assert backend._client.get("k") is None
+
+    def test_rejects_tampered_signature(self):
+        backend = _make_redis_backend()
+        backend.set("k", {"ok": True})
+        raw = json.loads(backend._client.get("k"))
+        raw["sig"] = "0" * 64
+        backend._client.set("k", json.dumps(raw).encode("utf-8"))
+        assert backend.get("k") is None
+        assert backend._client.get("k") is None
+
+    def test_skips_unsupported_objects(self):
+        backend = _make_redis_backend()
+        backend.set("k", object())
+        assert backend.get("k") is None
+        assert backend._client.get("k") is None
