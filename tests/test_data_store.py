@@ -107,3 +107,17 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+    def test_update_trends_bulk_serializes_metadata(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        updated = data_store.update_trends_bulk(
+            [sample_trends[0].track_id], {"metadata": {"views": 9}}
+        )
+        assert updated >= 1
+        with data_store.get_connection() as conn:
+            row = conn.execute(
+                "SELECT metadata FROM trends WHERE track_id = ?",
+                (sample_trends[0].track_id,),
+            ).fetchone()
+            assert row is not None
+            assert '"views": 9' in row[0] or '"views":9' in row[0]
