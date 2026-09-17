@@ -3,7 +3,7 @@
 import sys
 from pathlib import Path
 
-from gui.app import PROJECT_ROOT, _ALLOWED_DEMO_MODES, _run_command
+from gui.app import _ALLOWED_DEMO_MODES, PROJECT_ROOT, _run_command
 
 
 def test_run_command_rejects_non_list_payload():
