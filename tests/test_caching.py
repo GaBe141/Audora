@@ -118,3 +118,9 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ("a",), {"b": 1})
+        digest_parts = key.split(":")[1:]
+        assert digest_parts
+        assert all(len(part) == 64 for part in digest_parts)
