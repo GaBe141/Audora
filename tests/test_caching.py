@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +125,54 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedJsonCacheSerialization:
+    """Redis cache payloads must be signed JSON, never pickle."""
+
+    def test_json_value_round_trip(self):
+        signing_key = b"test-cache-signing-key"
+        original = {"track": "Song", "score": 91.5, "tags": ["pop", "viral"]}
+        restored = deserialize_cache_value(serialize_cache_value(original, signing_key), signing_key)
+        assert restored == original
+
+    def test_bytes_value_round_trip(self):
+        signing_key = b"test-cache-signing-key"
+        original = b"\x00binary-cache-payload\xff"
+        restored = deserialize_cache_value(serialize_cache_value(original, signing_key), signing_key)
+        assert restored == original
+
+    def test_dataframe_round_trip(self):
+        signing_key = b"test-cache-signing-key"
+        original = pd.DataFrame({"track_name": ["A", "B"], "score": [10.5, 20.25]})
+        restored = deserialize_cache_value(serialize_cache_value(original, signing_key), signing_key)
+        pd.testing.assert_frame_equal(original, restored, check_dtype=False)
+
+    def test_rejects_legacy_pickle_payload(self):
+        signing_key = b"test-cache-signing-key"
+        with pytest.raises(ValueError, match="invalid serialization envelope"):
+            deserialize_cache_value(pickle.dumps({"owned": True}), signing_key)
+
+    def test_rejects_tampered_signature(self):
+        signing_key = b"test-cache-signing-key"
+        raw = serialize_cache_value({"ok": True}, signing_key)
+        envelope = json.loads(raw.decode("utf-8"))
+        envelope["payload"] = {"ok": False}
+        tampered = json.dumps(envelope).encode("utf-8")
+        with pytest.raises(ValueError, match="invalid signature"):
+            deserialize_cache_value(tampered, signing_key)
+
+    def test_rejects_unsupported_object(self):
+        class NotSerializable:
+            pass
+
+        with pytest.raises(TypeError):
+            serialize_cache_value(NotSerializable(), b"test-cache-signing-key")
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"a": "b"})
+        parts = key.split(":")
+        assert parts[0] == "fn"
+        assert len(parts[1]) == 64
+        assert len(parts[2]) == 64
+        assert all(c in "0123456789abcdef" for c in parts[1] + parts[2])
