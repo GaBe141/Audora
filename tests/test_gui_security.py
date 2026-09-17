@@ -1,10 +1,8 @@
 """Security tests for GUI command allowlisting."""
 
 import sys
-from types import SimpleNamespace
 
-import gui.app as gui_module
-from gui.app import _ALLOWED_DEMO_MODES, _MAIN_PY, _run_command, run_action
+from gui.app import _ALLOWED_DEMO_MODES, _MAIN_PY, _run_command, _run_demo
 
 
 class TestGuiCommandAllowlist:
@@ -36,8 +34,12 @@ class TestGuiCommandAllowlist:
             "all",
         }
 
-    def test_run_action_rejects_unknown_demo(self, monkeypatch):
-        monkeypatch.setattr(gui_module, "ctx", SimpleNamespace(triggered_id="btn-demo"))
-        status, output = run_action(1, 1, 0, 0, "rm -rf /")
+    def test_run_demo_rejects_unknown_mode(self):
+        status, output = _run_demo("rm -rf /")
+        assert status == "Error"
+        assert "Invalid demo mode" in output
+
+    def test_run_demo_rejects_none(self):
+        status, output = _run_demo(None)
         assert status == "Error"
         assert "Invalid demo mode" in output

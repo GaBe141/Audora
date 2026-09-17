@@ -387,6 +387,13 @@ def _run_command(args: list[str]) -> tuple[str, str]:
         return "Error", str(e)
 
 
+def _run_demo(demo_value: str | None) -> tuple[str, str]:
+    """Run an allowlisted demo mode through main.py."""
+    if demo_value not in _ALLOWED_DEMO_MODES:
+        return "Error", "Invalid demo mode"
+    return _run_command([sys.executable, str(_MAIN_PY), "--demo", demo_value])
+
+
 def _get_data_store():
     """Return an EnhancedMusicDataStore pointed at the default DB path."""
     db_path = PROJECT_ROOT / "data" / "enhanced_music_trends.db"
@@ -418,9 +425,7 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
-        if demo_value not in _ALLOWED_DEMO_MODES:
-            return "Error", "Invalid demo mode"
-        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
+        return _run_demo(demo_value)
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
     if triggered == "btn-validate":
