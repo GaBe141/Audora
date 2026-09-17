@@ -26,13 +26,8 @@ class TestGuiCommandAllowlist:
         assert "main.py" in output
 
     def test_allowed_demo_modes_match_cli(self):
-        assert _ALLOWED_DEMO_MODES == {
-            "statistical",
-            "trending",
-            "multi_source",
-            "platform",
-            "all",
-        }
+        expected = {"statistical", "trending", "multi_source", "platform", "all"}
+        assert expected == _ALLOWED_DEMO_MODES
 
     def test_run_demo_rejects_unknown_mode(self):
         status, output = _run_demo("rm -rf /")
