@@ -2,6 +2,8 @@
 
 import time
 
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
 )
@@ -118,3 +120,73 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheKeyHashing:
+    """Cache keys must use SHA-256, not MD5."""
+
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", (1, 2), {"a": "b"})
+        parts = key.split(":")
+        assert parts[0] == "prefix"
+        assert all(len(part) == 64 for part in parts[1:])
+
+
+class TestRedisJsonSerialization:
+    """Redis cache must use signed JSON envelopes instead of pickle."""
+
+    def _backend(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from core.caching import RedisCacheBackend
+
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "unit-test-signing-key")
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._password = None
+        backend._signing_key = b"unit-test-signing-key"
+        backend._client = MagicMock()
+        return backend
+
+    def test_json_round_trip(self, monkeypatch):
+        backend = self._backend(monkeypatch)
+        payload = {"track": "Song", "score": 91}
+        serialized = backend._serialize(payload)
+        assert backend._deserialize(serialized) == payload
+        assert b"pickle" not in serialized
+
+    def test_bytes_round_trip(self, monkeypatch):
+        backend = self._backend(monkeypatch)
+        payload = b"\x00secret-bytes\xff"
+        assert backend._deserialize(backend._serialize(payload)) == payload
+
+    def test_dataframe_round_trip(self, monkeypatch):
+        import pandas as pd
+
+        backend = self._backend(monkeypatch)
+        frame = pd.DataFrame({"track": ["a", "b"], "score": [1.5, 2.5]})
+        restored = backend._deserialize(backend._serialize(frame))
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_legacy_pickle_payload(self, monkeypatch):
+        import pickle
+
+        backend = self._backend(monkeypatch)
+        backend._client.get.return_value = pickle.dumps({"owned": True})
+        assert backend.get("k") is None
+        backend._client.delete.assert_called_once_with("k")
+
+    def test_rejects_tampered_signature(self, monkeypatch):
+        import json
+
+        backend = self._backend(monkeypatch)
+        envelope = json.loads(backend._serialize({"ok": True}))
+        envelope["sig"] = "0" * 64
+        backend._client.get.return_value = json.dumps(envelope).encode("utf-8")
+        assert backend.get("k") is None
+        backend._client.delete.assert_called_once_with("k")
+
+    def test_rejects_unsupported_objects(self, monkeypatch):
+        backend = self._backend(monkeypatch)
+        with pytest.raises(TypeError):
+            backend._serialize(object())
+
