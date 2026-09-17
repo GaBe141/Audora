@@ -324,7 +324,10 @@ class TestSmtpTransportSecurity:
             attachments=[str(secret)],
         )
         with patch("core.notification_service.smtplib.SMTP", FakeSMTP):
-            result = asyncio.run(svc._send_email(message))
+            try:
+                result = asyncio.run(svc._send_email(message))
+            finally:
+                secret.unlink(missing_ok=True)
         assert result["success"] is True
         assert isinstance(captured["msg"], MIMEMultipart)
         filenames = [
