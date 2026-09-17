@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+import json
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,15 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+    def test_update_trends_bulk_serializes_metadata(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        track_id = sample_trends[0].track_id
+        updated = data_store.update_trends_bulk([track_id], {"metadata": {"source": "bulk"}})
+        assert updated >= 1
+        with data_store.get_connection() as conn:
+            row = conn.execute(
+                "SELECT metadata FROM trends WHERE track_id = ?", (track_id,)
+            ).fetchone()
+            assert row is not None
+            assert json.loads(row[0])["source"] == "bulk"
