@@ -1,0 +1,41 @@
+"""Security tests for GUI command allowlisting."""
+
+import sys
+
+from gui.app import _ALLOWED_DEMO_MODES, _MAIN_PY, _run_command, run_action
+
+
+class TestGuiCommandAllowlist:
+    """GUI subprocess helpers must only run allowlisted main.py invocations."""
+
+    def test_rejects_non_list_payload(self):
+        status, output = _run_command("python -c 'print(1)'")  # type: ignore[arg-type]
+        assert status == "Error"
+        assert "Invalid command payload" in output
+
+    def test_rejects_non_current_interpreter(self):
+        status, output = _run_command(["/usr/bin/python3", str(_MAIN_PY), "--setup"])
+        assert status == "Error"
+        assert "interpreter" in output
+
+    def test_rejects_non_main_script(self, tmp_path):
+        decoy = tmp_path / "evil.py"
+        decoy.write_text("print('owned')\n", encoding="utf-8")
+        status, output = _run_command([sys.executable, str(decoy)])
+        assert status == "Error"
+        assert "main.py" in output
+
+    def test_allowed_demo_modes_match_cli(self):
+        assert _ALLOWED_DEMO_MODES == {
+            "statistical",
+            "trending",
+            "multi_source",
+            "platform",
+            "all",
+        }
+
+    def test_run_action_rejects_unknown_demo(self, monkeypatch):
+        monkeypatch.setattr("gui.app.ctx", type("Ctx", (), {"triggered_id": "btn-demo"})())
+        status, output = run_action(1, 1, 0, 0, "rm -rf /")
+        assert status == "Error"
+        assert "Invalid demo mode" in output
