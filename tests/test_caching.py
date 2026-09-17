@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +126,60 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        cache_key = mock_cache._build_cache_key("fn", (1, 2), {"a": "b"})
+        args_digest = hashlib.sha256(
+            json.dumps((1, 2), sort_keys=True, default=str).encode()
+        ).hexdigest()
+        kwargs_digest = hashlib.sha256(
+            json.dumps({"a": "b"}, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert cache_key == f"fn:{args_digest}:{kwargs_digest}"
+        assert len(args_digest) == 64
+
+
+class TestSignedJsonCacheEnvelope:
+    """Redis-safe serialization must never pickle or execute attacker payloads."""
+
+    _KEY = b"unit-test-cache-signing-key"
+
+    def test_json_roundtrip(self):
+        payload = {"track": "Song", "score": 91, "tags": ["pop", "viral"]}
+        raw = serialize_cache_value(self._KEY, payload)
+        assert b"pickle" not in raw
+        assert deserialize_cache_value(self._KEY, raw) == payload
+
+    def test_bytes_roundtrip(self):
+        raw = serialize_cache_value(self._KEY, b"binary-cache-value")
+        assert deserialize_cache_value(self._KEY, raw) == b"binary-cache-value"
+
+    def test_dataframe_roundtrip(self):
+        frame = pd.DataFrame({"track": ["A", "B"], "score": [1.5, 2.5]})
+        raw = serialize_cache_value(self._KEY, frame)
+        restored = deserialize_cache_value(self._KEY, raw)
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_pickle_payload(self):
+        pickle_blob = pickle.dumps({"owned": True})
+        with pytest.raises(ValueError):
+            deserialize_cache_value(self._KEY, pickle_blob)
+
+    def test_rejects_tampered_signature(self):
+        raw = serialize_cache_value(self._KEY, {"a": 1})
+        envelope = json.loads(raw.decode("utf-8"))
+        envelope["payload"] = {"a": 2}
+        with pytest.raises(ValueError, match="signature"):
+            deserialize_cache_value(self._KEY, json.dumps(envelope).encode("utf-8"))
+
+    def test_rejects_wrong_signing_key(self):
+        raw = serialize_cache_value(self._KEY, {"a": 1})
+        with pytest.raises(ValueError, match="signature"):
+            deserialize_cache_value(b"other-signing-key", raw)
+
+    def test_rejects_unsupported_objects(self):
+        class NotSerializable:
+            pass
+
+        with pytest.raises(TypeError):
+            serialize_cache_value(self._KEY, NotSerializable())
