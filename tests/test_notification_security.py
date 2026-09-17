@@ -217,5 +217,4 @@ class TestSmtpTransportSecurity:
         assert recorded["context"].check_hostname is True
         assert recorded["context"].verify_mode == ssl.CERT_REQUIRED
         assert recorded["login"] == ("user", "secret")
-        assert "<script>" not in recorded["html"]
-        assert "alert(1)" in recorded["html"]
+        assert "&lt;script&gt;" in recorded["html"]

@@ -1,7 +1,9 @@
 """Security tests for GUI command allowlisting."""
 
 import sys
+from types import SimpleNamespace
 
+import gui.app as gui_module
 from gui.app import _ALLOWED_DEMO_MODES, _MAIN_PY, _run_command, run_action
 
 
@@ -14,7 +16,7 @@ class TestGuiCommandAllowlist:
         assert "Invalid command payload" in output
 
     def test_rejects_non_current_interpreter(self):
-        status, output = _run_command(["/usr/bin/python3", str(_MAIN_PY), "--setup"])
+        status, output = _run_command(["/bin/echo", str(_MAIN_PY), "--setup"])
         assert status == "Error"
         assert "interpreter" in output
 
@@ -35,7 +37,7 @@ class TestGuiCommandAllowlist:
         }
 
     def test_run_action_rejects_unknown_demo(self, monkeypatch):
-        monkeypatch.setattr("gui.app.ctx", type("Ctx", (), {"triggered_id": "btn-demo"})())
+        monkeypatch.setattr(gui_module, "ctx", SimpleNamespace(triggered_id="btn-demo"))
         status, output = run_action(1, 1, 0, 0, "rm -rf /")
         assert status == "Error"
         assert "Invalid demo mode" in output
