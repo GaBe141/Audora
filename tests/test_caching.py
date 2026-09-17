@@ -1,10 +1,16 @@
-"""Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
+"""Tests for core caching (LocalCacheBackend, CacheManager, Redis JSON envelopes)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
+from unittest.mock import MagicMock
 
-from core.caching import (
-    LocalCacheBackend,
-)
+import pandas as pd
+import pytest
+
+from core.caching import LocalCacheBackend, RedisCacheBackend
 
 
 class TestLocalCacheBackend:
@@ -81,6 +87,14 @@ class TestCacheManager:
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
 
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"z": 3})
+        digest_parts = key.split(":")[1:]
+        assert digest_parts
+        for part in digest_parts:
+            assert len(part) == 64
+            int(part, 16)
+
 
 class TestCachedDecorator:
     """Tests for @cached decorator - call count and same result."""
@@ -118,3 +132,77 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+def _redis_backend(signing_key: bytes = b"test-signing-key") -> RedisCacheBackend:
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = signing_key
+    backend._client = MagicMock()
+    return backend
+
+
+class TestRedisJsonSerialization:
+    """Redis cache must use signed JSON envelopes, never pickle."""
+
+    def test_json_roundtrip(self):
+        backend = _redis_backend()
+        original = {"track": "Song", "score": 91.5, "tags": ["pop", "live"]}
+        restored = backend._deserialize(backend._serialize(original))
+        assert restored == original
+
+    def test_none_roundtrip(self):
+        backend = _redis_backend()
+        restored = backend._deserialize(backend._serialize(None))
+        assert restored is None
+
+    def test_bytes_roundtrip(self):
+        backend = _redis_backend()
+        original = b"\x00binary-cache\xff"
+        restored = backend._deserialize(backend._serialize(original))
+        assert restored == original
+
+    def test_dataframe_roundtrip(self):
+        backend = _redis_backend()
+        original = pd.DataFrame({"track": ["A", "B"], "score": [1.5, 2.5]})
+        restored = backend._deserialize(backend._serialize(original))
+        pd.testing.assert_frame_equal(restored, original)
+
+    def test_rejects_unsupported_objects(self):
+        backend = _redis_backend()
+        with pytest.raises(TypeError, match="JSON-serializable"):
+            backend._serialize(object())
+
+    def test_envelope_is_json_not_pickle(self):
+        backend = _redis_backend()
+        raw = backend._serialize({"ok": True})
+        envelope = json.loads(raw.decode("utf-8"))
+        assert envelope["alg"] == "HMAC-SHA256"
+        assert "pickle" not in raw.decode("utf-8").lower()
+        body = json.loads(base64.b64decode(envelope["body"]))
+        assert body["kind"] == "json"
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = _redis_backend()
+        with pytest.raises(ValueError):
+            backend._deserialize(b"cos\nsystem\n(S'id'\ntR.")
+
+    def test_rejects_tampered_signature(self):
+        backend = _redis_backend()
+        envelope = json.loads(backend._serialize({"ok": True}).decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        with pytest.raises(ValueError, match="invalid signature"):
+            backend._deserialize(json.dumps(envelope).encode("utf-8"))
+
+    def test_get_deletes_malformed_entries(self):
+        backend = _redis_backend()
+        backend._client.get.return_value = b"not-json"
+        assert backend.get("audora:bad") is None
+        backend._client.delete.assert_called_once_with("audora:bad")
+
+    def test_signature_covers_body(self):
+        backend = _redis_backend(b"shared-key")
+        raw = backend._serialize({"n": 1})
+        envelope = json.loads(raw.decode("utf-8"))
+        body = base64.b64decode(envelope["body"])
+        expected = hmac.new(b"shared-key", body, hashlib.sha256).hexdigest()
+        assert envelope["sig"] == expected
