@@ -7,9 +7,9 @@ import time
 import pandas as pd
 
 from core.caching import (
+    _MISSING,
     LocalCacheBackend,
     RedisCacheBackend,
-    _MISSING,
 )
 
 

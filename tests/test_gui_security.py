@@ -30,13 +30,13 @@ class TestGuiCommandAllowlist:
         assert "main.py" in output
 
     def test_allowlisted_demo_modes_match_cli(self):
-        assert ALLOWED_DEMO_MODES == {
+        assert {
             "statistical",
             "trending",
             "multi_source",
             "platform",
             "all",
-        }
+        } == ALLOWED_DEMO_MODES
 
     def test_invalid_demo_mode_is_rejected(self):
         with patch("gui.app.ctx") as mock_ctx:
