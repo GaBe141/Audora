@@ -89,3 +89,10 @@ class TestLastFmAPIErrorHandling:
         with patch.object(api.session, "get", return_value=mock_response):
             with pytest.raises(APIConnectionError, match="429"):
                 api.get_top_artists_global(limit=5)
+
+
+def test_lastfm_base_url_uses_https():
+    from integrations.lastfm_integration import BASE_URL
+
+    assert BASE_URL.startswith("https://")
+    assert BASE_URL == "https://ws.audioscrobbler.com/2.0/"
