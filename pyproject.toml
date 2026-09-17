@@ -85,6 +85,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # Allow unused imports in __init__.py
 "scripts/*.py" = ["E402"]  # Allow module level import not at top of file in scripts
+"gui/app.py" = ["E402"]  # Project root is inserted on sys.path before core imports
 
 [tool.ruff.lint.isort]
 known-first-party = ["core", "analytics", "integrations", "visualization"]
@@ -130,8 +131,8 @@ ignore_missing_imports = true
 
 [tool.bandit]
 exclude_dirs = ["tests", "scripts/demo_*", "notebooks", ".venv", "venv"]
-# Skip: B101=assert_used, B601=paramiko, B403=pickle_import, B301=pickle_loads, B324=hashlib_md5, B608=hardcoded_sql
-skips = ["B101", "B601", "B403", "B301", "B324", "B608"]
+# Skip: B101=assert_used, B601=paramiko, B608=hardcoded_sql (table names are allowlisted)
+skips = ["B101", "B601", "B608"]
 
 [tool.bandit.assert_used]
 skips = ["*/test_*.py", "*/tests/*.py"]

@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
+    _MISSING,
 )
 
 
@@ -118,3 +124,101 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"b": 3})
+        parts = key.split(":")
+        assert parts[0] == "fn"
+        assert all(len(part) == 64 for part in parts[1:])
+        expected_args = hashlib.sha256(
+            json.dumps((1, 2), sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert parts[1] == expected_args
+
+
+class _FakeRedisClient:
+    """Minimal in-memory Redis stand-in for serialization tests."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, bytes] = {}
+
+    def get(self, key: str) -> bytes | None:
+        return self.store.get(key)
+
+    def set(self, key: str, value: bytes) -> None:
+        self.store[key] = value
+
+    def setex(self, key: str, ttl: int, value: bytes) -> None:
+        self.store[key] = value
+
+    def delete(self, key: str) -> int:
+        return 1 if self.store.pop(key, None) is not None else 0
+
+    def exists(self, key: str) -> int:
+        return int(key in self.store)
+
+    def flushdb(self) -> None:
+        self.store.clear()
+
+
+def _make_redis_backend() -> RedisCacheBackend:
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = b"unit-test-signing-key"
+    backend._client = _FakeRedisClient()
+    return backend
+
+
+class TestRedisJsonSerialization:
+    """Redis cache must use signed JSON envelopes, never pickle."""
+
+    def test_json_round_trip(self):
+        backend = _make_redis_backend()
+        backend.set("k", {"track": "Song", "score": 9.5})
+        assert backend.get("k") == {"track": "Song", "score": 9.5}
+
+    def test_bytes_round_trip(self):
+        backend = _make_redis_backend()
+        backend.set("k", b"\x00secret\xff")
+        assert backend.get("k") == b"\x00secret\xff"
+
+    def test_dataframe_round_trip(self):
+        backend = _make_redis_backend()
+        frame = pd.DataFrame({"track": ["A"], "score": [1.0]})
+        backend.set("k", frame)
+        restored = backend.get("k")
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored, frame, check_dtype=False)
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = _make_redis_backend()
+        backend._client.set("k", b"cos\nsystem\n(S'id'\ntR.")
+        assert backend.get("k") is None
+        assert backend._client.get("k") is None
+
+    def test_rejects_tampered_signature(self):
+        backend = _make_redis_backend()
+        backend.set("k", {"ok": True})
+        envelope = json.loads(backend._client.get("k").decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        backend._client.set("k", json.dumps(envelope).encode("utf-8"))
+        assert backend.get("k") is None
+        assert backend._client.get("k") is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = _make_redis_backend()
+
+        class NotSerializable:
+            pass
+
+        backend.set("k", NotSerializable())
+        assert backend.get("k") is None
+
+    def test_deserialize_missing_sentinel_for_malformed(self):
+        backend = _make_redis_backend()
+        assert backend._deserialize(b"not-json") is _MISSING
+
+    def test_none_round_trip(self):
+        backend = _make_redis_backend()
+        backend.set("k", None)
+        assert "k" in backend._client.store
+        assert backend.get("k") is None
