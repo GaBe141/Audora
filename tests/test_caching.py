@@ -1,17 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
-import time
-
 import json
 import pickle
+import time
 
 import pandas as pd
 import pytest
 
 from core.caching import (
+    _INVALID_CACHE,
     LocalCacheBackend,
     RedisCacheBackend,
-    _INVALID_CACHE,
 )
 
 

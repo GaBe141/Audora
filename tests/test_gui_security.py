@@ -10,13 +10,13 @@ class TestGuiCommandAllowlist:
     """GUI subprocess helpers must refuse untrusted binaries and scripts."""
 
     def test_known_demo_modes_are_allowlisted(self):
-        assert ALLOWED_DEMO_MODES == {
+        assert {
             "statistical",
             "trending",
             "multi_source",
             "platform",
             "all",
-        }
+        } == ALLOWED_DEMO_MODES
 
     def test_rejects_untrusted_binary(self):
         status, output = _run_command(["/bin/echo", "hi"])

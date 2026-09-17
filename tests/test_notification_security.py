@@ -132,9 +132,9 @@ class TestSmtpTransportSecurity:
         assert isinstance(context, ssl.SSLContext)
         assert context.verify_mode == ssl.CERT_REQUIRED
         assert context.check_hostname is True
-        html_payload = captured["msg"].as_string()
-        assert "<script>alert(1)</script>" not in html_payload
-        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html_payload
+        html_part = captured["msg"].get_payload()[1].get_payload()
+        assert "<script>alert(1)</script>" not in html_part
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html_part
 
 
 class TestAttachmentConfinement:
