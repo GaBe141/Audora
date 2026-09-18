@@ -17,6 +17,8 @@ from dash import Input, Output, State, ctx, dash_table, dcc, html
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+ALLOWED_DEMO_MODES = frozenset({"statistical", "trending", "multi_source", "platform", "all"})
+
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.CYBORG],
@@ -343,9 +345,19 @@ app.layout = dbc.Container(
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _validate_command_args(args: list[str]) -> list[str]:
+    """Reject malformed subprocess argument lists before execution."""
+    if not isinstance(args, list) or not args:
+        raise ValueError("Command arguments must be a non-empty list of strings")
+    if not all(isinstance(arg, str) and arg and "\x00" not in arg for arg in args):
+        raise ValueError("Command arguments must be non-empty strings")
+    return args
+
+
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
     try:
+        args = _validate_command_args(args)
         proc = subprocess.Popen(
             args,
             cwd=str(PROJECT_ROOT),
@@ -362,6 +374,13 @@ def _run_command(args: list[str]) -> tuple[str, str]:
         return "Done (timeout)", "(process timed out)"
     except Exception as e:
         return "Error", str(e)
+
+
+def _demo_command(demo_value: str) -> list[str]:
+    """Build the demo subprocess command after allowlisting the mode."""
+    if demo_value not in ALLOWED_DEMO_MODES:
+        raise ValueError("Invalid demo mode")
+    return [sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value]
 
 
 def _get_data_store():
@@ -396,7 +415,10 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
-        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
+        try:
+            return _run_command(_demo_command(demo_value))
+        except ValueError as exc:
+            return "Error", str(exc)
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
     if triggered == "btn-validate":
