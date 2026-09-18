@@ -1,10 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+from unittest.mock import MagicMock
 
-from core.caching import (
-    LocalCacheBackend,
-)
+import pandas as pd
+import pytest
+
+from core.caching import LocalCacheBackend, RedisCacheBackend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +122,73 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+def _redis_backend_for_tests():
+    """Build a Redis backend instance without connecting to Redis."""
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = b"unit-test-signing-key"
+    backend._key_prefix = "audora"
+    return backend
+
+
+class TestRedisJsonSerialization:
+    """Redis cache must use signed JSON envelopes, never pickle."""
+
+    def test_json_value_round_trip(self):
+        backend = _redis_backend_for_tests()
+        payload = {"track": "Song", "score": 91, "tags": ["viral", "pop"]}
+        assert backend._deserialize(backend._serialize(payload)) == payload
+
+    def test_bytes_round_trip(self):
+        backend = _redis_backend_for_tests()
+        payload = b"\x00binary-cache-value\xff"
+        assert backend._deserialize(backend._serialize(payload)) == payload
+
+    def test_dataframe_round_trip(self):
+        backend = _redis_backend_for_tests()
+        frame = pd.DataFrame({"track": ["A", "B"], "score": [10.5, 20.0]})
+        restored = backend._deserialize(backend._serialize(frame))
+        assert list(restored.columns) == ["track", "score"]
+        assert restored["track"].tolist() == ["A", "B"]
+        assert restored["score"].tolist() == [10.5, 20.0]
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = _redis_backend_for_tests()
+        assert backend._deserialize(pickle.dumps({"pwn": True})) is None
+
+    def test_rejects_unsigned_json_envelope(self):
+        backend = _redis_backend_for_tests()
+        unsigned = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "0" * 64,
+                "kind": "json",
+                "payload": {"injected": True},
+            }
+        ).encode("utf-8")
+        assert backend._deserialize(unsigned) is None
+
+    def test_rejects_unsupported_python_objects(self):
+        backend = _redis_backend_for_tests()
+
+        class NotSerializable:
+            pass
+
+        with pytest.raises(TypeError, match="JSON-serializable"):
+            backend._serialize(NotSerializable())
+
+    def test_clear_uses_prefix_scan_not_flushdb(self):
+        backend = _redis_backend_for_tests()
+        client = MagicMock()
+        client.scan.side_effect = [(12, [b"audora:a"]), (0, [b"audora:b"])]
+        client.delete.return_value = 1
+        backend._client = client
+
+        backend.clear()
+
+        client.flushdb.assert_not_called()
+        assert client.scan.call_count == 2
+        client.delete.assert_any_call(b"audora:a")
+        client.delete.assert_any_call(b"audora:b")
