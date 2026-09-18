@@ -16,8 +16,8 @@ def test_run_command_rejects_empty_argument_list():
 
 
 def test_demo_modes_are_allowlisted():
-    assert ALLOWED_DEMO_MODES == frozenset(
+    assert frozenset(
         {"statistical", "trending", "multi_source", "platform", "all"}
-    )
+    ) == ALLOWED_DEMO_MODES
     assert "../evil" not in ALLOWED_DEMO_MODES
     assert "; rm -rf /" not in ALLOWED_DEMO_MODES
