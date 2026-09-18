@@ -1,9 +1,21 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import json
+import pickle
 import time
 
+import pandas as pd
+import pytest
+
+from core import caching as caching_mod
 from core.caching import (
+    CacheManager,
+    InvalidCachePayloadError,
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +130,119 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSafeSerialization:
+    """Redis payloads must be HMAC-signed JSON, never pickle."""
+
+    def test_json_roundtrip(self):
+        key = b"unit-test-signing-key"
+        original = {"track": "Song", "score": 91.5, "tags": ["pop", "dance"]}
+        encoded = serialize_cache_value(original, key)
+        assert pickle.dumps(original) not in encoded
+        assert deserialize_cache_value(encoded, key) == original
+
+    def test_bytes_roundtrip(self):
+        key = b"unit-test-signing-key"
+        original = b"\x00binary-cache\xff"
+        encoded = serialize_cache_value(original, key)
+        assert deserialize_cache_value(encoded, key) == original
+
+    def test_dataframe_roundtrip(self):
+        key = b"unit-test-signing-key"
+        original = pd.DataFrame({"track": ["A", "B"], "score": [1.0, 2.0]})
+        restored = deserialize_cache_value(serialize_cache_value(original, key), key)
+        pd.testing.assert_frame_equal(original, restored, check_dtype=False)
+
+    def test_rejects_legacy_pickle_payloads(self):
+        key = b"unit-test-signing-key"
+        with pytest.raises(InvalidCachePayloadError):
+            deserialize_cache_value(pickle.dumps({"owned": True}), key)
+
+    def test_rejects_unsigned_legacy_envelope(self):
+        key = b"unit-test-signing-key"
+        legacy = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "abc123",
+                "payload": base64.b64encode(pickle.dumps({"x": 1})).decode("ascii"),
+            }
+        ).encode("utf-8")
+        with pytest.raises(InvalidCachePayloadError, match="legacy"):
+            deserialize_cache_value(legacy, key)
+
+    def test_rejects_tampered_signature(self):
+        key = b"unit-test-signing-key"
+        envelope = json.loads(serialize_cache_value({"a": 1}, key))
+        body = bytearray(base64.b64decode(envelope["body"]))
+        body[0] ^= 0xFF
+        envelope["body"] = base64.b64encode(bytes(body)).decode("ascii")
+        with pytest.raises(InvalidCachePayloadError, match="signature"):
+            deserialize_cache_value(json.dumps(envelope).encode("utf-8"), key)
+
+    def test_rejects_unsupported_types(self):
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            serialize_cache_value(object(), b"unit-test-signing-key")
+
+    def test_cache_key_uses_sha256_not_md5(self):
+        backend = LocalCacheBackend(max_size=10)
+        cache = CacheManager(backend=backend, key_prefix="test")
+        args = (1, 2)
+        args_digest = hashlib.sha256(
+            json.dumps(args, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        cache_key = cache._build_cache_key("fn", args, {})
+        hash_parts = [part for part in cache_key.split(":") if part != "fn"]
+        assert args_digest in cache_key
+        assert hash_parts
+        assert all(len(part) == 64 for part in hash_parts)
+
+
+class TestRedisPrefixScopedClear:
+    """RedisCacheBackend.clear must SCAN the app prefix instead of FLUSHDB."""
+
+    def test_clear_deletes_prefixed_keys_without_flushdb(self, monkeypatch):
+        class FakeClient:
+            def __init__(self) -> None:
+                self.store: dict[bytes, bytes] = {
+                    b"audora:keep": b"one",
+                    b"audora:also": b"two",
+                    b"other:app": b"leave-me",
+                }
+                self.flushdb_called = False
+
+            def ping(self) -> bool:
+                return True
+
+            def scan(self, cursor=0, match=None, count=200):
+                pattern = (match or "*").replace("*", "")
+                keys = [key for key in self.store if key.decode().startswith(pattern)]
+                return 0, keys
+
+            def delete(self, *keys: bytes) -> int:
+                for key in keys:
+                    self.store.pop(key, None)
+                return len(keys)
+
+            def flushdb(self) -> None:
+                self.flushdb_called = True
+                self.store.clear()
+
+        fake = FakeClient()
+        monkeypatch.setattr(caching_mod, "REDIS_AVAILABLE", True)
+        monkeypatch.setattr(caching_mod, "ConnectionPool", lambda **kwargs: object())
+        monkeypatch.setattr(
+            caching_mod,
+            "redis",
+            type("RedisMod", (), {"Redis": lambda connection_pool=None: fake, "ConnectionError": Exception}),
+        )
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "unit-test-signing-key")
+
+        backend = caching_mod.RedisCacheBackend(key_prefix="audora")
+        backend.clear()
+
+        assert fake.flushdb_called is False
+        assert b"other:app" in fake.store
+        assert b"audora:keep" not in fake.store
+        assert b"audora:also" not in fake.store
