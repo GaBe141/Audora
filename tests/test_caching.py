@@ -1,10 +1,26 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
+import pickle
 import time
+from unittest.mock import MagicMock
+
+import pandas as pd
+import pytest
 
 from core.caching import (
+    InvalidCachePayload,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
+
+
+def _redis_backend_for_tests(signing_key: bytes = b"unit-test-cache-key"):
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = signing_key
+    backend._client = MagicMock()
+    return backend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +134,61 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSafeSerialization:
+    """Redis payloads must be signed JSON, never pickle."""
+
+    def test_roundtrip_json_values(self):
+        backend = _redis_backend_for_tests()
+        payload = {"track": ["One"], "score": 91, "tags": ["pop", "viral"]}
+        restored = backend._deserialize(backend._serialize(payload))
+        assert restored == payload
+
+    def test_roundtrip_bytes_and_tuple(self):
+        backend = _redis_backend_for_tests()
+        restored = backend._deserialize(backend._serialize((b"raw", "ok", None)))
+        assert restored == (b"raw", "ok", None)
+
+    def test_roundtrip_dataframe(self):
+        backend = _redis_backend_for_tests()
+        frame = pd.DataFrame({"track": ["A"], "score": [88.5]})
+        restored = backend._deserialize(backend._serialize(frame))
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = _redis_backend_for_tests()
+        with pytest.raises(InvalidCachePayload):
+            backend._deserialize(pickle.dumps({"owned": True}))
+
+    def test_rejects_tampered_signature(self):
+        backend = _redis_backend_for_tests()
+        envelope = json.loads(backend._serialize("safe").decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        with pytest.raises(InvalidCachePayload, match="signature"):
+            backend._deserialize(json.dumps(envelope).encode("utf-8"))
+
+    def test_get_deletes_invalid_payload(self):
+        backend = _redis_backend_for_tests()
+        backend._client.get.return_value = b"not-a-valid-envelope"
+        assert backend.get("audora:bad") is None
+        backend._client.delete.assert_called_once_with("audora:bad")
+
+    def test_refuses_unsupported_objects(self):
+        backend = _redis_backend_for_tests()
+
+        class NotSerializable:
+            pass
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            backend._serialize(NotSerializable())
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ("arg",), {"k": "v"})
+        args_digest = hashlib.sha256(
+            json.dumps(("arg",), sort_keys=True, default=str).encode()
+        ).hexdigest()
+        kwargs_digest = hashlib.sha256(
+            json.dumps({"k": "v"}, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert key == f"prefix:{args_digest}:{kwargs_digest}"

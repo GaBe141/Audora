@@ -12,7 +12,7 @@ if "integrations.config" not in sys.modules:
     sys.modules["integrations.config"] = _config_mock
 
 from core.exceptions import APIConnectionError, APIResponseError
-from integrations.lastfm_integration import LastFmAPI
+from integrations.lastfm_integration import BASE_URL, LastFmAPI
 
 
 class TestLastFmAPISuccess:
@@ -89,3 +89,11 @@ class TestLastFmAPIErrorHandling:
         with patch.object(api.session, "get", return_value=mock_response):
             with pytest.raises(APIConnectionError, match="429"):
                 api.get_top_artists_global(limit=5)
+
+
+class TestLastFmTransportSecurity:
+    """Last.fm API traffic must use HTTPS to protect API keys in transit."""
+
+    def test_base_url_uses_https(self):
+        assert BASE_URL.startswith("https://")
+        assert BASE_URL == "https://ws.audioscrobbler.com/2.0/"
