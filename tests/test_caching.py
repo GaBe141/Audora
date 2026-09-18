@@ -1,9 +1,21 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pandas as pd
+import pytest
 
 from core.caching import (
+    CachePayloadError,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +130,87 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheKeyHashing:
+    """Deterministic cache keys must use SHA-256, not MD5."""
+
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, "x"), {"b": 2})
+        parts = key.split(":")
+        assert parts[0] == "fn"
+        assert len(parts) == 3
+        assert all(len(part) == 64 for part in parts[1:])
+        source = Path(__file__).resolve().parent.parent / "core" / "caching.py"
+        text = source.read_text(encoding="utf-8")
+        assert "hashlib.md5" not in text
+        assert "pickle.loads" not in text
+        assert "import pickle" not in text
+
+
+class TestRedisJsonSerialization:
+    """Redis backend must use signed JSON envelopes, never pickle."""
+
+    def _backend(self, signing_key: bytes = b"unit-test-signing-key"):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = signing_key
+        backend._password = None
+        backend._client = MagicMock()
+        return backend
+
+    def test_json_roundtrip(self):
+        backend = self._backend()
+        payload = {"track": "Song", "score": 91.5, "tags": ["pop", "new"]}
+        restored = backend._deserialize(backend._serialize(payload))
+        assert restored == payload
+
+    def test_bytes_none_tuple_and_dataframe_roundtrip(self):
+        backend = self._backend()
+        assert backend._deserialize(backend._serialize(None)) is None
+        assert backend._deserialize(backend._serialize(b"\x00\xffdata")) == b"\x00\xffdata"
+        assert backend._deserialize(backend._serialize(("a", 1, True))) == ("a", 1, True)
+
+        frame = pd.DataFrame({"track": ["A", "B"], "score": [1.5, 2.5]})
+        restored = backend._deserialize(backend._serialize(frame))
+        assert list(restored.columns) == ["track", "score"]
+        assert restored["track"].tolist() == ["A", "B"]
+        assert restored["score"].tolist() == [1.5, 2.5]
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        backend = self._backend()
+        pickle_payload = pickle.dumps({"pwn": True})
+        signature = hmac.new(backend._signing_key, pickle_payload, hashlib.sha256).hexdigest()
+        legacy = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": signature,
+                "payload": base64.b64encode(pickle_payload).decode("ascii"),
+            }
+        ).encode("utf-8")
+        with pytest.raises(CachePayloadError):
+            backend._deserialize(legacy)
+
+    def test_rejects_tampered_and_malformed_payloads(self):
+        backend = self._backend()
+        serialized = bytearray(backend._serialize({"ok": True}))
+        serialized[-4] ^= 0x01
+        with pytest.raises(CachePayloadError):
+            backend._deserialize(bytes(serialized))
+        with pytest.raises(CachePayloadError):
+            backend._deserialize(b"not-json")
+
+    def test_get_deletes_invalid_payloads(self):
+        backend = self._backend()
+        backend._client.get.return_value = b"not-a-valid-envelope"
+        assert backend.get("audora:unsafe") is None
+        backend._client.delete.assert_called_once_with("audora:unsafe")
+
+    def test_unsupported_objects_are_not_serialized(self):
+        backend = self._backend()
+
+        class NotJson:
+            pass
+
+        with pytest.raises(TypeError):
+            backend._serialize(NotJson())

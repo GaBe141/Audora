@@ -8,8 +8,9 @@ import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -17,6 +18,7 @@ from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from enum import Enum
+from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -197,7 +199,7 @@ class EnhancedNotificationService:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -215,6 +217,10 @@ class EnhancedNotificationService:
         """Return True when the IP belongs to a non-public range."""
         try:
             parsed = ipaddress.ip_address(ip)
+            if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
+                parsed = parsed.ipv4_mapped
+            if parsed in ipaddress.ip_network("100.64.0.0/10"):
+                return True
             return (
                 parsed.is_private
                 or parsed.is_loopback
@@ -233,6 +239,8 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must use HTTPS")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include embedded credentials")
 
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
@@ -254,6 +262,25 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _reject_redirect_status(self, status: int) -> None:
+        """Reject HTTP redirect responses that could be used for SSRF bypass."""
+        if 300 <= status < 400:
+            raise ValueError("Webhook redirect responses are not allowed")
+
+    def _safe_attachment_path(self, attachment_path: str) -> Path | None:
+        """Return a project-rooted attachment path, or None if it is unsafe."""
+        project_root = Path(__file__).resolve().parent.parent
+        try:
+            candidate = Path(attachment_path).expanduser().resolve(strict=False)
+            candidate.relative_to(project_root)
+        except (OSError, RuntimeError, ValueError):
+            self.logger.warning("Rejected attachment outside project root: %s", attachment_path)
+            return None
+        if not candidate.is_file():
+            self.logger.warning("Rejected missing or non-file attachment: %s", attachment_path)
+            return None
+        return candidate
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -552,31 +579,38 @@ System status: {{ system_status }}
 
             msg.attach(MIMEText(text_content, "plain"))
 
-            # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            # Add HTML version if available (escape to prevent HTML injection)
+            html_content = escape(text_content).replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
-            # Add attachments
+            # Add attachments confined to the project root
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    safe_path = self._safe_attachment_path(attachment_path)
+                    if safe_path is None:
+                        continue
+                    with safe_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {safe_path.name}",
+                        )
+                        msg.attach(attachment)
+
+            use_tls = bool(email_config.get("use_tls", True))
+            has_credentials = bool(email_config.get("username") and email_config.get("password"))
+            if has_credentials and not use_tls:
+                raise ValueError("SMTP authentication requires TLS")
 
             # Send email
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+            if use_tls:
+                server.starttls(context=ssl.create_default_context())
 
-            if email_config.get("username") and email_config.get("password"):
+            if has_credentials:
                 server.login(email_config["username"], email_config["password"])
 
             server.send_message(msg)
@@ -650,8 +684,9 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
+                self._reject_redirect_status(response.status)
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -717,8 +752,9 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
+                self._reject_redirect_status(response.status)
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -777,9 +813,14 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
+                self._reject_redirect_status(response.status)
                 if 200 <= response.status < 300:
                     self.logger.info(f"Webhook notification sent successfully: {response.status}")
                     return {"success": True, "status_code": response.status}
