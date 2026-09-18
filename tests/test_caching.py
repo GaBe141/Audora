@@ -118,3 +118,92 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedJsonCacheEnvelope:
+    """Redis-safe serialization must not execute pickle payloads."""
+
+    def test_json_round_trip(self):
+        from core.caching import pack_cache_value, unpack_cache_value
+
+        key = b"test-signing-key"
+        packed = pack_cache_value({"track": "Song", "score": 91}, key)
+        ok, value = unpack_cache_value(packed, key)
+        assert ok is True
+        assert value == {"track": "Song", "score": 91}
+
+    def test_bytes_round_trip(self):
+        from core.caching import pack_cache_value, unpack_cache_value
+
+        key = b"test-signing-key"
+        packed = pack_cache_value(b"binary-cache", key)
+        ok, value = unpack_cache_value(packed, key)
+        assert ok is True
+        assert value == b"binary-cache"
+
+    def test_dataframe_round_trip(self):
+        import pandas as pd
+
+        from core.caching import pack_cache_value, unpack_cache_value
+
+        key = b"test-signing-key"
+        original = pd.DataFrame({"track": ["A"], "score": [80.5]})
+        packed = pack_cache_value(original, key)
+        ok, value = unpack_cache_value(packed, key)
+        assert ok is True
+        assert list(value.columns) == ["track", "score"]
+        assert value.iloc[0]["track"] == "A"
+        assert value.iloc[0]["score"] == 80.5
+
+    def test_rejects_legacy_pickle_envelope(self):
+        import base64
+        import json
+        import pickle
+
+        from core.caching import unpack_cache_value
+
+        payload = pickle.dumps({"owned": True})
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "00" * 32,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        ok, value = unpack_cache_value(
+            json.dumps(envelope).encode("utf-8"), b"test-signing-key"
+        )
+        assert ok is False
+        assert value is None
+
+    def test_rejects_tampered_signature(self):
+        import json
+
+        from core.caching import pack_cache_value, unpack_cache_value
+
+        key = b"test-signing-key"
+        packed = pack_cache_value({"ok": True}, key)
+        envelope = json.loads(packed.decode("utf-8"))
+        envelope["p"] = json.dumps({"ok": False}, separators=(",", ":"))
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        ok, value = unpack_cache_value(tampered, key)
+        assert ok is False
+        assert value is None
+
+    def test_rejects_unsupported_objects(self):
+        from core.caching import pack_cache_value
+
+        class NotSerializable:
+            pass
+
+        try:
+            pack_cache_value(NotSerializable(), b"test-signing-key")
+        except TypeError:
+            return
+        raise AssertionError("Expected TypeError for unsupported cache value")
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        import hashlib
+
+        key = mock_cache._build_cache_key("fn", (1,), {"b": 2})
+        assert hashlib.md5(b"unused").hexdigest() not in key
+        assert len(key.split(":")[-1]) == 64
