@@ -1,10 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
+import pickle
 import time
 
-from core.caching import (
-    LocalCacheBackend,
-)
+import pandas as pd
+import pytest
+
+from core.caching import LocalCacheBackend, deserialize_cache_value, serialize_cache_value
 
 
 class TestLocalCacheBackend:
@@ -118,3 +122,56 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedJsonCacheSerialization:
+    """Redis cache values must be HMAC-signed JSON, never pickle."""
+
+    def test_json_roundtrip(self):
+        key = b"unit-test-signing-key"
+        value = {"track": "Song", "score": 91, "tags": ["pop", "viral"]}
+        restored = deserialize_cache_value(serialize_cache_value(value, key), key)
+        assert restored == value
+
+    def test_bytes_roundtrip(self):
+        key = b"unit-test-signing-key"
+        value = b"\x00binary-cache\xff"
+        restored = deserialize_cache_value(serialize_cache_value(value, key), key)
+        assert restored == value
+
+    def test_dataframe_roundtrip(self):
+        key = b"unit-test-signing-key"
+        value = pd.DataFrame({"track_name": ["Song"], "score": [88.5]})
+        restored = deserialize_cache_value(serialize_cache_value(value, key), key)
+        pd.testing.assert_frame_equal(value, restored)
+
+    def test_rejects_unsupported_objects(self):
+        class NotSerializable:
+            pass
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            serialize_cache_value(NotSerializable(), b"key")
+
+    def test_rejects_legacy_pickle_payloads(self):
+        raw = pickle.dumps({"pwn": True})
+        assert deserialize_cache_value(raw, b"key") is None
+
+    def test_rejects_tampered_signatures(self):
+        key = b"unit-test-signing-key"
+        envelope = json.loads(serialize_cache_value({"ok": True}, key))
+        envelope["sig"] = "0" * 64
+        assert deserialize_cache_value(json.dumps(envelope).encode("utf-8"), key) is None
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"z": 3})
+        expected_args = hashlib.sha256(
+            json.dumps((1, 2), sort_keys=True, default=str).encode()
+        ).hexdigest()
+        expected_kwargs = hashlib.sha256(
+            json.dumps({"z": 3}, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert "md5" not in key
+        assert expected_args in key
+        assert expected_kwargs in key
+        assert len(expected_args) == 64
+

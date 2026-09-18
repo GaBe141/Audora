@@ -944,6 +944,8 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        export_path = self._resolve_export_path(filepath)
+
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -958,13 +960,34 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            export_path.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(export_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {export_path}")
 
-        return filepath
+        return str(export_path)
+
+    def _resolve_export_path(self, filepath: str) -> Path:
+        """Confine CSV exports to the working directory, backup dir, or database parent."""
+        target = Path(filepath).expanduser().resolve()
+        allowed_roots = [
+            Path.cwd().resolve(),
+            Path(self.backup_dir).expanduser().resolve(),
+            Path(self.db_path).expanduser().resolve().parent,
+        ]
+        if not any(self._is_relative_to(target, root) for root in allowed_roots):
+            raise ValueError("CSV export path is outside allowed directories")
+        if target.exists() and not target.is_file():
+            raise ValueError("CSV export path must be a file")
+        return target
+
+    def _is_relative_to(self, path: Path, root: Path) -> bool:
+        """Return True when path is root or a descendant of root."""
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""

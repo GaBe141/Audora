@@ -107,3 +107,32 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+    def test_update_trends_bulk_serializes_metadata(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        updated = data_store.update_trends_bulk(
+            [sample_trends[0].track_id], {"metadata": {"source": "bulk"}}
+        )
+        assert updated >= 1
+        with data_store.get_connection() as conn:
+            row = conn.execute(
+                "SELECT metadata FROM trends WHERE track_id = ?",
+                (sample_trends[0].track_id,),
+            ).fetchone()
+        assert row is not None
+        assert '"source": "bulk"' in row[0] or '"source":"bulk"' in row[0]
+
+
+class TestCsvExportPath:
+    """CSV export must stay inside allowlisted directories."""
+
+    def test_export_to_allowed_db_parent(self, data_store, sample_trends, temp_db_path):
+        data_store.save_trends_bulk(sample_trends)
+        target = temp_db_path.parent / "trends_export.csv"
+        result = data_store.export_to_csv("trends", str(target))
+        assert result == str(target.resolve())
+        assert target.exists()
+
+    def test_export_rejects_path_outside_allowed_roots(self, data_store):
+        with pytest.raises(ValueError, match="outside allowed directories"):
+            data_store.export_to_csv("trends", "/etc/audora-export.csv")
