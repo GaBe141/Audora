@@ -1,9 +1,18 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +127,61 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSafeCacheSerialization:
+    """Redis payload format must never execute attacker-controlled pickle data."""
+
+    def test_json_roundtrip(self):
+        key = b"test-signing-key"
+        original = {"artist": "NIN", "score": 91.5, "tags": ["industrial"]}
+        restored = deserialize_cache_value(serialize_cache_value(original, key), key)
+        assert restored == original
+
+    def test_bytes_roundtrip(self):
+        key = b"test-signing-key"
+        original = b"\x00binary-cache-payload\xff"
+        restored = deserialize_cache_value(serialize_cache_value(original, key), key)
+        assert restored == original
+
+    def test_dataframe_roundtrip(self):
+        key = b"test-signing-key"
+        original = pd.DataFrame({"track": ["A", "B"], "score": [1.0, 2.0]})
+        restored = deserialize_cache_value(serialize_cache_value(original, key), key)
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(original, restored, check_dtype=False)
+
+    def test_rejects_tampered_payload(self):
+        key = b"test-signing-key"
+        raw = serialize_cache_value({"ok": True}, key)
+        envelope = json.loads(raw.decode("utf-8"))
+        inner = bytearray(base64.b64decode(envelope["payload"]))
+        inner[0] ^= 0xFF
+        envelope["payload"] = base64.b64encode(bytes(inner)).decode("ascii")
+        tampered = json.dumps(envelope).encode("utf-8")
+        assert deserialize_cache_value(tampered, key) is None
+
+    def test_rejects_legacy_or_malformed_payloads(self):
+        key = b"test-signing-key"
+        assert deserialize_cache_value(b"not-json", key) is None
+        assert deserialize_cache_value(b'{"v": 1}', key) is None
+        pickle_like = b"\x80\x04\x95\x0b\x00\x00\x00\x00\x00\x00\x00\x8c\x05os\x94."
+        assert deserialize_cache_value(pickle_like, key) is None
+
+    def test_rejects_unsigned_inner_json(self):
+        key = b"test-signing-key"
+        inner = json.dumps({"t": "json", "d": {"pwned": True}}).encode("utf-8")
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": hmac.new(b"wrong-key", inner, hashlib.sha256).hexdigest(),
+            "payload": base64.b64encode(inner).decode("ascii"),
+        }
+        assert deserialize_cache_value(json.dumps(envelope).encode("utf-8"), key) is None
+
+    def test_unsupported_object_raises(self):
+        class Custom:
+            pass
+
+        with pytest.raises(TypeError):
+            serialize_cache_value(Custom(), b"test-signing-key")
