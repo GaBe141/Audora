@@ -6,7 +6,6 @@ Includes live trend dashboard, history search, notification settings, and accura
 
 import asyncio
 import io
-import json
 import subprocess
 import sys
 from pathlib import Path

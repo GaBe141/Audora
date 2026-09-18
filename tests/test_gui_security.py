@@ -10,13 +10,13 @@ class TestGuiCommandAllowlist:
     """GUI must not pass attacker-controlled values into subprocesses."""
 
     def test_allowed_demo_modes_match_cli(self):
-        assert ALLOWED_DEMO_MODES == {
+        assert {
             "statistical",
             "trending",
             "multi_source",
             "platform",
             "all",
-        }
+        } == ALLOWED_DEMO_MODES
 
     def test_run_command_rejects_non_interpreter(self):
         status, output = _run_command(["/bin/echo", str(MAIN_PY), "--demo", "all"])
