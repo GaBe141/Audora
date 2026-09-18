@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    decode_cache_payload,
+    encode_cache_payload,
 )
 
 
@@ -118,3 +124,55 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1,), {"b": 2})
+        parts = key.split(":")
+        assert parts[0] == "fn"
+        assert all(len(part) == 64 for part in parts[1:])
+
+
+class TestSafeCachePayloads:
+    """Redis cache values must use signed JSON envelopes, never pickle."""
+
+    def test_json_roundtrip(self):
+        key = b"unit-test-signing-key"
+        payload = encode_cache_payload({"track": "Song", "score": 91}, key)
+        assert decode_cache_payload(payload, key) == {"track": "Song", "score": 91}
+
+    def test_bytes_roundtrip(self):
+        key = b"unit-test-signing-key"
+        payload = encode_cache_payload(b"\x00binary\xff", key)
+        assert decode_cache_payload(payload, key) == b"\x00binary\xff"
+
+    def test_dataframe_roundtrip(self):
+        key = b"unit-test-signing-key"
+        frame = pd.DataFrame({"track": ["A"], "score": [10.5]})
+        restored = decode_cache_payload(encode_cache_payload(frame, key), key)
+        assert restored is not None
+        assert list(restored.columns) == ["track", "score"]
+        assert restored.iloc[0]["track"] == "A"
+
+    def test_rejects_legacy_pickle_payload(self):
+        key = b"unit-test-signing-key"
+        raw = pickle.dumps({"owned": True})
+        assert decode_cache_payload(raw, key) is None
+
+    def test_rejects_tampered_payload(self):
+        key = b"unit-test-signing-key"
+        encoded = encode_cache_payload({"ok": True}, key)
+        envelope = json.loads(encoded.decode("utf-8"))
+        envelope["d"] = {"ok": False}
+        assert decode_cache_payload(json.dumps(envelope).encode("utf-8"), key) is None
+
+    def test_rejects_unsupported_object(self):
+        class NotSerializable:
+            pass
+
+        key = b"unit-test-signing-key"
+        try:
+            encode_cache_payload(NotSerializable(), key)
+            raise AssertionError("Expected TypeError for unsupported cache value")
+        except TypeError as exc:
+            assert "Unsupported cache value type" in str(exc)
+
