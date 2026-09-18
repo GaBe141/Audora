@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +125,52 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheKeyHashing:
+    """Cache keys should use SHA-256, not MD5."""
+
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", (1, 2), {"b": 3})
+        digest = key.split(":")[1]
+        assert len(digest) == 64
+        assert all(char in "0123456789abcdef" for char in digest)
+
+
+class TestSafeCacheSerialization:
+    """Redis payloads must be versioned JSON, never pickle."""
+
+    def test_json_roundtrip(self):
+        payload = {"track": "Song", "score": 91, "tags": ["pop", "viral"]}
+        raw = serialize_cache_value(payload)
+        envelope = json.loads(raw.decode())
+        assert envelope["v"] == 2
+        assert envelope["t"] == "json"
+        assert deserialize_cache_value(raw) == payload
+
+    def test_bytes_roundtrip(self):
+        raw = serialize_cache_value(b"\x00secret\xff")
+        assert deserialize_cache_value(raw) == b"\x00secret\xff"
+
+    def test_dataframe_roundtrip(self):
+        df = pd.DataFrame({"track": ["A", "B"], "score": [1.5, 2.5]})
+        restored = deserialize_cache_value(serialize_cache_value(df))
+        pd.testing.assert_frame_equal(df, restored)
+
+    def test_rejects_pickle_payload(self):
+        with pytest.raises(ValueError, match="invalid cache payload"):
+            deserialize_cache_value(pickle.dumps({"owned": True}))
+
+    def test_rejects_legacy_hmac_pickle_envelope(self):
+        envelope = json.dumps(
+            {"v": 1, "alg": "HMAC-SHA256", "sig": "deadbeef", "payload": "AAAA"}
+        ).encode()
+        with pytest.raises(ValueError, match="invalid cache payload"):
+            deserialize_cache_value(envelope)
+
+    def test_rejects_unsupported_objects(self):
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            serialize_cache_value(object())
+
+    def test_json_null_roundtrip(self):
+        assert deserialize_cache_value(serialize_cache_value(None)) is None
