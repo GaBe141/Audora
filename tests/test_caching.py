@@ -1,9 +1,19 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +128,69 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisJsonSerialization:
+    """HMAC-signed JSON envelopes must not execute pickle payloads."""
+
+    def test_json_roundtrip(self):
+        key = b"test-signing-key"
+        payload = serialize_cache_value({"track": "Song", "score": 91}, key)
+        assert b"pickle" not in payload
+        assert deserialize_cache_value(payload, key) == {"track": "Song", "score": 91}
+
+    def test_bytes_roundtrip(self):
+        key = b"test-signing-key"
+        original = b"\x00binary\xff"
+        restored = deserialize_cache_value(serialize_cache_value(original, key), key)
+        assert restored == original
+
+    def test_dataframe_roundtrip(self):
+        key = b"test-signing-key"
+        original = pd.DataFrame({"track": ["A"], "score": [12.5]})
+        restored = deserialize_cache_value(serialize_cache_value(original, key), key)
+        assert list(restored.columns) == ["track", "score"]
+        assert restored.iloc[0]["track"] == "A"
+        assert restored.iloc[0]["score"] == 12.5
+
+    def test_rejects_legacy_pickle_envelope(self):
+        key = b"test-signing-key"
+        pickled = pickle.dumps({"owned": True})
+        signature = hmac.new(key, pickled, hashlib.sha256).hexdigest()
+        legacy = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": signature,
+                "payload": base64.b64encode(pickled).decode("ascii"),
+            }
+        ).encode("utf-8")
+        assert deserialize_cache_value(legacy, key) is None
+
+    def test_rejects_tampered_signature(self):
+        key = b"test-signing-key"
+        payload = bytearray(serialize_cache_value({"ok": True}, key))
+        payload[-4] ^= 0xFF
+        assert deserialize_cache_value(bytes(payload), key) is None
+
+    def test_rejects_unsupported_objects(self):
+        class Custom:
+            pass
+
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            serialize_cache_value(Custom(), b"test-signing-key")
+
+    def test_cache_key_uses_sha256_not_md5(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"z": 3})
+        args_digest = hashlib.sha256(
+            json.dumps((1, 2), sort_keys=True, default=str).encode()
+        ).hexdigest()
+        kwargs_digest = hashlib.sha256(
+            json.dumps({"z": 3}, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert key == f"fn:{args_digest}:{kwargs_digest}"
+        assert (
+            hashlib.md5(json.dumps((1, 2), sort_keys=True, default=str).encode()).hexdigest()
+            not in key
+        )
+
