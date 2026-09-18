@@ -1,9 +1,19 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    CACHE_ENVELOPE_VERSION,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +128,79 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        @mock_cache.cached(ttl=60)
+        def fn(x: int) -> int:
+            return x
+
+        fn(1)
+        keys = list(mock_cache._backend._cache.keys())
+        assert keys
+        hex_parts = [part for part in keys[0].split(":") if len(part) == 64]
+        assert hex_parts, f"Expected SHA-256 digest in cache key, got {keys[0]}"
+        assert all(char in "0123456789abcdef" for char in hex_parts[0])
+
+
+def _unsigned_redis_backend(signing_key: bytes = b"test-signing-key") -> RedisCacheBackend:
+    """Build a Redis backend without connecting to a server."""
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend.key_prefix = "audora"
+    backend._signing_key = signing_key
+    backend._client = None
+    return backend
+
+
+class TestRedisSafeSerialization:
+    """Redis payloads must be HMAC-signed JSON, never pickle."""
+
+    def test_json_roundtrip(self):
+        backend = _unsigned_redis_backend()
+        payload = backend._serialize({"track": "song", "score": 91})
+        assert backend._deserialize(payload) == {"track": "song", "score": 91}
+
+    def test_bytes_roundtrip(self):
+        backend = _unsigned_redis_backend()
+        payload = backend._serialize(b"binary-cache")
+        assert backend._deserialize(payload) == b"binary-cache"
+
+    def test_dataframe_roundtrip(self):
+        backend = _unsigned_redis_backend()
+        frame = pd.DataFrame({"track": ["a"], "score": [1.5]})
+        restored = backend._deserialize(backend._serialize(frame))
+        assert isinstance(restored, pd.DataFrame)
+        assert list(restored.columns) == ["track", "score"]
+        assert restored.iloc[0]["track"] == "a"
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = _unsigned_redis_backend()
+        pickled = pickle.dumps({"owned": True})
+        assert backend._deserialize(pickled) is None
+
+    def test_rejects_unsigned_json_payload(self):
+        backend = _unsigned_redis_backend()
+        raw = json.dumps(
+            {"v": CACHE_ENVELOPE_VERSION, "type": "json", "data": {"ok": True}}
+        ).encode("utf-8")
+        assert backend._deserialize(raw) is None
+
+    def test_rejects_tampered_signature(self):
+        backend = _unsigned_redis_backend()
+        envelope = json.loads(backend._serialize({"ok": True}).decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_unsupported_python_objects(self):
+        backend = _unsigned_redis_backend()
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            backend._serialize(object())
+
+    def test_envelope_is_not_pickle(self):
+        backend = _unsigned_redis_backend()
+        payload = backend._serialize({"ok": True})
+        envelope = json.loads(payload.decode("utf-8"))
+        inner = base64.b64decode(envelope["payload"].encode("ascii"))
+        body = json.loads(inner.decode("utf-8"))
+        assert body["type"] == "json"
+        expected = hmac.new(backend._signing_key, inner, hashlib.sha256).hexdigest()
+        assert hmac.compare_digest(envelope["sig"], expected)
