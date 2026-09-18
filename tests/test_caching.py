@@ -1,10 +1,50 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
 
+import pandas as pd
+
 from core.caching import (
+    _PAYLOAD_VERSION,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
+
+
+class _FakeRedis:
+    """Minimal Redis stand-in for serialization tests."""
+
+    def __init__(self) -> None:
+        self.store: dict[bytes | str, bytes] = {}
+
+    def get(self, key: str) -> bytes | None:
+        return self.store.get(key)
+
+    def set(self, key: str, value: bytes) -> None:
+        self.store[key] = value
+
+    def setex(self, key: str, _ttl: int, value: bytes) -> None:
+        self.store[key] = value
+
+    def delete(self, key: str) -> None:
+        self.store.pop(key, None)
+
+    def exists(self, key: str) -> int:
+        return 1 if key in self.store else 0
+
+    def flushdb(self) -> None:
+        self.store.clear()
+
+
+def _redis_backend() -> RedisCacheBackend:
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = b"unit-test-signing-key"
+    backend._client = _FakeRedis()
+    return backend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +158,81 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"b": 3})
+        digest = key.split(":")[-1]
+        assert len(digest) == 64
+        assert digest == hashlib.sha256(
+            json.dumps({"b": 3}, sort_keys=True, default=str).encode()
+        ).hexdigest()
+
+
+class TestRedisJsonEnvelope:
+    """Regression tests for Redis JSON envelopes (no pickle)."""
+
+    def test_round_trip_json_and_bytes(self):
+        backend = _redis_backend()
+        backend.set("json", {"track": "Song", "score": 91})
+        backend.set("bytes", b"\x00\x01\xff")
+        assert backend.get("json") == {"track": "Song", "score": 91}
+        assert backend.get("bytes") == b"\x00\x01\xff"
+
+    def test_round_trip_dataframe_and_tuple(self):
+        backend = _redis_backend()
+        frame = pd.DataFrame({"artist": ["A"], "score": [12.5]})
+        backend.set("df", frame)
+        backend.set("tuple", ("a", 1))
+        restored = backend.get("df")
+        assert isinstance(restored, pd.DataFrame)
+        assert restored["artist"].tolist() == ["A"]
+        assert restored["score"].tolist() == [12.5]
+        assert backend.get("tuple") == ("a", 1)
+
+    def test_rejects_legacy_and_tampered_payloads(self):
+        backend = _redis_backend()
+        backend._client.set("legacy", b"not-json")
+        assert backend.get("legacy") is None
+        assert backend._client.get("legacy") is None
+
+        backend.set("good", {"ok": True})
+        envelope = json.loads(backend._client.get("good").decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        backend._client.set("good", json.dumps(envelope).encode("utf-8"))
+        assert backend.get("good") is None
+        assert backend._client.get("good") is None
+
+    def test_rejects_unsigned_pickle_shaped_payload(self):
+        backend = _redis_backend()
+        inner = json.dumps(
+            {"v": _PAYLOAD_VERSION, "kind": "json", "payload": {"pwn": True}},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        forged = {
+            "v": _PAYLOAD_VERSION,
+            "alg": "HMAC-SHA256",
+            "sig": hmac.new(b"wrong-key", inner, hashlib.sha256).hexdigest(),
+            "body": base64.b64encode(inner).decode("ascii"),
+        }
+        backend._client.set("forged", json.dumps(forged).encode("utf-8"))
+        assert backend.get("forged") is None
+
+    def test_unsupported_objects_are_not_serialized(self):
+        backend = _redis_backend()
+
+        class NotSerializable:
+            pass
+
+        backend.set("obj", NotSerializable())
+        assert backend.get("obj") is None
+
+    def test_envelope_does_not_contain_pickle_protocol(self):
+        backend = _redis_backend()
+        backend.set("safe", {"a": 1})
+        raw = backend._client.get("safe")
+        assert raw is not None
+        assert b"pickle" not in raw.lower()
+        envelope = json.loads(raw.decode("utf-8"))
+        assert "body" in envelope
+        assert "payload" not in envelope
