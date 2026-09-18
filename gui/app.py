@@ -17,6 +17,10 @@ from dash import Input, Output, State, ctx, dash_table, dcc, html
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+ALLOWED_DEMO_MODES = frozenset(
+    {"statistical", "trending", "multi_source", "platform", "all"}
+)
+
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.CYBORG],
@@ -343,8 +347,17 @@ app.layout = dbc.Container(
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _validated_demo_mode(demo_value: str) -> str:
+    """Return a demo mode only if it is in the explicit allowlist."""
+    if demo_value not in ALLOWED_DEMO_MODES:
+        raise ValueError("Invalid demo mode")
+    return demo_value
+
+
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
+    if not isinstance(args, list) or not args or not all(isinstance(arg, str) for arg in args):
+        return "Error", "Invalid command arguments"
     try:
         proc = subprocess.Popen(
             args,
@@ -396,7 +409,11 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
-        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
+        try:
+            demo = _validated_demo_mode(demo_value)
+        except ValueError:
+            return "Error", "Invalid demo mode"
+        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo])
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
     if triggered == "btn-validate":
