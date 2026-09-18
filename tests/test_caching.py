@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +125,53 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1,), {"a": 2})
+        _prefix, args_digest, kwargs_digest = key.split(":")
+        assert len(args_digest) == 64
+        assert len(kwargs_digest) == 64
+
+
+class TestSafeRedisSerialization:
+    """Redis payloads must be versioned JSON, never pickle."""
+
+    def test_json_roundtrip(self):
+        payload = serialize_cache_value({"track": "Song", "score": 91})
+        envelope = json.loads(payload.decode("utf-8"))
+        assert envelope["kind"] == "json"
+        assert deserialize_cache_value(payload) == {"track": "Song", "score": 91}
+
+    def test_bytes_roundtrip(self):
+        payload = serialize_cache_value(b"\x00secret\xff")
+        assert deserialize_cache_value(payload) == b"\x00secret\xff"
+
+    def test_dataframe_roundtrip(self):
+        frame = pd.DataFrame({"track": ["a", "b"], "score": [1.5, 2.5]})
+        restored = deserialize_cache_value(serialize_cache_value(frame))
+        pd.testing.assert_frame_equal(restored.reset_index(drop=True), frame)
+
+    def test_rejects_unsupported_objects(self):
+        with pytest.raises(TypeError):
+            serialize_cache_value(object())
+
+    def test_rejects_raw_pickle_payloads(self):
+        with pytest.raises(ValueError):
+            deserialize_cache_value(pickle.dumps({"owned": True}))
+
+    def test_rejects_legacy_hmac_pickle_envelope(self):
+        legacy = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "deadbeef",
+                "payload": "gASVCwAAAAAAAAB9lIwBeJRLAnMu",
+            }
+        ).encode("utf-8")
+        with pytest.raises(ValueError):
+            deserialize_cache_value(legacy)
+
+    def test_rejects_unknown_kind(self):
+        payload = json.dumps({"v": 1, "kind": "pickle", "data": "nope"}).encode("utf-8")
+        with pytest.raises(ValueError, match="Unsupported cache payload kind"):
+            deserialize_cache_value(payload)
