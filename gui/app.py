@@ -343,9 +343,22 @@ app.layout = dbc.Container(
 # Helpers
 # ---------------------------------------------------------------------------
 
+ALLOWED_DEMO_MODES = frozenset({"statistical", "trending", "multi_source", "platform", "all"})
+
+
+def _validate_command_args(args: list[str]) -> list[str]:
+    """Reject malformed subprocess argument lists before execution."""
+    if not isinstance(args, list) or not args:
+        raise ValueError("Command arguments must be a non-empty list of strings")
+    if not all(isinstance(part, str) and "\x00" not in part for part in args):
+        raise ValueError("Command arguments must be strings without NUL bytes")
+    return args
+
+
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
     try:
+        args = _validate_command_args(args)
         proc = subprocess.Popen(
             args,
             cwd=str(PROJECT_ROOT),
@@ -396,6 +409,8 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
+        if demo_value not in ALLOWED_DEMO_MODES:
+            return "Error", "Invalid demo mode"
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
@@ -589,11 +604,13 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
-            svc.config["slack"]["webhook_url"] = slack_url
+            svc.config["slack"]["webhook_url"] = svc._validate_webhook_url(slack_url)
         if discord_url:
-            svc.config["discord"]["webhook_url"] = discord_url
+            svc.config["discord"]["webhook_url"] = svc._validate_webhook_url(discord_url)
         if webhook_url:
-            svc.config["webhook"]["url"] = webhook_url
+            svc.config["webhook"]["url"] = svc._validate_webhook_url(
+                webhook_url, allow_private=svc._allow_private_webhooks()
+            )
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
         if smtp_port:
@@ -629,7 +646,13 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
                 NotificationPriority,
             )
             svc = EnhancedNotificationService()
-            svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
+            config_key = "webhook_url" if channel_key != "webhook" else "url"
+            allow_private = (
+                channel_key == "webhook" and svc._allow_private_webhooks()
+            )
+            svc.config[channel_key][config_key] = svc._validate_webhook_url(
+                url, allow_private=allow_private
+            )
             channel = getattr(NotificationChannel, channel_enum_name)
             msg = NotificationMessage(
                 title="Audora test notification",
