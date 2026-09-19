@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,23 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportPathHardening:
+    """CSV export must stay inside allowlisted directories and cap rows."""
+
+    def test_export_rejects_path_outside_allowed_roots(self, data_store, tmp_path):
+        outside = Path("/tmp/audora-not-allowed-export.csv")
+        with pytest.raises(ValueError, match="outside allowed directories"):
+            data_store.export_to_csv("trends", str(outside))
+
+    def test_export_writes_inside_backup_dir(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        target = data_store.backup_dir / "trends.csv"
+        result = data_store.export_to_csv("trends", str(target))
+        assert result == str(target.resolve())
+        assert target.exists()
+
+    def test_export_rejects_invalid_days(self, data_store):
+        with pytest.raises(ValueError, match="positive integer"):
+            data_store.export_to_csv("trends", str(data_store.backup_dir / "x.csv"), days=0)
