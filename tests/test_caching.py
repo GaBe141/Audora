@@ -1,10 +1,23 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
+
+
+def _unsigned_backend() -> RedisCacheBackend:
+    """Build a Redis backend without connecting, for envelope tests."""
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = b"test-cache-signing-key"
+    backend._key_namespace = "audora"
+    return backend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +131,67 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSafeSerialization:
+    """Redis payloads must be signed JSON, never pickle."""
+
+    def test_json_round_trip(self):
+        backend = _unsigned_backend()
+        payload = backend._serialize({"track": "Song", "score": 91})
+        assert b"pickle" not in payload.lower()
+        assert json.loads(payload.decode("utf-8"))["v"] == 2
+        assert backend._deserialize(payload) == {"track": "Song", "score": 91}
+
+    def test_bytes_round_trip(self):
+        backend = _unsigned_backend()
+        payload = backend._serialize(b"binary-cache")
+        assert backend._deserialize(payload) == b"binary-cache"
+
+    def test_dataframe_round_trip(self):
+        backend = _unsigned_backend()
+        frame = pd.DataFrame({"track": ["a"], "score": [10]})
+        restored = backend._deserialize(backend._serialize(frame))
+        assert list(restored.columns) == ["track", "score"]
+        assert restored.iloc[0]["track"] == "a"
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = _unsigned_backend()
+        legacy = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "00",
+                "payload": "gASV",
+            }
+        ).encode("utf-8")
+        assert backend._deserialize(legacy) is None
+
+    def test_rejects_tampered_signature(self):
+        backend = _unsigned_backend()
+        envelope = json.loads(backend._serialize({"ok": True}).decode("utf-8"))
+        envelope["payload"] = {"ok": False}
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = _unsigned_backend()
+        with pytest.raises(TypeError):
+            backend._serialize(object())
+
+    def test_clear_uses_namespaced_scan_not_flushdb(self):
+        backend = _unsigned_backend()
+        deleted: list[bytes] = []
+
+        class FakeClient:
+            def scan(self, cursor=0, match=None, count=100):
+                assert match == "audora:*"
+                if cursor == 0:
+                    return 0, [b"audora:one"]
+                return 0, []
+
+            def delete(self, *keys):
+                deleted.extend(keys)
+
+        backend._client = FakeClient()
+        backend.clear()
+        assert deleted == [b"audora:one"]
