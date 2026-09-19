@@ -107,3 +107,27 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportToCsvSecurity:
+    """CSV export must reject path traversal and cap row volume."""
+
+    def test_export_to_csv_rejects_path_outside_allowed_roots(self, data_store):
+        with pytest.raises(ValueError, match="allowed directories"):
+            data_store.export_to_csv("trends", "/etc/passwd")
+
+    def test_export_to_csv_writes_under_db_parent(self, data_store, sample_trends, temp_db_path):
+        data_store.save_trends_bulk(sample_trends)
+        out = temp_db_path.parent / "trends.csv"
+        written = data_store.export_to_csv("trends", str(out))
+        assert written == str(out.resolve())
+        assert out.exists()
+
+    def test_export_to_csv_caps_rows(self, data_store, sample_trends, temp_db_path, monkeypatch):
+        data_store.save_trends_bulk(sample_trends)
+        monkeypatch.setattr(data_store, "_MAX_EXPORT_ROWS", 1)
+        out = temp_db_path.parent / "capped.csv"
+        data_store.export_to_csv("trends", str(out))
+        lines = out.read_text(encoding="utf-8").strip().splitlines()
+        # header + one data row
+        assert len(lines) == 2
