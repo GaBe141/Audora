@@ -4,18 +4,31 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
+import asyncio
+import io
 import subprocess
 import sys
 from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.data_store import EnhancedMusicDataStore  # noqa: E402
+from core.notification_service import (  # noqa: E402
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
+
+ALLOWED_DEMO_MODES = frozenset({"statistical", "trending", "multi_source", "platform", "all"})
 
 app = dash.Dash(
     __name__,
@@ -345,6 +358,10 @@ app.layout = dbc.Container(
 
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
+    if not isinstance(args, list) or not args:
+        return "Error", "Invalid command"
+    if not all(isinstance(arg, str) and "\x00" not in arg for arg in args):
+        return "Error", "Invalid command arguments"
     try:
         proc = subprocess.Popen(
             args,
@@ -364,9 +381,15 @@ def _run_command(args: list[str]) -> tuple[str, str]:
         return "Error", str(e)
 
 
+def _run_demo(demo_value: str) -> tuple[str, str]:
+    """Run an allowlisted demo mode via main.py."""
+    if demo_value not in ALLOWED_DEMO_MODES:
+        return "Error", "Invalid demo mode"
+    return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
+
+
 def _get_data_store():
     """Return an EnhancedMusicDataStore pointed at the default DB path."""
-    from core.data_store import EnhancedMusicDataStore
     db_path = PROJECT_ROOT / "data" / "enhanced_music_trends.db"
     return EnhancedMusicDataStore(str(db_path))
 
@@ -396,7 +419,7 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
-        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
+        return _run_demo(demo_value)
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
     if triggered == "btn-validate":
@@ -560,8 +583,6 @@ def search_history(_n, platform, min_score, days, artist_filter):
 def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
-    import io
-    import pandas as pd
     df = pd.DataFrame(table_data)
     buf = io.StringIO()
     df.to_csv(buf, index=False)
@@ -586,13 +607,17 @@ def export_csv(_n, table_data):
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
     try:
-        from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
+            svc._validate_webhook_url(slack_url, allow_private=False)
             svc.config["slack"]["webhook_url"] = slack_url
         if discord_url:
+            svc._validate_webhook_url(discord_url, allow_private=False)
             svc.config["discord"]["webhook_url"] = discord_url
         if webhook_url:
+            svc._validate_webhook_url(
+                webhook_url, allow_private=svc._allow_private_webhooks()
+            )
             svc.config["webhook"]["url"] = webhook_url
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
@@ -621,14 +646,11 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         if not url:
             return "No URL"
         try:
-            import asyncio
-            from core.notification_service import (
-                EnhancedNotificationService,
-                NotificationChannel,
-                NotificationMessage,
-                NotificationPriority,
-            )
             svc = EnhancedNotificationService()
+            allow_private = (
+                channel_key == "webhook" and svc._allow_private_webhooks()
+            )
+            svc._validate_webhook_url(url, allow_private=allow_private)
             svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
             channel = getattr(NotificationChannel, channel_enum_name)
             msg = NotificationMessage(

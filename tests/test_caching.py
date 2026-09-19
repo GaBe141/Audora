@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import fnmatch
+import json
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,128 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1,), {"a": 2})
+        parts = key.split(":")
+        assert parts[0] == "fn"
+        assert all(len(part) == 64 for part in parts[1:])
+
+
+class FakeRedis:
+    """In-memory Redis stand-in that refuses FLUSHDB."""
+
+    def __init__(self):
+        self.store: dict[str | bytes, bytes] = {}
+        self.flushdb_called = False
+
+    def ping(self):
+        return True
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def set(self, key, value):
+        self.store[key] = value
+        return True
+
+    def setex(self, key, ttl, value):
+        self.store[key] = value
+        return True
+
+    def delete(self, *keys):
+        count = 0
+        for key in keys:
+            if key in self.store:
+                del self.store[key]
+                count += 1
+        return count
+
+    def flushdb(self):
+        self.flushdb_called = True
+        raise AssertionError("FLUSHDB must not be used")
+
+    def exists(self, key):
+        return 1 if key in self.store else 0
+
+    def scan(self, cursor=0, match=None, count=None):
+        keys = list(self.store.keys())
+        if match:
+            pattern = match.decode() if isinstance(match, bytes) else match
+
+            def _matches(stored_key):
+                text = stored_key.decode() if isinstance(stored_key, bytes) else stored_key
+                return fnmatch.fnmatch(text, pattern)
+
+            keys = [key for key in keys if _matches(key)]
+        return 0, keys
+
+
+def _make_redis_backend() -> tuple[RedisCacheBackend, FakeRedis]:
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = b"unit-test-signing-key"
+    backend._key_prefix = "audora"
+    fake = FakeRedis()
+    backend._client = fake
+    return backend, fake
+
+
+class TestRedisJsonSerialization:
+    """Redis backend must never pickle and must reject legacy payloads."""
+
+    def test_json_round_trip(self):
+        backend, _fake = _make_redis_backend()
+        backend.set("audora:json", {"track": "Song", "score": 9.5})
+        assert backend.get("audora:json") == {"track": "Song", "score": 9.5}
+
+    def test_bytes_round_trip(self):
+        backend, _fake = _make_redis_backend()
+        backend.set("audora:bytes", b"binary-payload")
+        assert backend.get("audora:bytes") == b"binary-payload"
+
+    def test_dataframe_round_trip(self):
+        backend, _fake = _make_redis_backend()
+        df = pd.DataFrame({"track": ["A"], "score": [1.0]})
+        backend.set("audora:df", df)
+        result = backend.get("audora:df")
+        assert list(result.columns) == ["track", "score"]
+        assert result.iloc[0]["track"] == "A"
+
+    def test_rejects_legacy_and_pickle_payloads(self):
+        backend, fake = _make_redis_backend()
+        fake.store["audora:legacy"] = json.dumps({"v": 1, "payload": "AAAA"}).encode()
+        fake.store["audora:pickle"] = b"\x80\x04\x95"  # pickle protocol header
+        assert backend.get("audora:legacy") is None
+        assert backend.get("audora:pickle") is None
+        assert "audora:legacy" not in fake.store
+        assert "audora:pickle" not in fake.store
+
+    def test_rejects_tampered_signature(self):
+        backend, fake = _make_redis_backend()
+        backend.set("audora:tamper", {"ok": True})
+        envelope = json.loads(fake.store["audora:tamper"])
+        envelope["sig"] = "0" * 64
+        fake.store["audora:tamper"] = json.dumps(envelope).encode()
+        assert backend.get("audora:tamper") is None
+
+    def test_rejects_unsupported_objects(self):
+        backend, fake = _make_redis_backend()
+        backend.set("audora:bad", object())
+        assert "audora:bad" not in fake.store
+
+    def test_clear_uses_prefix_scan_not_flushdb(self):
+        backend, fake = _make_redis_backend()
+        backend.set("audora:keep-scope", {"a": 1})
+        fake.store["other:app"] = b"untouched"
+        backend.clear()
+        assert fake.flushdb_called is False
+        assert "audora:keep-scope" not in fake.store
+        assert fake.store["other:app"] == b"untouched"
+
+    def test_serialize_envelope_is_json_not_pickle(self):
+        backend, _fake = _make_redis_backend()
+        raw = backend._serialize({"hello": "world"})
+        envelope = json.loads(raw)
+        assert envelope["v"] == 2
+        assert "pickle" not in json.dumps(envelope).lower()
+
