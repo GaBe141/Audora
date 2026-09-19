@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,81 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", (1, 2), {"b": 2, "a": 1})
+        digest = key.split(":")[1]
+        expected = hashlib.sha256(
+            json.dumps((1, 2), sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert digest == expected
+        assert len(digest) == 64
+
+
+def _unsigned_redis_backend() -> RedisCacheBackend:
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = b"unit-test-signing-key"
+    backend._key_prefix = "audora"
+    return backend
+
+
+class TestRedisSafeSerialization:
+    """Redis payloads must be signed JSON, never pickle."""
+
+    def test_json_roundtrip(self):
+        backend = _unsigned_redis_backend()
+        payload = backend._serialize({"track": "Song", "score": 91})
+        assert b"pickle" not in payload.lower()
+        assert json.loads(payload.decode("utf-8"))["v"] == 2
+        assert backend._deserialize(payload) == {"track": "Song", "score": 91}
+
+    def test_bytes_roundtrip(self):
+        backend = _unsigned_redis_backend()
+        payload = backend._serialize(b"binary-cache")
+        assert backend._deserialize(payload) == b"binary-cache"
+
+    def test_dataframe_roundtrip(self):
+        backend = _unsigned_redis_backend()
+        frame = pd.DataFrame({"track": ["A"], "score": [10]})
+        restored = backend._deserialize(backend._serialize(frame))
+        assert isinstance(restored, pd.DataFrame)
+        assert list(restored["track"]) == ["A"]
+        assert list(restored["score"]) == [10]
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = _unsigned_redis_backend()
+        legacy = json.dumps(
+            {"v": 1, "alg": "HMAC-SHA256", "sig": "deadbeef", "payload": "cG9z"}
+        ).encode("utf-8")
+        assert backend._deserialize(legacy) is None
+
+    def test_rejects_tampered_signature(self):
+        backend = _unsigned_redis_backend()
+        envelope = json.loads(backend._serialize("ok").decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = _unsigned_redis_backend()
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            backend._serialize(object())
+
+    def test_clear_does_not_flush_entire_database(self):
+        backend = _unsigned_redis_backend()
+        deleted: list[bytes] = []
+
+        class _Client:
+            def scan(self, cursor=0, match=None, count=200):
+                assert match == b"audora:*"
+                return 0, [b"audora:one", b"audora:two"]
+
+            def delete(self, *keys):
+                deleted.extend(keys)
+                return len(keys)
+
+            def flushdb(self):
+                raise AssertionError("flushdb must not be used")
+
+        backend._client = _Client()
+        backend.clear()
+        assert deleted == [b"audora:one", b"audora:two"]
