@@ -73,6 +73,15 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    _ALLOWED_EXPORT_TABLES = {
+        "trends",
+        "trend_history",
+        "viral_predictions",
+        "cross_platform_correlations",
+        "artists",
+        "tracks",
+    }
+    _EXPORT_MAX_ROWS = 100_000
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
@@ -927,22 +936,50 @@ class EnhancedMusicDataStore:
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
 
+    def _allowed_export_roots(self) -> list[Path]:
+        """Directories that CSV exports may be written into."""
+        roots = [
+            Path.cwd().resolve(),
+            Path(self.backup_dir).resolve(),
+            Path(self.db_path).resolve().parent,
+            (Path.cwd() / "data").resolve(),
+            (Path.cwd() / "exports").resolve(),
+        ]
+        unique_roots: list[Path] = []
+        for root in roots:
+            if root not in unique_roots:
+                unique_roots.append(root)
+        return unique_roots
+
+    def _resolve_export_path(self, filepath: str) -> Path:
+        """Resolve and confine an export path to allowed directories."""
+        if not filepath or not isinstance(filepath, str):
+            raise ValueError("Export path must be a non-empty string")
+
+        resolved = Path(filepath).expanduser().resolve()
+        if resolved.suffix.lower() != ".csv":
+            raise ValueError("Export path must have a .csv suffix")
+        if resolved == Path(self.db_path).resolve():
+            raise ValueError("Refusing to overwrite the database file")
+        if not any(
+            resolved == root or resolved.is_relative_to(root)
+            for root in self._allowed_export_roots()
+        ):
+            raise ValueError("Export path is outside allowed directories")
+        return resolved
+
     def export_to_csv(self, table: str, filepath: str, days: int | None = None) -> str:
         """Export table data to CSV.
 
         Note: Table name is validated against whitelist to prevent SQL injection.
+        Export paths are confined to the working tree, backup dir, and data/exports.
         """
-        # Whitelist valid table names to prevent SQL injection
-        valid_tables = {
-            "trends",
-            "trend_history",
-            "viral_predictions",
-            "cross_platform_correlations",
-            "artists",
-            "tracks",
-        }
-        if table not in valid_tables:
-            raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
+        if table not in self._ALLOWED_EXPORT_TABLES:
+            raise ValueError(
+                f"Invalid table name: {table}. Must be one of {self._ALLOWED_EXPORT_TABLES}"
+            )
+
+        export_path = self._resolve_export_path(filepath)
 
         with self.get_connection() as conn:
             if days:
@@ -958,13 +995,19 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            if len(df) > self._EXPORT_MAX_ROWS:
+                self.logger.warning(
+                    "CSV export truncated from %s to %s rows",
+                    len(df),
+                    self._EXPORT_MAX_ROWS,
+                )
+                df = df.head(self._EXPORT_MAX_ROWS)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(export_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {export_path}")
 
-        return filepath
+        return str(export_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
