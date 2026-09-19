@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
 import time
+from unittest.mock import MagicMock
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +125,101 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+def _unsigned_backend() -> RedisCacheBackend:
+    """Build a Redis backend without connecting, for serializer tests."""
+    backend = object.__new__(RedisCacheBackend)
+    backend._signing_key = b"test-cache-signing-key"
+    backend._key_prefix = "audora"
+    backend._client = MagicMock()
+    return backend
+
+
+class TestRedisSafeSerialization:
+    """Redis cache must never unpickle attacker-controlled payloads."""
+
+    def test_json_round_trip(self):
+        backend = _unsigned_backend()
+        original = {"track": "Song", "score": 91, "tags": ["pop", "viral"]}
+        assert backend._deserialize(backend._serialize(original)) == original
+
+    def test_bytes_round_trip(self):
+        backend = _unsigned_backend()
+        original = b"binary-cache-value"
+        assert backend._deserialize(backend._serialize(original)) == original
+
+    def test_dataframe_round_trip(self):
+        backend = _unsigned_backend()
+        original = pd.DataFrame({"track": ["A"], "score": [88.5]})
+        restored = backend._deserialize(backend._serialize(original))
+        assert list(restored.columns) == ["track", "score"]
+        assert restored.iloc[0]["track"] == "A"
+        assert restored.iloc[0]["score"] == 88.5
+
+    def test_rejects_legacy_pickle_payload(self):
+        backend = _unsigned_backend()
+        with pytest.raises(ValueError, match="envelope"):
+            backend._deserialize(b"cos\nsystem\n(S'id'\ntR.")
+
+    def test_rejects_unsigned_v1_pickle_envelope(self):
+        backend = _unsigned_backend()
+        legacy = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "deadbeef",
+                "payload": "gASVCwAAAAAAAACMBnBpa2xsZZQu",
+            }
+        ).encode("utf-8")
+        with pytest.raises(ValueError, match="envelope"):
+            backend._deserialize(legacy)
+
+    def test_rejects_tampered_signature(self):
+        backend = _unsigned_backend()
+        envelope = json.loads(backend._serialize({"ok": True}).decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        with pytest.raises(ValueError, match="signature"):
+            backend._deserialize(json.dumps(envelope).encode("utf-8"))
+
+    def test_rejects_unsupported_object(self):
+        backend = _unsigned_backend()
+
+        class NotSerializable:
+            pass
+
+        with pytest.raises(TypeError, match="Unsupported"):
+            backend._serialize(NotSerializable())
+
+    def test_none_round_trip_does_not_raise(self):
+        backend = _unsigned_backend()
+        assert backend._deserialize(backend._serialize(None)) is None
+
+    def test_get_deletes_invalid_payload(self):
+        backend = _unsigned_backend()
+        backend._client.get.return_value = b"not-a-valid-envelope"
+        assert backend.get("audora:bad") is None
+        backend._client.delete.assert_called_once_with("audora:bad")
+
+    def test_clear_uses_prefix_scan_not_flushdb(self):
+        backend = _unsigned_backend()
+        backend._client.scan.side_effect = [(0, [b"audora:one", b"audora:two"])]
+        backend.clear()
+        backend._client.flushdb.assert_not_called()
+        backend._client.scan.assert_called()
+        backend._client.delete.assert_called_once_with(b"audora:one", b"audora:two")
+
+
+class TestCacheKeyHashing:
+    """Deterministic cache keys must not use MD5."""
+
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"z": 3})
+        args_digest = hashlib.sha256(
+            json.dumps((1, 2), sort_keys=True, default=str).encode()
+        ).hexdigest()
+        kwargs_digest = hashlib.sha256(
+            json.dumps({"z": 3}, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert key == f"fn:{args_digest}:{kwargs_digest}"
+        assert len(args_digest) == 64
