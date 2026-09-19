@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import hmac
+import json
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +126,67 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedJsonCacheEnvelope:
+    """Redis-safe serialization must never execute pickle payloads."""
+
+    def test_round_trip_json_values(self):
+        key = b"test-signing-key"
+        payload = {"track": "Song", "score": 91, "tags": ["pop", "viral"]}
+        raw = serialize_cache_value(payload, key)
+        assert deserialize_cache_value(raw, key) == payload
+
+    def test_round_trip_bytes(self):
+        key = b"test-signing-key"
+        payload = b"\x00binary-cache\xff"
+        assert deserialize_cache_value(serialize_cache_value(payload, key), key) == payload
+
+    def test_round_trip_dataframe(self):
+        key = b"test-signing-key"
+        frame = pd.DataFrame({"track_name": ["A"], "score": [88.5]})
+        restored = deserialize_cache_value(serialize_cache_value(frame, key), key)
+        assert isinstance(restored, pd.DataFrame)
+        assert list(restored["track_name"]) == ["A"]
+        assert restored["score"].iloc[0] == pytest.approx(88.5)
+
+    def test_rejects_unsupported_objects(self):
+        class Custom:
+            pass
+
+        with pytest.raises(TypeError, match="cannot be cached safely"):
+            serialize_cache_value(Custom(), b"key")
+
+    def test_rejects_legacy_and_unsigned_payloads(self):
+        key = b"test-signing-key"
+        assert deserialize_cache_value(b"not-json", key) is None
+        legacy = json.dumps(
+            {"v": 1, "alg": "HMAC-SHA256", "sig": "x", "payload": "YQ=="}
+        ).encode()
+        assert deserialize_cache_value(legacy, key) is None
+
+    def test_rejects_tampered_signature(self):
+        key = b"test-signing-key"
+        raw = serialize_cache_value({"ok": True}, key)
+        envelope = json.loads(raw.decode())
+        envelope["sig"] = "0" * 64
+        assert deserialize_cache_value(json.dumps(envelope).encode(), key) is None
+
+    def test_rejects_forged_payload_with_wrong_key(self):
+        raw = serialize_cache_value({"ok": True}, b"correct-key")
+        assert deserialize_cache_value(raw, b"other-key") is None
+
+    def test_rejects_pickle_bytes_masquerading_as_envelope(self):
+        # Classic pickle protocol header must not be treated as a valid cache entry.
+        assert deserialize_cache_value(b"\x80\x04malicious", b"key") is None
+
+    def test_signed_body_cannot_be_swapped_without_new_mac(self):
+        key = b"test-signing-key"
+        raw = serialize_cache_value({"ok": True}, key)
+        envelope = json.loads(raw.decode())
+        forged_inner = json.dumps(
+            {"v": 2, "kind": "json", "payload": json.dumps({"pwned": True})}
+        ).encode()
+        envelope["body"] = __import__("base64").b64encode(forged_inner).decode("ascii")
+        envelope["sig"] = hmac.new(b"attacker", forged_inner, hashlib.sha256).hexdigest()
+        assert deserialize_cache_value(json.dumps(envelope).encode(), key) is None
