@@ -1,9 +1,20 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+from unittest.mock import MagicMock, patch
+
+import pandas as pd
+import pytest
 
 from core.caching import (
+    REDIS_AVAILABLE,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +129,77 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestCacheKeyHashing:
+    """Cache keys must use SHA-256 rather than weak MD5 hashes."""
+
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("prefix", ("arg",), {"k": "v"})
+        digest_parts = key.split(":")[1:]
+        assert digest_parts
+        assert all(len(part) == 64 for part in digest_parts)
+
+
+@pytest.mark.skipif(not REDIS_AVAILABLE, reason="redis package is not installed")
+class TestRedisCacheSerialization:
+    """Redis payloads must be signed JSON, never pickle."""
+
+    @pytest.fixture
+    def redis_backend(self, monkeypatch):
+        monkeypatch.setenv("AUDORA_CACHE_SIGNING_KEY", "unit-test-signing-key")
+        with patch("core.caching.ConnectionPool"), patch("core.caching.redis.Redis") as redis_cls:
+            client = MagicMock()
+            client.ping.return_value = True
+            redis_cls.return_value = client
+            backend = RedisCacheBackend(key_prefix="audora")
+            backend._client = client
+            yield backend
+
+    def test_json_roundtrip(self, redis_backend):
+        payload = redis_backend._serialize({"track": "One", "score": 91})
+        assert redis_backend._deserialize(payload) == {"track": "One", "score": 91}
+
+    def test_bytes_roundtrip(self, redis_backend):
+        payload = redis_backend._serialize(b"binary-cache")
+        assert redis_backend._deserialize(payload) == b"binary-cache"
+
+    def test_dataframe_roundtrip(self, redis_backend):
+        frame = pd.DataFrame({"track": ["A"], "score": [10]})
+        restored = redis_backend._deserialize(redis_backend._serialize(frame))
+        assert isinstance(restored, pd.DataFrame)
+        assert restored["track"].tolist() == ["A"]
+        assert restored["score"].tolist() == [10]
+
+    def test_rejects_pickle_payload(self, redis_backend):
+        assert redis_backend._deserialize(pickle.dumps({"owned": True})) is None
+
+    def test_rejects_tampered_signature(self, redis_backend):
+        envelope = json.loads(redis_backend._serialize({"ok": True}))
+        envelope["sig"] = "0" * 64
+        assert redis_backend._deserialize(json.dumps(envelope).encode()) is None
+
+    def test_rejects_legacy_v1_envelope(self, redis_backend):
+        inner = b'{"owned": true}'
+        signature = hmac.new(
+            redis_backend._signing_key, inner, hashlib.sha256
+        ).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(inner).decode("ascii"),
+        }
+        assert redis_backend._deserialize(json.dumps(envelope).encode()) is None
+
+    def test_rejects_unsupported_type(self, redis_backend):
+        with pytest.raises(TypeError, match="JSON-compatible"):
+            redis_backend._serialize(object())
+
+    def test_clear_scans_prefix_instead_of_flushdb(self, redis_backend):
+        redis_backend._client.scan_iter.return_value = [b"audora:a", b"audora:b"]
+        redis_backend.clear()
+        redis_backend._client.flushdb.assert_not_called()
+        redis_backend._client.delete.assert_called_once_with(b"audora:a", b"audora:b")
+        redis_backend._client.scan_iter.assert_called_once()
+        assert redis_backend._client.scan_iter.call_args.kwargs["match"] == "audora:*"
