@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,77 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"z": 3})
+        digest = key.split(":")[-1]
+        assert len(digest) == 64
+        assert all(c in "0123456789abcdef" for c in digest)
+
+
+def _unsigned_redis_backend(signing_key: bytes = b"unit-test-signing-key") -> RedisCacheBackend:
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = signing_key
+    backend.key_prefix = "audora"
+    return backend
+
+
+class TestRedisSafeSerialization:
+    """Redis payloads must be signed JSON envelopes, never pickle."""
+
+    def test_json_roundtrip(self):
+        backend = _unsigned_redis_backend()
+        payload = {"track": "Song", "score": 91.5, "tags": ["pop", "viral"]}
+        assert backend._deserialize(backend._serialize(payload)) == payload
+
+    def test_bytes_roundtrip(self):
+        backend = _unsigned_redis_backend()
+        assert backend._deserialize(backend._serialize(b"binary-cache")) == b"binary-cache"
+
+    def test_dataframe_roundtrip(self):
+        backend = _unsigned_redis_backend()
+        frame = pd.DataFrame({"track": ["A", "B"], "score": [1.0, 2.5]})
+        restored = backend._deserialize(backend._serialize(frame))
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(frame, restored, check_dtype=False)
+
+    def test_rejects_raw_pickle_payloads(self):
+        backend = _unsigned_redis_backend()
+        assert backend._deserialize(pickle.dumps({"owned": True})) is None
+
+    def test_rejects_legacy_v1_envelopes(self):
+        backend = _unsigned_redis_backend()
+        legacy = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "00",
+                "payload": "cpickle",
+            }
+        ).encode("utf-8")
+        assert backend._deserialize(legacy) is None
+
+    def test_rejects_tampered_payload(self):
+        backend = _unsigned_redis_backend()
+        envelope = json.loads(backend._serialize({"score": 1}).decode("utf-8"))
+        envelope["payload"] = {"score": 99}
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = _unsigned_redis_backend()
+
+        class Unsupported:
+            pass
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            backend._serialize(Unsupported())
+
+    def test_clear_refuses_unprefixed_flush(self):
+        backend = _unsigned_redis_backend()
+        backend.key_prefix = ""
+
+        def _flushdb() -> None:
+            raise AssertionError("FLUSHDB")
+
+        backend._client = type("Client", (), {"flushdb": staticmethod(_flushdb)})()
+        backend.clear()
