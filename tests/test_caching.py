@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    SAFE_CACHE_VERSION,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +124,60 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+def _redis_codec(signing_key: bytes = b"unit-test-signing-key") -> RedisCacheBackend:
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = signing_key
+    return backend
+
+
+class TestRedisSafeSerialization:
+    """Regression tests for HMAC-signed JSON Redis payloads."""
+
+    def test_json_round_trip(self):
+        backend = _redis_codec()
+        value = {"track": "Song", "score": 91, "tags": ["pop", "viral"]}
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_bytes_round_trip(self):
+        backend = _redis_codec()
+        value = b"\x00binary-cache-value\xff"
+        assert backend._deserialize(backend._serialize(value)) == value
+
+    def test_dataframe_round_trip(self):
+        backend = _redis_codec()
+        value = pd.DataFrame({"track": ["A", "B"], "score": [10, 20]})
+        restored = backend._deserialize(backend._serialize(value))
+        pd.testing.assert_frame_equal(restored.reset_index(drop=True), value)
+
+    def test_rejects_unsupported_objects(self):
+        backend = _redis_codec()
+
+        class Unsafe:
+            pass
+
+        with pytest.raises(TypeError, match="JSON-serializable"):
+            backend._serialize(Unsafe())
+
+    def test_rejects_legacy_and_malformed_payloads(self):
+        backend = _redis_codec()
+        assert backend._deserialize(b"not-json") is None
+        assert backend._deserialize(b'{"v": 1, "alg": "HMAC-SHA256", "sig": "x", "payload": {}}') is None
+        pickle_like = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "deadbeef",
+                "payload": "gASV",
+            }
+        ).encode("utf-8")
+        assert backend._deserialize(pickle_like) is None
+
+    def test_rejects_tampered_payload(self):
+        backend = _redis_codec()
+        raw = backend._serialize({"ok": True})
+        envelope = json.loads(raw.decode("utf-8"))
+        envelope["payload"]["data"]["ok"] = False
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+        assert envelope["v"] == SAFE_CACHE_VERSION
