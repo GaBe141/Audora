@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+import inspect
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,25 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestCsvExportPathAndLimits:
+    """CSV export must stay inside trusted directories and cap rows."""
+
+    def test_export_rejects_path_traversal(self, data_store):
+        with pytest.raises(ValueError, match="allowed directories"):
+            data_store.export_to_csv("trends", "/tmp/audora-evil-export.csv")
+
+    def test_export_writes_inside_db_parent(self, data_store, sample_trends, temp_db_path):
+        data_store.save_trends_bulk(sample_trends)
+        out = temp_db_path.parent / "trends.csv"
+        result = data_store.export_to_csv("trends", str(out))
+        assert out.exists()
+        assert result == str(out.resolve())
+
+    def test_export_query_includes_row_limit(self):
+        source = inspect.getsource(EnhancedMusicDataStore.export_to_csv)
+        assert "LIMIT" in source
+        assert "_MAX_CSV_EXPORT_ROWS" in source
+        assert EnhancedMusicDataStore._MAX_CSV_EXPORT_ROWS == 100_000
+
