@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +125,54 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSafeCacheSerialization:
+    """Redis payload helpers must never execute pickle or accept unsigned data."""
+
+    def test_json_round_trip(self):
+        key = b"test-signing-key"
+        payload = serialize_cache_value({"tracks": 3, "ok": True}, key)
+        assert pickle_bytes_absent(payload)
+        assert deserialize_cache_value(payload, key) == {"tracks": 3, "ok": True}
+
+    def test_bytes_and_dataframe_round_trip(self):
+        key = b"test-signing-key"
+        raw = serialize_cache_value(b"binary-cache", key)
+        assert deserialize_cache_value(raw, key) == b"binary-cache"
+
+        frame = pd.DataFrame({"track": ["a"], "score": [1.5]})
+        restored = deserialize_cache_value(serialize_cache_value(frame, key), key)
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_legacy_pickle_and_tampered_payloads(self):
+        key = b"test-signing-key"
+        with pytest.raises(ValueError, match="JSON envelope"):
+            deserialize_cache_value(b"cos\nsystem\n(S'id'\ntR.", key)
+
+        signed = serialize_cache_value({"a": 1}, key)
+        envelope = json.loads(signed.decode("utf-8"))
+        envelope["payload"] = json.dumps({"a": 2})
+        tampered = json.dumps(envelope).encode("utf-8")
+        with pytest.raises(ValueError, match="signature"):
+            deserialize_cache_value(tampered, key)
+
+    def test_rejects_unsupported_objects(self):
+        class Custom:
+            pass
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            serialize_cache_value(Custom(), b"key")
+
+    def test_cache_keys_use_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1,), {"q": "x"})
+        args_digest = hashlib.sha256(b"[1]").hexdigest()
+        kwargs_digest = hashlib.sha256(b'{"q": "x"}').hexdigest()
+        assert key == f"fn:{args_digest}:{kwargs_digest}"
+        assert hashlib.md5(b"[1]").hexdigest() not in key
+
+
+def pickle_bytes_absent(payload: bytes) -> bool:
+    """Return True when the signed envelope does not contain pickle opcodes."""
+    envelope = json.loads(payload.decode("utf-8"))
+    return envelope["kind"] in {"json", "bytes", "pandas_dataframe"} and "pickle" not in envelope
