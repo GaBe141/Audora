@@ -1,10 +1,22 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
+
+SIGNING_KEY = b"test-cache-signing-key"
 
 
 class TestLocalCacheBackend:
@@ -118,3 +130,56 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSafeSerialization:
+    """Redis payloads must be HMAC-signed JSON, never pickle."""
+
+    def test_json_round_trip(self):
+        payload = serialize_cache_value({"artist": "A", "score": 9.5}, SIGNING_KEY)
+        assert deserialize_cache_value(payload, SIGNING_KEY) == {"artist": "A", "score": 9.5}
+
+    def test_bytes_round_trip(self):
+        payload = serialize_cache_value(b"binary-cache", SIGNING_KEY)
+        assert deserialize_cache_value(payload, SIGNING_KEY) == b"binary-cache"
+
+    def test_dataframe_round_trip(self):
+        frame = pd.DataFrame({"track": ["One"], "score": [88.0]})
+        payload = serialize_cache_value(frame, SIGNING_KEY)
+        restored = deserialize_cache_value(payload, SIGNING_KEY)
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored.reset_index(drop=True), frame)
+
+    def test_rejects_legacy_pickle_payload(self):
+        assert deserialize_cache_value(pickle.dumps({"owned": True}), SIGNING_KEY) is None
+
+    def test_rejects_tampered_signature(self):
+        payload = serialize_cache_value({"ok": True}, SIGNING_KEY)
+        envelope = json.loads(payload.decode("utf-8"))
+        flipped = "0" if envelope["sig"][0] != "0" else "1"
+        envelope["sig"] = flipped + envelope["sig"][1:]
+        tampered = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        assert deserialize_cache_value(tampered, SIGNING_KEY) is None
+
+    def test_rejects_wrong_signing_key(self):
+        payload = serialize_cache_value({"ok": True}, SIGNING_KEY)
+        assert deserialize_cache_value(payload, b"other-key") is None
+
+    def test_rejects_unsupported_objects(self):
+        class NotSerializable:
+            pass
+
+        with pytest.raises(TypeError, match="JSON-serializable"):
+            serialize_cache_value(NotSerializable(), SIGNING_KEY)
+
+    def test_rejects_unsigned_json_blob(self):
+        raw = json.dumps({"v": 2, "kind": "json", "data": {"x": 1}}).encode("utf-8")
+        assert deserialize_cache_value(raw, SIGNING_KEY) is None
+
+    def test_envelope_uses_hmac_sha256(self):
+        payload = serialize_cache_value("value", SIGNING_KEY)
+        envelope = json.loads(payload.decode("utf-8"))
+        stored = base64.b64decode(envelope["payload"])
+        expected = hmac.new(SIGNING_KEY, stored, hashlib.sha256).hexdigest()
+        assert envelope["alg"] == "HMAC-SHA256"
+        assert envelope["sig"] == expected

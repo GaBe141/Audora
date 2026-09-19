@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,25 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestCsvExportHardening:
+    """CSV export must reject path traversal and cap exported rows."""
+
+    def test_export_rejects_path_outside_allowed_roots(self, data_store):
+        with pytest.raises(ValueError, match="outside allowed directories"):
+            data_store.export_to_csv("trends", "/etc/passwd")
+
+    def test_export_writes_inside_db_parent(self, data_store, sample_trends, tmp_path):
+        data_store.save_trends_bulk(sample_trends)
+        dest = Path(data_store.db_path).parent / "trends_export.csv"
+        written = data_store.export_to_csv("trends", str(dest))
+        assert Path(written).exists()
+        assert Path(written).is_relative_to(Path(data_store.db_path).parent)
+
+    def test_export_rejects_unknown_table(self, data_store):
+        with pytest.raises(ValueError, match="Invalid table name"):
+            data_store.export_to_csv("trends; DROP TABLE trends", "out.csv")
+
+    def test_export_row_cap_constant(self):
+        assert EnhancedMusicDataStore._MAX_CSV_EXPORT_ROWS == 100_000
