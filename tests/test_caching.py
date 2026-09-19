@@ -1,10 +1,25 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
 import time
+from unittest.mock import MagicMock
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
+
+
+def _unsigned_backend(signing_key: bytes = b"test-signing-key") -> RedisCacheBackend:
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = signing_key
+    backend._key_prefix = "audora"
+    backend._client = MagicMock()
+    return backend
 
 
 class TestLocalCacheBackend:
@@ -118,3 +133,72 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSafeSerialization:
+    """HMAC-signed JSON envelopes must never execute pickle payloads."""
+
+    def test_json_round_trip(self):
+        backend = _unsigned_backend()
+        payload = {"track": "Song", "score": 91.5, "tags": ["viral", "pop"]}
+        assert backend._deserialize(backend._serialize(payload)) == payload
+
+    def test_bytes_round_trip(self):
+        backend = _unsigned_backend()
+        payload = b"\x00binary-cache\xff"
+        assert backend._deserialize(backend._serialize(payload)) == payload
+
+    def test_dataframe_round_trip(self):
+        backend = _unsigned_backend()
+        frame = pd.DataFrame({"track_name": ["A"], "score": [88.5]})
+        restored = backend._deserialize(backend._serialize(frame))
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored, frame)
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = _unsigned_backend()
+        legacy = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "deadbeef",
+                "payload": "gASVAAAAAAAA",
+            }
+        ).encode("utf-8")
+        assert backend._deserialize(legacy) is None
+
+    def test_rejects_tampered_signature(self):
+        backend = _unsigned_backend()
+        envelope = json.loads(backend._serialize({"ok": True}).decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_unsupported_objects(self):
+        backend = _unsigned_backend()
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            backend._serialize(object())
+
+    def test_get_deletes_malformed_payload(self):
+        backend = _unsigned_backend()
+        backend._client.get.return_value = b"not-json"
+        assert backend.get("audora:bad") is None
+        backend._client.delete.assert_called_once_with("audora:bad")
+
+    def test_clear_uses_prefix_scan_not_flushdb(self):
+        backend = _unsigned_backend()
+        backend._client.scan.return_value = (0, [b"audora:one", b"audora:two"])
+        backend.clear()
+        backend._client.scan.assert_called()
+        backend._client.delete.assert_called_once()
+        backend._client.flushdb.assert_not_called()
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"z": 3})
+        expected_args = hashlib.sha256(
+            json.dumps((1, 2), sort_keys=True, default=str).encode()
+        ).hexdigest()
+        expected_kwargs = hashlib.sha256(
+            json.dumps({"z": 3}, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert key == f"fn:{expected_args}:{expected_kwargs}"
+        assert "md5" not in key

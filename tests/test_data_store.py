@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,22 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestCsvExportSecurity:
+    """CSV export must stay inside allowed directories and reject unsafe tables."""
+
+    def test_export_to_csv_writes_inside_db_parent(self, data_store, sample_trends, temp_db_path):
+        data_store.save_trends_bulk(sample_trends)
+        dest = temp_db_path.parent / "trends.csv"
+        written = data_store.export_to_csv("trends", str(dest))
+        assert Path(written).exists()
+        assert Path(written).read_text(encoding="utf-8")
+
+    def test_export_to_csv_rejects_path_outside_allowed_roots(self, data_store, tmp_path):
+        with pytest.raises(ValueError, match="outside allowed directories"):
+            data_store.export_to_csv("trends", str(tmp_path.parent / "escape.csv"))
+
+    def test_export_to_csv_rejects_unknown_table(self, data_store, temp_db_path):
+        with pytest.raises(ValueError, match="Invalid table name"):
+            data_store.export_to_csv("trends; DROP TABLE trends", str(temp_db_path.parent / "x.csv"))
