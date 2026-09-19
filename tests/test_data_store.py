@@ -107,3 +107,22 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestCsvExportHardening:
+    """CSV export must confine paths and cap rows."""
+
+    def test_export_to_allowed_backup_dir(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        target = data_store.backup_dir / "trends.csv"
+        result = data_store.export_to_csv("trends", str(target))
+        assert result == str(target.resolve())
+        assert target.exists()
+
+    def test_export_rejects_path_outside_allowed_dirs(self, data_store):
+        with pytest.raises(ValueError, match="outside allowed directories"):
+            data_store.export_to_csv("trends", "/etc/audora-export.csv")
+
+    def test_export_rejects_invalid_table(self, data_store):
+        with pytest.raises(ValueError, match="Invalid table name"):
+            data_store.export_to_csv("trends; DROP TABLE trends", str(data_store.backup_dir / "x.csv"))
