@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,22 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportToCsvSecurity:
+    """CSV export must not allow path traversal or unbounded dumps."""
+
+    def test_export_rejects_invalid_table_name(self, data_store):
+        with pytest.raises(ValueError, match="Invalid table name"):
+            data_store.export_to_csv("trends; DROP TABLE trends", "export.csv")
+
+    def test_export_rejects_path_outside_allowed_directories(self, data_store):
+        with pytest.raises(ValueError, match="allowed directories"):
+            data_store.export_to_csv("trends", "/etc/audora_export.csv")
+
+    def test_export_writes_within_db_parent(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        dest = Path(data_store.db_path).resolve().parent / "trends_export.csv"
+        result = data_store.export_to_csv("trends", str(dest))
+        assert Path(result).exists()
+        assert Path(result).read_text().count("Track One") >= 1

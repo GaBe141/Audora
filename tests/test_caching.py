@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import hashlib
+import json
 import time
 
+import pandas as pd
+import pytest
+
 from core.caching import (
+    _MISSING,
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +125,63 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+def _unsigned_backend() -> RedisCacheBackend:
+    backend = object.__new__(RedisCacheBackend)
+    backend._signing_key = b"unit-test-signing-key"
+    return backend
+
+
+class TestRedisJsonEnvelope:
+    """Redis serialization must never pickle and must reject tampered payloads."""
+
+    def test_json_value_round_trip(self):
+        backend = _unsigned_backend()
+        payload = backend._serialize({"track": "Song", "score": 91})
+        assert b"pickle" not in payload
+        assert backend._deserialize(payload) == {"track": "Song", "score": 91}
+
+    def test_bytes_value_round_trip(self):
+        backend = _unsigned_backend()
+        payload = backend._serialize(b"binary-cache")
+        assert backend._deserialize(payload) == b"binary-cache"
+
+    def test_dataframe_round_trip(self):
+        backend = _unsigned_backend()
+        frame = pd.DataFrame({"track_name": ["A"], "score": [12.5]})
+        restored = backend._deserialize(backend._serialize(frame))
+        assert restored is not _MISSING
+        pd.testing.assert_frame_equal(restored.reset_index(drop=True), frame)
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = _unsigned_backend()
+        legacy = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "deadbeef",
+                "payload": "gASVCwAAAAAAAACMBXBldGFslC4=",
+            }
+        ).encode("utf-8")
+        assert backend._deserialize(legacy) is _MISSING
+
+    def test_rejects_tampered_signature(self):
+        backend = _unsigned_backend()
+        envelope = json.loads(backend._serialize({"ok": True}))
+        envelope["data"] = json.dumps({"ok": False})
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is _MISSING
+
+    def test_rejects_unsupported_objects(self):
+        backend = _unsigned_backend()
+
+        class NotSerializable:
+            pass
+
+        with pytest.raises(TypeError):
+            backend._serialize(NotSerializable())
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"z": 3})
+        assert hashlib.md5().hexdigest() not in key
+        assert len([part for part in key.split(":") if len(part) == 64]) == 2

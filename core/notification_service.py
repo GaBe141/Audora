@@ -4,12 +4,14 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
 import os
-import socket
 import smtplib
+import socket
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -190,8 +192,15 @@ class EnhancedNotificationService:
         config_path = Path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         try:
             with config_path.open("w") as f:
@@ -235,6 +244,8 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must include a valid hostname")
 
         hostname = parsed.hostname
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("Webhook URLs must not include embedded credentials")
         if hostname.lower() == "localhost":
             raise ValueError("Localhost webhook URLs are not allowed")
 
@@ -254,6 +265,34 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _sanitize_header(self, value: str) -> str:
+        """Strip CR/LF to prevent SMTP header injection."""
+        return value.replace("\r", "").replace("\n", "")
+
+    def _is_allowed_attachment(self, path: Path) -> bool:
+        """Allow attachments only from the working tree's known output directories."""
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            return False
+
+        allowed_roots = [
+            Path.cwd().resolve(),
+            (Path.cwd() / "data").resolve(),
+            (Path.cwd() / "exports").resolve(),
+            (Path.cwd() / "config").resolve(),
+        ]
+        return any(resolved == root or resolved.is_relative_to(root) for root in allowed_roots)
+
+    def _reject_redirect(self, status: int) -> dict[str, Any] | None:
+        """Return an error payload when a webhook responds with a redirect."""
+        if 300 <= status < 400:
+            return {
+                "success": False,
+                "error": f"Webhook redirected ({status}); refusing to follow",
+            }
+        return None
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -532,9 +571,20 @@ System status: {{ system_status }}
 
         try:
             msg = MIMEMultipart("alternative")
-            msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
-            msg["Subject"] = message.title
+            from_address = self._sanitize_header(
+                email_config.get("from_address", "music-discovery@example.com")
+            )
+            recipients = [
+                self._sanitize_header(r.strip())
+                for r in email_config["recipients"]
+                if isinstance(r, str) and r.strip()
+            ]
+            if not recipients:
+                return {"success": False, "error": "Email not configured"}
+
+            msg["From"] = from_address
+            msg["To"] = ", ".join(recipients)
+            msg["Subject"] = self._sanitize_header(message.title)
 
             # Set priority
             if message.priority in [NotificationPriority.HIGH, NotificationPriority.CRITICAL]:
@@ -552,40 +602,53 @@ System status: {{ system_status }}
 
             msg.attach(MIMEText(text_content, "plain"))
 
-            # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            escaped = html.escape(text_content)
+            html_content = escaped.replace("\n", "<br>")
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
-            # Add attachments
+            # Add attachments only from allowed directories
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    attachment_file = Path(attachment_path)
+                    if not attachment_file.exists() or not self._is_allowed_attachment(
+                        attachment_file
+                    ):
+                        self.logger.warning("Skipping disallowed attachment path")
+                        continue
+                    with attachment_file.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        filename = self._sanitize_header(attachment_file.name)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f'attachment; filename="{filename}"',
+                        )
+                        msg.attach(attachment)
 
-            # Send email
+            use_tls = email_config.get("use_tls", True)
+            username = email_config.get("username")
+            password = email_config.get("password")
+            if username and password and not use_tls:
+                return {
+                    "success": False,
+                    "error": "SMTP authentication requires TLS",
+                }
+
             server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            try:
+                if use_tls:
+                    server.starttls(context=ssl.create_default_context())
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+                if username and password:
+                    server.login(username, password)
 
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
+                server.send_message(msg)
+            finally:
+                server.quit()
 
-            server.send_message(msg)
-            server.quit()
-
-            self.logger.info(
-                f"Email notification sent to {len(email_config['recipients'])} recipients"
-            )
-            return {"success": True, "recipients": len(email_config["recipients"])}
+            self.logger.info("Email notification sent to %s recipients", len(recipients))
+            return {"success": True, "recipients": len(recipients)}
 
         except Exception as e:
             self.logger.error(f"Failed to send email notification: {e}")
@@ -650,8 +713,11 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(webhook_url, json=slack_message, allow_redirects=False) as response,
             ):
+                redirect_error = self._reject_redirect(response.status)
+                if redirect_error:
+                    return redirect_error
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -717,8 +783,11 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(webhook_url, json=discord_message, allow_redirects=False) as response,
             ):
+                redirect_error = self._reject_redirect(response.status)
+                if redirect_error:
+                    return redirect_error
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
                     return {"success": True, "status_code": response.status}
@@ -752,9 +821,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
-            url = self._validate_webhook_url(
-                url, allow_private=self._allow_private_webhooks()
-            )
+            url = self._validate_webhook_url(url, allow_private=self._allow_private_webhooks())
             # Prepare payload
             payload = {
                 "title": message.title,
@@ -777,9 +844,16 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
                 ) as response,
             ):
+                redirect_error = self._reject_redirect(response.status)
+                if redirect_error:
+                    return redirect_error
                 if 200 <= response.status < 300:
                     self.logger.info(f"Webhook notification sent successfully: {response.status}")
                     return {"success": True, "status_code": response.status}
