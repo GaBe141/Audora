@@ -1,7 +1,11 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
+import pandas as pd
 import pytest
 
+from core import data_store as data_store_module
 from core.data_store import EnhancedMusicDataStore
 
 
@@ -107,3 +111,27 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportToCsvSecurity:
+    """CSV export must stay inside allowed directories and honor the row cap."""
+
+    def test_export_rejects_path_outside_allowlist(self, data_store):
+        with pytest.raises(ValueError, match="allowed directories"):
+            data_store.export_to_csv("trends", "/etc/audora_export.csv")
+
+    def test_export_writes_under_db_parent(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        dest = Path(data_store.db_path).parent / "trends.csv"
+        result = data_store.export_to_csv("trends", str(dest))
+        assert Path(result).exists()
+        exported = pd.read_csv(result)
+        assert len(exported) >= 1
+
+    def test_export_respects_row_cap(self, data_store, sample_trends, monkeypatch):
+        data_store.save_trends_bulk(sample_trends)
+        monkeypatch.setattr(data_store_module, "MAX_EXPORT_ROWS", 1)
+        dest = Path(data_store.db_path).parent / "capped.csv"
+        data_store.export_to_csv("trends", str(dest))
+        exported = pd.read_csv(dest)
+        assert len(exported) <= 1
