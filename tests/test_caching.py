@@ -1,10 +1,21 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import json
 import time
+from pathlib import Path
+
+import pandas as pd
 
 from core.caching import (
+    CACHE_ENVELOPE_VERSION,
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
+
+SIGNING_KEY = b"unit-test-cache-signing-key"
 
 
 class TestLocalCacheBackend:
@@ -118,3 +129,62 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestJsonCacheEnvelope:
+    """Signed JSON envelope must round-trip safe types and reject pickle/legacy payloads."""
+
+    def test_roundtrip_json_compatible_value(self):
+        payload = serialize_cache_value({"tracks": 3, "ok": True}, SIGNING_KEY)
+        assert deserialize_cache_value(payload, SIGNING_KEY) == {"tracks": 3, "ok": True}
+
+    def test_roundtrip_bytes_and_dataframe(self):
+        raw = deserialize_cache_value(serialize_cache_value(b"secret-bytes", SIGNING_KEY), SIGNING_KEY)
+        assert raw == b"secret-bytes"
+
+        frame = pd.DataFrame({"track": ["a", "b"], "score": [1.5, 2.0]})
+        restored = deserialize_cache_value(serialize_cache_value(frame, SIGNING_KEY), SIGNING_KEY)
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(
+            restored.reset_index(drop=True),
+            frame.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_rejects_tampered_signature(self):
+        payload = bytearray(serialize_cache_value("ok", SIGNING_KEY))
+        payload[-2] = (payload[-2] + 1) % 256
+        assert deserialize_cache_value(bytes(payload), SIGNING_KEY) is None
+
+    def test_rejects_legacy_pickle_envelope(self):
+        fake_pickle = base64.b64encode(b"cos\nsystem\n(S'id'\ntR.").decode("ascii")
+        envelope = json.dumps(
+            {"v": 1, "alg": "HMAC-SHA256", "sig": "00", "payload": fake_pickle}
+        ).encode("utf-8")
+        assert deserialize_cache_value(envelope, SIGNING_KEY) is None
+
+    def test_rejects_unsigned_payload(self):
+        inner = json.dumps({"kind": "json", "data": "stolen"}).encode("utf-8")
+        envelope = json.dumps(
+            {
+                "v": CACHE_ENVELOPE_VERSION,
+                "alg": "HMAC-SHA256",
+                "sig": "0" * 64,
+                "payload": base64.b64encode(inner).decode("ascii"),
+            }
+        ).encode("utf-8")
+        assert deserialize_cache_value(envelope, SIGNING_KEY) is None
+
+    def test_caching_module_does_not_use_pickle(self):
+        source = Path("core/caching.py").read_text(encoding="utf-8")
+        assert "import pickle" not in source
+        assert "pickle.loads" not in source
+        assert "pickle.dumps" not in source
+        assert "hashlib.md5" not in source
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1,), {"q": "x"})
+        expected_args = hashlib.sha256(
+            json.dumps((1,), sort_keys=True, default=str).encode()
+        ).hexdigest()
+        assert expected_args in key
