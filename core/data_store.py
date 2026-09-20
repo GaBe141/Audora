@@ -73,6 +73,7 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    MAX_CSV_EXPORT_ROWS = 100_000
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
@@ -927,6 +928,19 @@ class EnhancedMusicDataStore:
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
 
+    def _confine_export_path(self, filepath: str) -> Path:
+        """Resolve export path and require it to stay under the database directory."""
+        export_root = Path(self.db_path).resolve().parent
+        dest = Path(filepath).expanduser()
+        if "\x00" in str(dest):
+            raise ValueError("Export path contains invalid characters")
+        if not dest.is_absolute():
+            dest = export_root / dest
+        dest = dest.resolve()
+        if not dest.is_relative_to(export_root):
+            raise ValueError("Export path must be inside the data directory")
+        return dest
+
     def export_to_csv(self, table: str, filepath: str, days: int | None = None) -> str:
         """Export table data to CSV.
 
@@ -944,6 +958,8 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        dest = self._confine_export_path(filepath)
+
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -951,20 +967,22 @@ class EnhancedMusicDataStore:
                 SELECT * FROM {table}
                 WHERE datetime(created_at) >= datetime('now', ?)
                 ORDER BY created_at DESC
+                LIMIT ?
                 """
-                df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
+                df = pd.read_sql_query(
+                    query, conn, params=[f"-{days} days", self.MAX_CSV_EXPORT_ROWS]
+                )
             else:
                 # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
-                df = pd.read_sql_query(query, conn)
+                query = f"SELECT * FROM {table} ORDER BY created_at DESC LIMIT ?"
+                df = pd.read_sql_query(query, conn, params=[self.MAX_CSV_EXPORT_ROWS])
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            dest.parent.mkdir(parents=True, exist_ok=True)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            df.to_csv(dest, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {dest}")
 
-        return filepath
+        return str(dest)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""

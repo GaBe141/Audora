@@ -27,3 +27,14 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_rejects_embedded_credentials(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="embedded credentials"):
+            svc._validate_webhook_url("https://user:token@example.com/webhook")
+
+    def test_sanitize_header_strips_crlf(self):
+        svc = EnhancedNotificationService()
+        assert svc._sanitize_header("Subject\r\nBcc: attacker@example.com") == (
+            "SubjectBcc: attacker@example.com"
+        )

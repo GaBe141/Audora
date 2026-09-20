@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_payload,
+    serialize_cache_payload,
 )
 
 
@@ -118,3 +124,47 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestJsonCacheEnvelope:
+    """Redis payloads must be signed JSON, never pickle."""
+
+    def test_roundtrip_json_and_bytes(self):
+        key = b"test-signing-key"
+        payload = serialize_cache_payload({"track": "Song", "score": 91}, key)
+        assert deserialize_cache_payload(payload, key) == {"track": "Song", "score": 91}
+        raw = serialize_cache_payload(b"binary-cache", key)
+        assert deserialize_cache_payload(raw, key) == b"binary-cache"
+
+    def test_roundtrip_dataframe(self):
+        key = b"test-signing-key"
+        df = pd.DataFrame({"track_name": ["A"], "score": [88.5]})
+        restored = deserialize_cache_payload(serialize_cache_payload(df, key), key)
+        assert isinstance(restored, pd.DataFrame)
+        assert list(restored["track_name"]) == ["A"]
+        assert list(restored["score"]) == [88.5]
+
+    def test_rejects_legacy_or_unsigned_payloads(self):
+        key = b"test-signing-key"
+        legacy = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "deadbeef",
+                "payload": "AAAA",
+            }
+        ).encode("utf-8")
+        assert deserialize_cache_payload(legacy, key) is None
+        assert deserialize_cache_payload(b"not-json", key) is None
+
+    def test_rejects_tampered_signature(self):
+        key = b"test-signing-key"
+        payload = serialize_cache_payload("ok", key)
+        envelope = json.loads(payload.decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        tampered = json.dumps(envelope).encode("utf-8")
+        assert deserialize_cache_payload(tampered, key) is None
+
+    def test_unsupported_types_are_rejected(self):
+        with pytest.raises(TypeError):
+            serialize_cache_payload(object(), b"key")
