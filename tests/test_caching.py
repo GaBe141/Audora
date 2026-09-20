@@ -1,9 +1,18 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
 import time
 
+import pandas as pd
+
 from core.caching import (
+    CACHE_ENVELOPE_VERSION,
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +127,50 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestJsonCacheEnvelope:
+    """Redis cache values must round-trip through JSON, never pickle."""
+
+    def test_round_trip_json_values(self):
+        key = b"unit-test-signing-key"
+        original = {"track": "Song", "score": 91.5, "tags": ["pop", "viral"]}
+        raw = serialize_cache_value(original, key)
+        envelope = json.loads(raw.decode("utf-8"))
+        assert envelope["v"] == CACHE_ENVELOPE_VERSION
+        assert deserialize_cache_value(raw, key) == original
+
+    def test_round_trip_bytes_and_dataframe(self):
+        key = b"unit-test-signing-key"
+        payload = b"\x00binary-cache-value"
+        assert deserialize_cache_value(serialize_cache_value(payload, key), key) == payload
+
+        frame = pd.DataFrame({"track": ["A"], "score": [88.0]})
+        restored = deserialize_cache_value(serialize_cache_value(frame, key), key)
+        assert list(restored.columns) == ["track", "score"]
+        assert restored.iloc[0]["track"] == "A"
+
+    def test_rejects_legacy_pickle_envelope_even_if_signed(self):
+        key = b"unit-test-signing-key"
+        pickled = b"\x80\x04\x95\x0b\x00\x00\x00\x00\x00\x00\x00\x8c\x05pwned\x94."
+        signature = hmac.new(key, pickled, hashlib.sha256).hexdigest()
+        legacy = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": signature,
+                "payload": base64.b64encode(pickled).decode("ascii"),
+            }
+        ).encode("utf-8")
+        assert deserialize_cache_value(legacy, key) is None
+
+    def test_rejects_tampered_signature(self):
+        key = b"unit-test-signing-key"
+        raw = bytearray(serialize_cache_value({"ok": True}, key))
+        raw[-2] = (raw[-2] + 1) % 256
+        assert deserialize_cache_value(bytes(raw), key) is None
+
+    def test_sha256_cache_key_is_stable(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"z": 3})
+        assert "md5" not in key
+        assert len(key.split(":")[-1]) == 64
