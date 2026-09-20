@@ -61,6 +61,9 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+
+    _MAX_CSV_EXPORT_ROWS = 100_000
+    _EXPORT_DIR_NAME = "exports"
     _ALLOWED_BULK_UPDATE_FIELDS = {
         "platform",
         "track_name",
@@ -536,7 +539,7 @@ class EnhancedMusicDataStore:
                 (SELECT COUNT(*) FROM trend_history th WHERE th.trend_id = t.id) as data_points,
                 (SELECT AVG(velocity) FROM trend_history th WHERE th.trend_id = t.id) as avg_velocity
             FROM trends t
-            WHERE {' AND '.join(conditions)}
+            WHERE {" AND ".join(conditions)}
             ORDER BY score DESC, trend_date DESC
             LIMIT ?
             """
@@ -573,7 +576,7 @@ class EnhancedMusicDataStore:
                 actual_peak_date, actual_peak_score, accuracy_score, status,
                 prediction_features
             FROM viral_predictions
-            WHERE {' AND '.join(conditions)}
+            WHERE {" AND ".join(conditions)}
             ORDER BY prediction_date DESC, confidence DESC
             LIMIT ?
             """
@@ -686,7 +689,7 @@ class EnhancedMusicDataStore:
                 platform, track_id, track_name, artist, score, rank,
                 region, trend_date, metadata, first_detected
             FROM trends
-            WHERE ({' OR '.join(conditions)})
+            WHERE ({" OR ".join(conditions)})
             AND is_active = 1
             ORDER BY score DESC
             """
@@ -742,7 +745,7 @@ class EnhancedMusicDataStore:
                 MAX(score) as max_score,
                 COUNT(*) as total_entries
             FROM trends
-            WHERE {' AND '.join(conditions)}
+            WHERE {" AND ".join(conditions)}
             """
 
             stats = pd.read_sql_query(stats_query, conn, params=tuple(params)).to_dict("records")[0]
@@ -752,7 +755,7 @@ class EnhancedMusicDataStore:
             SELECT
                 track_name, artist, platform, score, rank
             FROM trends
-            WHERE {' AND '.join(conditions)}
+            WHERE {" AND ".join(conditions)}
             ORDER BY score DESC
             LIMIT 10
             """
@@ -787,7 +790,9 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        invalid_fields = [field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS]
+        invalid_fields = [
+            field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS
+        ]
         if invalid_fields:
             raise ValueError(
                 "Invalid update fields: "
@@ -809,7 +814,7 @@ class EnhancedMusicDataStore:
         with self.get_connection() as conn:
             query = f"""
             UPDATE trends
-            SET {', '.join(set_clauses)}, last_updated = CURRENT_TIMESTAMP
+            SET {", ".join(set_clauses)}, last_updated = CURRENT_TIMESTAMP
             WHERE track_id IN ({placeholders})
             """
 
@@ -944,6 +949,19 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        export_root = Path(self._EXPORT_DIR_NAME).expanduser().resolve()
+        export_root.mkdir(parents=True, exist_ok=True)
+        raw_path = Path(filepath).expanduser()
+        dest = (
+            raw_path.resolve()
+            if raw_path.is_absolute()
+            else (export_root / raw_path.name).resolve()
+        )
+        try:
+            dest.relative_to(export_root)
+        except ValueError as exc:
+            raise ValueError("CSV export path must stay inside the exports directory") from exc
+
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -958,13 +976,14 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            if len(df) > self._MAX_CSV_EXPORT_ROWS:
+                df = df.head(self._MAX_CSV_EXPORT_ROWS)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(dest, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {dest}")
 
-        return filepath
+        return str(dest)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
@@ -1167,10 +1186,7 @@ class EnhancedMusicDataStore:
         rmse = float((errors**2).mean() ** 0.5)
 
         acc_by_platform = (
-            evaluated_df.groupby("platform")["accuracy_score"]
-            .mean()
-            .round(3)
-            .to_dict()
+            evaluated_df.groupby("platform")["accuracy_score"].mean().round(3).to_dict()
         )
 
         return {

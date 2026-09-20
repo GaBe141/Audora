@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +124,36 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestJsonCacheEnvelope:
+    """Redis-safe JSON envelopes must never execute pickle payloads."""
+
+    def test_json_roundtrip(self):
+        value = {"artist": "A", "score": 12.5, "tags": ["pop", "indie"]}
+        restored = deserialize_cache_value(serialize_cache_value(value))
+        assert restored == value
+
+    def test_dataframe_roundtrip(self):
+        df = pd.DataFrame({"track": ["a", "b"], "score": [1, 2]})
+        restored = deserialize_cache_value(serialize_cache_value(df))
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored, df)
+
+    def test_bytes_roundtrip(self):
+        payload = b"binary-cache"
+        assert deserialize_cache_value(serialize_cache_value(payload)) == payload
+
+    def test_rejects_raw_pickle(self):
+        assert deserialize_cache_value(pickle.dumps({"k": "v"})) is None
+
+    def test_rejects_legacy_hmac_pickle_envelope(self):
+        envelope = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "deadbeef",
+                "payload": "AAAA",
+            }
+        ).encode("utf-8")
+        assert deserialize_cache_value(envelope) is None
