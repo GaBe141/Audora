@@ -74,6 +74,9 @@ class EnhancedMusicDataStore:
         "is_active",
     }
 
+    _MAX_CSV_EXPORT_ROWS = 100_000
+    _EXPORT_SUBDIR = Path("data") / "exports"
+
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
         self.backup_dir = Path(backup_dir)
@@ -927,10 +930,25 @@ class EnhancedMusicDataStore:
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
 
+    def _resolve_export_path(self, filepath: str) -> Path:
+        """Confine CSV exports to data/exports and require a .csv suffix."""
+        export_root = self._EXPORT_SUBDIR.resolve()
+        export_root.mkdir(parents=True, exist_ok=True)
+        candidate = Path(filepath)
+        resolved = candidate.resolve() if candidate.is_absolute() else (export_root / candidate.name).resolve()
+        try:
+            resolved.relative_to(export_root)
+        except ValueError as exc:
+            raise ValueError("CSV export path must be inside data/exports") from exc
+        if resolved.suffix.lower() != ".csv":
+            raise ValueError("CSV export path must end with .csv")
+        return resolved
+
     def export_to_csv(self, table: str, filepath: str, days: int | None = None) -> str:
         """Export table data to CSV.
 
         Note: Table name is validated against whitelist to prevent SQL injection.
+        Export paths are confined to data/exports and row count is capped.
         """
         # Whitelist valid table names to prevent SQL injection
         valid_tables = {
@@ -944,6 +962,9 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        export_path = self._resolve_export_path(filepath)
+        row_limit = int(self._MAX_CSV_EXPORT_ROWS)
+
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -951,20 +972,18 @@ class EnhancedMusicDataStore:
                 SELECT * FROM {table}
                 WHERE datetime(created_at) >= datetime('now', ?)
                 ORDER BY created_at DESC
+                LIMIT {row_limit}
                 """
                 df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
             else:
-                # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
+                query = f"SELECT * FROM {table} ORDER BY created_at DESC LIMIT {row_limit}"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(export_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {export_path}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(export_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
