@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,20 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportToCsv:
+    """CSV export must stay inside the exports directory."""
+
+    def test_export_writes_inside_export_dir(self, data_store, sample_trends, tmp_path):
+        data_store.save_trends_bulk(sample_trends)
+        data_store._EXPORT_DIR_NAME = str(tmp_path / "exports")
+        path = data_store.export_to_csv("trends", "out.csv")
+        exported = Path(path)
+        assert exported.parent == (tmp_path / "exports").resolve()
+        assert exported.exists()
+
+    def test_export_rejects_path_escape(self, data_store, tmp_path):
+        data_store._EXPORT_DIR_NAME = str(tmp_path / "exports")
+        with pytest.raises(ValueError, match="exports directory"):
+            data_store.export_to_csv("trends", str(tmp_path / "evil.csv"))

@@ -27,3 +27,20 @@ class TestWebhookUrlValidation:
         svc = EnhancedNotificationService()
         url = "https://10.0.0.1/webhook"
         assert svc._validate_webhook_url(url, allow_private=True) == url
+
+    def test_rejects_embedded_credentials(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="credentials"):
+            svc._validate_webhook_url("https://user:pass@example.com/webhook")
+
+    def test_ipv4_mapped_loopback_is_restricted(self):
+        svc = EnhancedNotificationService()
+        assert svc._is_restricted_ip("::ffff:127.0.0.1") is True
+        assert svc._is_restricted_ip("8.8.8.8") is False
+
+    def test_header_sanitizer_strips_crlf(self):
+        sanitized = EnhancedNotificationService._sanitize_header_value(
+            "Subject\r\nBcc: attacker@example.com"
+        )
+        assert "\r" not in sanitized
+        assert "\n" not in sanitized
