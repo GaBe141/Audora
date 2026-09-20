@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,41 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+def _unsigned_backend() -> RedisCacheBackend:
+    """Build a Redis backend that can serialize without opening a network socket."""
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = b"unit-test-cache-signing-key"
+    return backend
+
+
+class TestRedisSafeSerialization:
+    """JSON envelopes must round-trip and reject pickle or unsigned payloads."""
+
+    def test_json_and_dataframe_roundtrip(self):
+        backend = _unsigned_backend()
+        payload = backend._serialize({"track": "song", "score": 9})
+        assert json.loads(payload.decode("utf-8"))["v"] == 2
+        assert backend._deserialize(payload) == {"track": "song", "score": 9}
+
+        frame = pd.DataFrame({"track": ["a"], "score": [1.5]})
+        restored = backend._deserialize(backend._serialize(frame))
+        assert isinstance(restored, pd.DataFrame)
+        assert list(restored["track"]) == ["a"]
+
+    def test_rejects_pickle_and_unsigned_payloads(self):
+        backend = _unsigned_backend()
+        assert backend._deserialize(b"cos\nsystem\n(S'id'\ntR.") is None
+        assert backend._deserialize(b'{"v":1,"alg":"HMAC-SHA256","sig":"00","payload":"e30="}') is None
+
+    def test_rejects_unsupported_types(self):
+        backend = _unsigned_backend()
+        with pytest.raises(TypeError, match="Cannot safely cache"):
+            backend._serialize(object())
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1,), {"q": "x"})
+        digest = key.split(":")[-1]
+        assert len(digest) == 64
+        int(digest, 16)
