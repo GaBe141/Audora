@@ -4,12 +4,14 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
 import os
 import socket
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -234,6 +236,9 @@ class EnhancedNotificationService:
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
 
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("Webhook URL must not contain credentials")
+
         hostname = parsed.hostname
         if hostname.lower() == "localhost":
             raise ValueError("Localhost webhook URLs are not allowed")
@@ -254,6 +259,31 @@ class EnhancedNotificationService:
                     )
 
         return url
+
+    def _sanitize_header(self, value: str) -> str:
+        """Strip CR/LF so attacker-controlled values cannot inject SMTP headers."""
+        return str(value).replace("\r", "").replace("\n", "").strip()
+
+    def _attachment_root(self) -> Path:
+        """Directory that outbound email attachments must stay inside."""
+        configured = os.getenv("AUDORA_ATTACHMENT_DIR", "data/attachments")
+        return Path(configured).resolve()
+
+    def _resolve_attachment_path(self, attachment_path: str) -> Path | None:
+        """Return a confined attachment path, or None if it is unsafe."""
+        root = self._attachment_root()
+        candidate = Path(attachment_path)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            self.logger.warning("Rejected attachment path outside attachment directory")
+            return None
+        if not resolved.is_file():
+            return None
+        return resolved
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -531,10 +561,16 @@ System status: {{ system_status }}
             return {"success": False, "error": "Email not configured"}
 
         try:
+            use_tls = email_config.get("use_tls", True)
+            if email_config.get("username") and email_config.get("password") and not use_tls:
+                return {"success": False, "error": "SMTP authentication requires TLS"}
+
             msg = MIMEMultipart("alternative")
-            msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
-            msg["Subject"] = message.title
+            msg["From"] = self._sanitize_header(
+                email_config.get("from_address", "music-discovery@example.com")
+            )
+            msg["To"] = self._sanitize_header(", ".join(email_config["recipients"]))
+            msg["Subject"] = self._sanitize_header(message.title)
 
             # Set priority
             if message.priority in [NotificationPriority.HIGH, NotificationPriority.CRITICAL]:
@@ -552,29 +588,35 @@ System status: {{ system_status }}
 
             msg.attach(MIMEText(text_content, "plain"))
 
-            # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
-            msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
+            escaped_html = html.escape(text_content, quote=True).replace("\n", "<br>")
+            msg.attach(MIMEText(f"<html><body><pre>{escaped_html}</pre></body></html>", "html"))
 
-            # Add attachments
+            # Add attachments confined to the attachment directory
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    safe_path = self._resolve_attachment_path(attachment_path)
+                    if safe_path is None:
+                        continue
+                    with safe_path.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        filename = self._sanitize_header(safe_path.name).replace('"', "")
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f'attachment; filename="{filename}"',
+                        )
+                        msg.attach(attachment)
 
-            # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            # Send email over verified TLS
+            server = smtplib.SMTP(
+                email_config["smtp_server"],
+                email_config.get("port", 587),
+                timeout=30,
+            )
 
-            if email_config.get("use_tls", True):
-                server.starttls()
+            if use_tls:
+                server.starttls(context=ssl.create_default_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])
@@ -650,7 +692,12 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
+                session.post(
+                    webhook_url,
+                    json=slack_message,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response,
             ):
                 if response.status == 200:
                     self.logger.info("Slack notification sent successfully")
@@ -717,7 +764,12 @@ System status: {{ system_status }}
 
             async with (
                 aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
+                session.post(
+                    webhook_url,
+                    json=discord_message,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response,
             ):
                 if response.status in [200, 204]:
                     self.logger.info("Discord notification sent successfully")
@@ -777,7 +829,11 @@ System status: {{ system_status }}
             async with (
                 aiohttp.ClientSession() as session,
                 session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
+                    url,
+                    json=payload,
+                    headers=headers,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
                 ) as response,
             ):
                 if 200 <= response.status < 300:

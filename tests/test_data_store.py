@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,28 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportToCsvSecurity:
+    """CSV export must stay inside the exports directory and cap rows."""
+
+    def test_export_to_csv_writes_under_export_dir(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        path = data_store.export_to_csv("trends", "trends.csv")
+        assert Path(path).exists()
+        assert Path(path).parent == data_store._export_root()
+
+    def test_export_to_csv_rejects_path_traversal(self, data_store, tmp_path):
+        target = tmp_path / "outside.csv"
+        with pytest.raises(ValueError, match="inside"):
+            data_store.export_to_csv("trends", str(target))
+
+    def test_export_to_csv_caps_rows(self, data_store, sample_trends, monkeypatch):
+        from core import data_store as data_store_module
+
+        data_store.save_trends_bulk(sample_trends)
+        monkeypatch.setattr(data_store_module, "MAX_CSV_EXPORT_ROWS", 1)
+        path = data_store.export_to_csv("trends", "capped.csv")
+        exported = Path(path).read_text(encoding="utf-8").strip().splitlines()
+        # header + one data row
+        assert len(exported) == 2
