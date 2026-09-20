@@ -73,6 +73,8 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    _MAX_EXPORT_ROWS = 100_000
+    _EXPORT_ROOT = Path("exports").resolve()
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
@@ -927,10 +929,24 @@ class EnhancedMusicDataStore:
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
 
+    def _resolve_export_path(self, filepath: str) -> Path:
+        """Confine CSV exports to the exports directory to prevent path traversal."""
+        export_root = self._EXPORT_ROOT
+        export_root.mkdir(parents=True, exist_ok=True)
+        dest = Path(filepath).expanduser()
+        if not dest.is_absolute():
+            dest = export_root / dest
+        dest = dest.resolve()
+        if not dest.is_relative_to(export_root):
+            raise ValueError("CSV export path must be inside the exports directory")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        return dest
+
     def export_to_csv(self, table: str, filepath: str, days: int | None = None) -> str:
         """Export table data to CSV.
 
         Note: Table name is validated against whitelist to prevent SQL injection.
+        Export paths are confined to the exports directory and row count is capped.
         """
         # Whitelist valid table names to prevent SQL injection
         valid_tables = {
@@ -944,27 +960,31 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        if days is not None and (not isinstance(days, int) or days < 0 or days > 3650):
+            raise ValueError("days must be an integer between 0 and 3650")
+
+        dest = self._resolve_export_path(filepath)
+        row_limit = self._MAX_EXPORT_ROWS
+
         with self.get_connection() as conn:
-            if days:
+            if days is not None:
                 # Use parameterized query for days parameter
                 query = f"""
                 SELECT * FROM {table}
                 WHERE datetime(created_at) >= datetime('now', ?)
                 ORDER BY created_at DESC
+                LIMIT ?
                 """
-                df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
+                df = pd.read_sql_query(query, conn, params=[f"-{days} days", row_limit])
             else:
                 # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
-                df = pd.read_sql_query(query, conn)
+                query = f"SELECT * FROM {table} ORDER BY created_at DESC LIMIT ?"
+                df = pd.read_sql_query(query, conn, params=[row_limit])
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(dest, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {dest}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(dest)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
