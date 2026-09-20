@@ -4,18 +4,34 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
+import asyncio
+import io
 import subprocess
 import sys
 from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.data_store import EnhancedMusicDataStore  # noqa: E402
+from core.notification_service import (  # noqa: E402
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
+
+ALLOWED_DEMO_MODES = frozenset(
+    {"statistical", "trending", "multi_source", "platform", "all"}
+)
+MAX_CSV_EXPORT_ROWS = 10_000
 
 app = dash.Dash(
     __name__,
@@ -343,9 +359,34 @@ app.layout = dbc.Container(
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _validate_demo_mode(demo_value: str) -> str:
+    """Reject demo values that are not in the GUI allowlist."""
+    if not isinstance(demo_value, str) or demo_value not in ALLOWED_DEMO_MODES:
+        raise ValueError("Invalid demo mode")
+    return demo_value
+
+
+def _validate_command_args(args: list[str]) -> list[str]:
+    """Reject non-string or NUL-containing subprocess arguments."""
+    if not args:
+        raise ValueError("Command arguments must be NUL-free strings")
+    for arg in args:
+        if not isinstance(arg, str) or "\x00" in arg:
+            raise ValueError("Command arguments must be NUL-free strings")
+    return args
+
+
+def _cap_export_rows(table_data: list[dict]) -> list[dict]:
+    """Limit CSV export size to avoid unbounded memory/disk use."""
+    if len(table_data) <= MAX_CSV_EXPORT_ROWS:
+        return table_data
+    return table_data[:MAX_CSV_EXPORT_ROWS]
+
+
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
     try:
+        args = _validate_command_args(args)
         proc = subprocess.Popen(
             args,
             cwd=str(PROJECT_ROOT),
@@ -366,7 +407,6 @@ def _run_command(args: list[str]) -> tuple[str, str]:
 
 def _get_data_store():
     """Return an EnhancedMusicDataStore pointed at the default DB path."""
-    from core.data_store import EnhancedMusicDataStore
     db_path = PROJECT_ROOT / "data" / "enhanced_music_trends.db"
     return EnhancedMusicDataStore(str(db_path))
 
@@ -396,7 +436,11 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
-        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
+        try:
+            demo_mode = _validate_demo_mode(demo_value)
+        except ValueError as exc:
+            return "Error", str(exc)
+        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_mode])
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
     if triggered == "btn-validate":
@@ -560,9 +604,7 @@ def search_history(_n, platform, min_score, days, artist_filter):
 def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
-    import io
-    import pandas as pd
-    df = pd.DataFrame(table_data)
+    df = pd.DataFrame(_cap_export_rows(table_data))
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return dcc.send_string(buf.getvalue(), "audora_trends.csv")
@@ -586,13 +628,17 @@ def export_csv(_n, table_data):
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
     try:
-        from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
+            slack_url = svc._validate_webhook_url(slack_url)
             svc.config["slack"]["webhook_url"] = slack_url
         if discord_url:
+            discord_url = svc._validate_webhook_url(discord_url)
             svc.config["discord"]["webhook_url"] = discord_url
         if webhook_url:
+            webhook_url = svc._validate_webhook_url(
+                webhook_url, allow_private=svc._allow_private_webhooks()
+            )
             svc.config["webhook"]["url"] = webhook_url
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
@@ -621,15 +667,13 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         if not url:
             return "No URL"
         try:
-            import asyncio
-            from core.notification_service import (
-                EnhancedNotificationService,
-                NotificationChannel,
-                NotificationMessage,
-                NotificationPriority,
-            )
             svc = EnhancedNotificationService()
-            svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
+            config_key = "webhook_url" if channel_key != "webhook" else "url"
+            allow_private = (
+                channel_key == "webhook" and svc._allow_private_webhooks()
+            )
+            url = svc._validate_webhook_url(url, allow_private=allow_private)
+            svc.config[channel_key][config_key] = url
             channel = getattr(NotificationChannel, channel_enum_name)
             msg = NotificationMessage(
                 title="Audora test notification",

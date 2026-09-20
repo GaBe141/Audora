@@ -931,6 +931,7 @@ class EnhancedMusicDataStore:
         """Export table data to CSV.
 
         Note: Table name is validated against whitelist to prevent SQL injection.
+        Export paths are confined to the database directory and row count is capped.
         """
         # Whitelist valid table names to prevent SQL injection
         valid_tables = {
@@ -943,6 +944,14 @@ class EnhancedMusicDataStore:
         }
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
+
+        max_export_rows = 100_000
+        export_root = Path(self.db_path).resolve().parent
+        target = Path(filepath).expanduser().resolve()
+        try:
+            target.relative_to(export_root)
+        except ValueError as exc:
+            raise ValueError("Export path must be inside the data directory") from exc
 
         with self.get_connection() as conn:
             if days:
@@ -958,13 +967,17 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            if len(df) > max_export_rows:
+                self.logger.warning(
+                    f"Truncating CSV export of {table} from {len(df)} to {max_export_rows} rows"
+                )
+                df = df.head(max_export_rows)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(target, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {target}")
 
-        return filepath
+        return str(target)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
