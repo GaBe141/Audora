@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    decode_cache_value,
+    encode_cache_value,
 )
 
 
@@ -60,6 +67,43 @@ class TestLocalCacheBackend:
         assert present == 2
 
 
+class TestJsonCacheEnvelope:
+    """Redis-safe JSON envelope must not execute pickle payloads."""
+
+    def test_roundtrip_json_values(self):
+        for value in ("ok", 12, 1.5, True, None, {"a": [1, 2]}, ["x", "y"]):
+            assert decode_cache_value(encode_cache_value(value)) == value
+
+    def test_roundtrip_bytes(self):
+        payload = b"\x00secret-bytes\xff"
+        assert decode_cache_value(encode_cache_value(payload)) == payload
+
+    def test_roundtrip_dataframe(self):
+        df = pd.DataFrame({"track": ["a", "b"], "score": [1.0, 2.0]})
+        restored = decode_cache_value(encode_cache_value(df))
+        pd.testing.assert_frame_equal(restored, df)
+
+    def test_rejects_pickle_payload(self):
+        raw = pickle.dumps({"owned": True})
+        assert decode_cache_value(raw) is None
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": "00",
+            "payload": "gASVCwAAAAAAAAB9lIwBeJRLAXMu",
+        }
+        assert decode_cache_value(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_unsupported_types(self):
+        class NotCacheable:
+            pass
+
+        with pytest.raises(TypeError, match="cannot be cached"):
+            encode_cache_value(NotCacheable())
+
+
 class TestCacheManager:
     """Tests for CacheManager with injected LocalCacheBackend."""
 
@@ -80,6 +124,11 @@ class TestCacheManager:
         mock_cache.clear()
         assert mock_cache.get("a") is None
         assert mock_cache.get("b") is None
+
+    def test_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1,), {"b": 2})
+        assert "md5" not in key
+        assert len(key.split(":")[-1]) == 64
 
 
 class TestCachedDecorator:

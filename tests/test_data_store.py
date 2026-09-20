@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,25 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportCsvSecurity:
+    """CSV export must confine paths and cap row counts."""
+
+    def test_rejects_path_outside_exports(self, data_store, tmp_path):
+        outside = tmp_path / "escape.csv"
+        with pytest.raises(ValueError, match="exports"):
+            data_store.export_to_csv("trends", str(outside))
+
+    def test_writes_relative_name_under_exports(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        result = data_store.export_to_csv("trends", "trends_export.csv")
+        export_path = Path(result)
+        assert export_path.name == "trends_export.csv"
+        assert export_path.parent.name == "exports"
+        assert export_path.exists()
+        export_path.unlink(missing_ok=True)
+
+    def test_rejects_invalid_table_name(self, data_store):
+        with pytest.raises(ValueError, match="Invalid table name"):
+            data_store.export_to_csv("trends; DROP TABLE trends", "out.csv")
