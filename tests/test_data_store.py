@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,18 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestCsvExportHardening:
+    """CSV export must stay on an allowlisted path and cap row count."""
+
+    def test_export_rejects_path_escape(self, data_store, tmp_path):
+        with pytest.raises(ValueError, match="Export path"):
+            data_store.export_to_csv("trends", str(tmp_path / "stolen.csv"))
+
+    def test_export_writes_under_backup_dir(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        dest = Path(data_store.backup_dir) / "trends.csv"
+        result = data_store.export_to_csv("trends", str(dest))
+        assert Path(result).is_file()
+        assert Path(result).resolve().is_relative_to(Path(data_store.backup_dir).resolve())
