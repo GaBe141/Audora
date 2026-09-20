@@ -107,3 +107,29 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportToCsv:
+    """CSV export must reject path traversal and unknown tables."""
+
+    def test_export_rejects_unknown_table(self, data_store):
+        with pytest.raises(ValueError, match="Invalid table name"):
+            data_store.export_to_csv("trends; DROP TABLE trends", "out.csv")
+
+    def test_export_rejects_path_traversal(self, data_store, tmp_path, monkeypatch):
+        export_root = tmp_path / "exports"
+        export_root.mkdir()
+        monkeypatch.setattr(data_store, "_EXPORT_ROOT", export_root.resolve())
+        with pytest.raises(ValueError, match="exports directory"):
+            data_store.export_to_csv("trends", str(tmp_path / "outside.csv"))
+
+    def test_export_writes_inside_export_root(
+        self, data_store, sample_trends, tmp_path, monkeypatch
+    ):
+        export_root = tmp_path / "exports"
+        export_root.mkdir()
+        monkeypatch.setattr(data_store, "_EXPORT_ROOT", export_root.resolve())
+        data_store.save_trends_bulk(sample_trends)
+        dest = data_store.export_to_csv("trends", "ok.csv")
+        assert dest == str(export_root / "ok.csv")
+        assert (export_root / "ok.csv").is_file()
