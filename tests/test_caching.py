@@ -1,10 +1,24 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import inspect
+import json
+import pickle
 import time
 
+import pandas as pd
+import pytest
+
+from core import caching as caching_module
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
+
+_TEST_SIGNING_KEY = b"audora-unit-test-cache-key"
 
 
 class TestLocalCacheBackend:
@@ -58,6 +72,65 @@ class TestLocalCacheBackend:
         assert backend.get("d") == 4
         present = sum(1 for k in ("a", "b", "c") if backend.get(k) is not None)
         assert present == 2
+
+
+class TestJsonCacheEnvelope:
+    """Redis cache values must round-trip through signed JSON, never pickle."""
+
+    def test_module_does_not_import_pickle(self):
+        source = inspect.getsource(caching_module)
+        assert "import pickle" not in source
+        assert "pickle.loads" not in source
+        assert "pickle.dumps" not in source
+
+    def test_json_value_roundtrip(self):
+        original = {"tracks": ["a", "b"], "score": 12.5, "ok": True}
+        restored = deserialize_cache_value(
+            serialize_cache_value(original, _TEST_SIGNING_KEY), _TEST_SIGNING_KEY
+        )
+        assert restored == original
+
+    def test_bytes_roundtrip(self):
+        original = b"\x00binary-cache-payload"
+        restored = deserialize_cache_value(
+            serialize_cache_value(original, _TEST_SIGNING_KEY), _TEST_SIGNING_KEY
+        )
+        assert restored == original
+
+    def test_dataframe_roundtrip(self):
+        original = pd.DataFrame({"track": ["Song A", "Song B"], "score": [91.0, 77.5]})
+        restored = deserialize_cache_value(
+            serialize_cache_value(original, _TEST_SIGNING_KEY), _TEST_SIGNING_KEY
+        )
+        pd.testing.assert_frame_equal(original, restored, check_dtype=False)
+
+    def test_rejects_legacy_signed_pickle_envelope(self):
+        payload = pickle.dumps({"rce": True})
+        signature = hmac.new(_TEST_SIGNING_KEY, payload, hashlib.sha256).hexdigest()
+        envelope = {
+            "v": 1,
+            "alg": "HMAC-SHA256",
+            "sig": signature,
+            "payload": base64.b64encode(payload).decode("ascii"),
+        }
+        assert deserialize_cache_value(json.dumps(envelope).encode(), _TEST_SIGNING_KEY) is None
+
+    def test_rejects_tampered_payload(self):
+        raw = serialize_cache_value({"trusted": True}, _TEST_SIGNING_KEY)
+        envelope = json.loads(raw)
+        envelope["payload"] = {"trusted": False}
+        assert deserialize_cache_value(json.dumps(envelope).encode(), _TEST_SIGNING_KEY) is None
+
+    def test_rejects_wrong_signing_key(self):
+        raw = serialize_cache_value({"trusted": True}, _TEST_SIGNING_KEY)
+        assert deserialize_cache_value(raw, b"different-key") is None
+
+    def test_rejects_unsupported_objects(self):
+        class Gadget:
+            pass
+
+        with pytest.raises(TypeError):
+            serialize_cache_value(Gadget(), _TEST_SIGNING_KEY)
 
 
 class TestCacheManager:
