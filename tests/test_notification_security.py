@@ -18,6 +18,21 @@ class TestWebhookUrlValidation:
         with pytest.raises(ValueError, match="Localhost"):
             svc._validate_webhook_url("https://localhost/webhook")
 
+    def test_rejects_embedded_credentials(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="credentials"):
+            svc._validate_webhook_url("https://user:pass@example.com/webhook")
+
+    def test_treats_ipv4_mapped_addresses_as_restricted(self):
+        svc = EnhancedNotificationService()
+        assert svc._is_restricted_ip("::ffff:10.0.0.1") is True
+        assert svc._is_restricted_ip("::ffff:127.0.0.1") is True
+
+    def test_save_config_rejects_path_escape(self, tmp_path):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="outside the allowed directories"):
+            svc.save_config(str(tmp_path / "stolen.json"))
+
     def test_rejects_private_ip_targets_by_default(self):
         svc = EnhancedNotificationService()
         with pytest.raises(ValueError, match="private or restricted"):

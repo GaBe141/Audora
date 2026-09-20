@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +126,51 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestJsonCacheEnvelope:
+    """Redis payloads must be signed JSON, never pickle."""
+
+    def test_roundtrip_json_values(self):
+        key = b"test-signing-key"
+        value = {"track": "Song", "score": 91.5, "tags": ["pop", "viral"]}
+        raw = serialize_cache_value(value, key)
+        envelope = json.loads(raw.decode())
+        assert envelope["v"] == 2
+        assert envelope["kind"] == "json"
+        assert deserialize_cache_value(raw, key) == value
+
+    def test_roundtrip_bytes_and_dataframe(self):
+        key = b"test-signing-key"
+        payload = b"\x00binary\xff"
+        assert deserialize_cache_value(serialize_cache_value(payload, key), key) == payload
+
+        frame = pd.DataFrame({"track": ["a", "b"], "score": [1.5, 2.5]})
+        restored = deserialize_cache_value(serialize_cache_value(frame, key), key)
+        pd.testing.assert_frame_equal(frame, restored)
+
+    def test_rejects_legacy_pickle_envelope(self):
+        key = b"test-signing-key"
+        pickled = pickle.dumps({"pwn": True})
+        legacy = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": "00",
+                "payload": base64.b64encode(pickled).decode("ascii"),
+            }
+        ).encode()
+        assert deserialize_cache_value(legacy, key) is None
+
+    def test_rejects_unsigned_or_unknown_objects(self):
+        key = b"test-signing-key"
+        raw = serialize_cache_value({"ok": True}, key)
+        envelope = json.loads(raw.decode())
+        envelope["sig"] = "0" * 64
+        assert deserialize_cache_value(json.dumps(envelope).encode(), key) is None
+
+        class NotSerializable:
+            pass
+
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            serialize_cache_value(NotSerializable(), key)
