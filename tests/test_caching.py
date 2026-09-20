@@ -1,9 +1,18 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +127,54 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+def _unsigned_redis_backend(signing_key: bytes = b"unit-test-cache-key") -> RedisCacheBackend:
+    backend = RedisCacheBackend.__new__(RedisCacheBackend)
+    backend._signing_key = signing_key
+    backend._key_prefix = "audora:"
+    return backend
+
+
+class TestRedisJsonEnvelope:
+    """Redis cache must never unpickle attacker-controlled payloads."""
+
+    def test_round_trips_json_values(self):
+        backend = _unsigned_redis_backend()
+        payload = {"track": "Song", "score": 91}
+        restored = backend._deserialize(backend._serialize(payload))
+        assert restored == payload
+
+    def test_round_trips_bytes_and_dataframes(self):
+        backend = _unsigned_redis_backend()
+        assert backend._deserialize(backend._serialize(b"raw-bytes")) == b"raw-bytes"
+
+        frame = pd.DataFrame({"track": ["A"], "score": [88.0]})
+        restored = backend._deserialize(backend._serialize(frame))
+        assert list(restored.columns) == ["track", "score"]
+        assert restored.iloc[0]["track"] == "A"
+
+    def test_rejects_legacy_pickle_envelope(self):
+        backend = _unsigned_redis_backend()
+        pickled = pickle.dumps({"pwn": True})
+        signature = hmac.new(backend._signing_key, pickled, hashlib.sha256).hexdigest()
+        legacy = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": signature,
+                "payload": base64.b64encode(pickled).decode("ascii"),
+            }
+        ).encode("utf-8")
+        assert backend._deserialize(legacy) is None
+
+    def test_rejects_tampered_signature(self):
+        backend = _unsigned_redis_backend()
+        envelope = json.loads(backend._serialize({"ok": True}).decode("utf-8"))
+        envelope["sig"] = "0" * 64
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_non_json_values(self):
+        backend = _unsigned_redis_backend()
+        with pytest.raises(TypeError):
+            backend._serialize(object())
