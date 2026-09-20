@@ -73,6 +73,15 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    _MAX_EXPORT_ROWS = 100_000
+    _ALLOWED_EXPORT_TABLES = {
+        "trends",
+        "trend_history",
+        "viral_predictions",
+        "cross_platform_correlations",
+        "artists",
+        "tracks",
+    }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
@@ -927,44 +936,53 @@ class EnhancedMusicDataStore:
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
 
+    def _export_root(self) -> Path:
+        """Directory that CSV exports must stay inside."""
+        return (Path(__file__).resolve().parent.parent / "exports").resolve()
+
     def export_to_csv(self, table: str, filepath: str, days: int | None = None) -> str:
         """Export table data to CSV.
 
         Note: Table name is validated against whitelist to prevent SQL injection.
+        Export paths are confined to the project exports/ directory.
         """
-        # Whitelist valid table names to prevent SQL injection
-        valid_tables = {
-            "trends",
-            "trend_history",
-            "viral_predictions",
-            "cross_platform_correlations",
-            "artists",
-            "tracks",
-        }
-        if table not in valid_tables:
-            raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
+        if table not in self._ALLOWED_EXPORT_TABLES:
+            raise ValueError(
+                f"Invalid table name: {table}. Must be one of {self._ALLOWED_EXPORT_TABLES}"
+            )
+
+        export_root = self._export_root()
+        export_root.mkdir(parents=True, exist_ok=True)
+        destination = Path(filepath)
+        if not destination.is_absolute():
+            destination = export_root / destination.name
+        destination = destination.resolve()
+        try:
+            destination.relative_to(export_root)
+        except ValueError as exc:
+            raise ValueError("CSV export path must be under the exports/ directory") from exc
 
         with self.get_connection() as conn:
+            params: list[Any] = []
             if days:
-                # Use parameterized query for days parameter
                 query = f"""
                 SELECT * FROM {table}
                 WHERE datetime(created_at) >= datetime('now', ?)
                 ORDER BY created_at DESC
+                LIMIT ?
                 """
-                df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
+                params = [f"-{days} days", self._MAX_EXPORT_ROWS]
             else:
-                # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
-                df = pd.read_sql_query(query, conn)
+                query = f"SELECT * FROM {table} ORDER BY created_at DESC LIMIT ?"
+                params = [self._MAX_EXPORT_ROWS]
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            df = pd.read_sql_query(query, conn, params=tuple(params))
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(destination, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {destination}")
 
-        return filepath
+        return str(destination)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
