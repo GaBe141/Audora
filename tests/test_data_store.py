@@ -1,8 +1,10 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
-from core.data_store import EnhancedMusicDataStore
+from core.data_store import DATA_EXPORT_ROOT, EnhancedMusicDataStore
 
 
 class TestDataStorePooling:
@@ -107,3 +109,21 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportToCsvSecurity:
+    """CSV export must stay inside the data directory and reject traversal."""
+
+    def test_export_rejects_path_traversal(self, data_store, tmp_path):
+        with pytest.raises(ValueError, match="data directory"):
+            data_store.export_to_csv("trends", str(tmp_path / "evil.csv"))
+
+    def test_export_writes_inside_data_dir(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        output = data_store.export_to_csv("trends", "security_export_test.csv")
+        path = Path(output)
+        try:
+            assert path.is_file()
+            assert path.resolve().is_relative_to(DATA_EXPORT_ROOT)
+        finally:
+            path.unlink(missing_ok=True)
