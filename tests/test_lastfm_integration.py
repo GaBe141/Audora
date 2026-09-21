@@ -4,6 +4,7 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 # Last.fm module imports from .config which may not exist; provide a minimal mock
 if "integrations.config" not in sys.modules:
@@ -76,16 +77,32 @@ class TestLastFmAPIErrorHandling:
         mock_response = MagicMock()
         mock_response.raise_for_status = MagicMock()
         mock_response.json.return_value = {"error": 10, "message": "Invalid API key"}
-        with patch.object(api.session, "get", return_value=mock_response):
-            with pytest.raises(APIResponseError, match="Invalid API key"):
-                api.get_top_artists_global(limit=5)
+        with (
+            patch.object(api.session, "get", return_value=mock_response),
+            pytest.raises(APIResponseError, match="Invalid API key"),
+        ):
+            api.get_top_artists_global(limit=5)
+
+    def test_uses_https_and_blocks_redirects(self):
+        api = LastFmAPI(api_key="test_key")
+        assert api.session.trust_env is False
+        mock_response = MagicMock()
+        mock_response.is_redirect = True
+        mock_response.status_code = 302
+        with (
+            patch.object(api.session, "get", return_value=mock_response) as get,
+            pytest.raises(APIConnectionError, match="redirect"),
+        ):
+            api.get_top_artists_global(limit=1)
+        assert str(get.call_args.args[0]).startswith("https://")
+        assert get.call_args.kwargs["allow_redirects"] is False
 
     def test_http_error_raises_connection_error(self):
-        import requests
-
         api = LastFmAPI(api_key="test_key")
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("429")
-        with patch.object(api.session, "get", return_value=mock_response):
-            with pytest.raises(APIConnectionError, match="429"):
-                api.get_top_artists_global(limit=5)
+        with (
+            patch.object(api.session, "get", return_value=mock_response),
+            pytest.raises(APIConnectionError, match="429"),
+        ):
+            api.get_top_artists_global(limit=5)
