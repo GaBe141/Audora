@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import MAX_EXPORT_ROWS, confine_to_project, neutralize_csv_formulas
 
 
 @dataclass
@@ -61,6 +62,7 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+
     _ALLOWED_BULK_UPDATE_FIELDS = {
         "platform",
         "track_name",
@@ -140,8 +142,7 @@ class EnhancedMusicDataStore:
             cursor = conn.cursor()
 
             # Enhanced trends table
-            cursor.execute(
-                """
+            cursor.execute("""
             CREATE TABLE IF NOT EXISTS trends (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 platform TEXT NOT NULL,
@@ -159,12 +160,10 @@ class EnhancedMusicDataStore:
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(platform, track_id, region, trend_date) ON CONFLICT REPLACE
             )
-            """
-            )
+            """)
 
             # Trend history with better granularity
-            cursor.execute(
-                """
+            cursor.execute("""
             CREATE TABLE IF NOT EXISTS trend_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 trend_id INTEGER,
@@ -177,12 +176,10 @@ class EnhancedMusicDataStore:
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (trend_id) REFERENCES trends (id) ON DELETE CASCADE
             )
-            """
-            )
+            """)
 
             # Enhanced viral predictions
-            cursor.execute(
-                """
+            cursor.execute("""
             CREATE TABLE IF NOT EXISTS viral_predictions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 track_id TEXT,
@@ -199,12 +196,10 @@ class EnhancedMusicDataStore:
                 status TEXT DEFAULT 'pending',  -- pending, confirmed, failed
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
-            """
-            )
+            """)
 
             # Cross-platform correlation tracking
-            cursor.execute(
-                """
+            cursor.execute("""
             CREATE TABLE IF NOT EXISTS cross_platform_correlations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 track_name TEXT NOT NULL,
@@ -218,12 +213,10 @@ class EnhancedMusicDataStore:
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(track_name, artist, source_platform, target_platform, analysis_date) ON CONFLICT REPLACE
             )
-            """
-            )
+            """)
 
             # Platform performance metrics
-            cursor.execute(
-                """
+            cursor.execute("""
             CREATE TABLE IF NOT EXISTS platform_metrics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 platform TEXT NOT NULL,
@@ -237,12 +230,10 @@ class EnhancedMusicDataStore:
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(platform, date) ON CONFLICT REPLACE
             )
-            """
-            )
+            """)
 
             # User alerts and notifications
-            cursor.execute(
-                """
+            cursor.execute("""
             CREATE TABLE IF NOT EXISTS alert_rules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -254,12 +245,10 @@ class EnhancedMusicDataStore:
                 trigger_count INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
-            """
-            )
+            """)
 
             # Data quality and validation logs
-            cursor.execute(
-                """
+            cursor.execute("""
             CREATE TABLE IF NOT EXISTS data_quality_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 table_name TEXT NOT NULL,
@@ -270,8 +259,7 @@ class EnhancedMusicDataStore:
                 issue_count INTEGER,
                 timestamp TEXT DEFAULT CURRENT_TIMESTAMP
             )
-            """
-            )
+            """)
 
             conn.commit()
             self.logger.info("Database tables initialized successfully")
@@ -787,7 +775,9 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        invalid_fields = [field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS]
+        invalid_fields = [
+            field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS
+        ]
         if invalid_fields:
             raise ValueError(
                 "Invalid update fields: "
@@ -944,6 +934,7 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        export_path = confine_to_project(filepath)
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -951,20 +942,22 @@ class EnhancedMusicDataStore:
                 SELECT * FROM {table}
                 WHERE datetime(created_at) >= datetime('now', ?)
                 ORDER BY created_at DESC
+                LIMIT ?
                 """
-                df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
+                df = pd.read_sql_query(query, conn, params=[f"-{days} days", MAX_EXPORT_ROWS + 1])
             else:
                 # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
-                df = pd.read_sql_query(query, conn)
+                query = f"SELECT * FROM {table} ORDER BY created_at DESC LIMIT ?"
+                df = pd.read_sql_query(query, conn, params=[MAX_EXPORT_ROWS + 1])
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            if len(df) > MAX_EXPORT_ROWS:
+                raise ValueError(f"Refusing to export more than {MAX_EXPORT_ROWS} rows")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            neutralize_csv_formulas(df).to_csv(export_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {export_path}")
 
-        return filepath
+        return str(export_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
@@ -997,27 +990,23 @@ class EnhancedMusicDataStore:
                 quality_issues.append(f"{invalid_scores} trends with invalid scores")
 
             # Check for orphaned history records
-            cursor.execute(
-                """
+            cursor.execute("""
             SELECT COUNT(*) FROM trend_history th
             LEFT JOIN trends t ON th.trend_id = t.id
             WHERE t.id IS NULL
-            """
-            )
+            """)
             orphaned_history = cursor.fetchone()[0]
             if orphaned_history > 0:
                 quality_issues.append(f"{orphaned_history} orphaned history records")
 
             # Platform distribution
-            cursor.execute(
-                """
+            cursor.execute("""
             SELECT platform, COUNT(*) as count
             FROM trends
             WHERE datetime(trend_date) >= datetime('now', '-7 days')
             GROUP BY platform
             ORDER BY count DESC
-            """
-            )
+            """)
             platform_distribution = dict(cursor.fetchall())
 
             # Log quality report
@@ -1167,10 +1156,7 @@ class EnhancedMusicDataStore:
         rmse = float((errors**2).mean() ** 0.5)
 
         acc_by_platform = (
-            evaluated_df.groupby("platform")["accuracy_score"]
-            .mean()
-            .round(3)
-            .to_dict()
+            evaluated_df.groupby("platform")["accuracy_score"].mean().round(3).to_dict()
         )
 
         return {

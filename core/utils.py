@@ -8,6 +8,40 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MAX_EXPORT_ROWS = 100_000
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def confine_to_project(path: Path | str) -> Path:
+    """Resolve a path and reject targets outside the project directory."""
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    resolved = candidate.resolve()
+    root = PROJECT_ROOT.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise ValueError(f"Path must stay inside {root}")
+    return resolved
+
+
+def neutralize_csv_formulas(df: Any) -> Any:
+    """Prefix spreadsheet formula characters so exported cells are inert."""
+    if not HAS_PANDAS:
+        return df
+
+    def _neutralize(value: Any) -> Any:
+        if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
+            return f"'{value}"
+        return value
+
+    sanitized = df.copy()
+    sanitized.columns = [_neutralize(str(column)) for column in sanitized.columns]
+    for column in sanitized.columns:
+        sanitized[column] = sanitized[column].map(_neutralize)
+    return sanitized
+
+
 # Re-export for convenience
 try:
     import pandas as pd
@@ -98,7 +132,10 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = confine_to_project(filepath)
+    if HAS_PANDAS and len(df) > MAX_EXPORT_ROWS:
+        raise ValueError(f"Refusing to export more than {MAX_EXPORT_ROWS} rows")
+    df = neutralize_csv_formulas(df)
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
