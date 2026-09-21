@@ -1,9 +1,15 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
 import time
+from datetime import datetime
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    dumps_signed,
+    loads_signed,
 )
 
 
@@ -118,3 +124,29 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedCachePayload:
+    """HMAC-signed JSON cache payloads reject pickle and bad signatures."""
+
+    def test_round_trip_structured_values(self):
+        key = b"test-signing-key"
+        frame = pd.DataFrame([{"name": "Song", "score": 1.5}])
+        original = {
+            "when": datetime(2026, 9, 21, 12, 0, 0),
+            "pair": ("track", "artist"),
+            "frame": frame,
+        }
+        restored = loads_signed(dumps_signed(original, key), key)
+        assert restored["when"] == original["when"]
+        assert restored["pair"] == original["pair"]
+        assert restored["frame"].iloc[0]["name"] == "Song"
+
+    def test_rejects_pickle_payload(self):
+        with pytest.raises(ValueError, match="pickle"):
+            loads_signed(b"\x80\x04\x95\x00", b"test-signing-key")
+
+    def test_rejects_invalid_signature(self):
+        payload = dumps_signed({"ok": True}, b"test-signing-key")
+        with pytest.raises(ValueError, match="signature"):
+            loads_signed(payload, b"other-key")
