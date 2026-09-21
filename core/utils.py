@@ -8,6 +8,17 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+MAX_CSV_EXPORT_ROWS = 100_000
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def neutralize_csv_formula(value: Any) -> Any:
+    """Prefix spreadsheet formula characters so exported cells stay data."""
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
 # Re-export for convenience
 try:
     import pandas as pd
