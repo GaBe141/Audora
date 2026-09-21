@@ -8,13 +8,54 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Re-export for convenience
 try:
     import pandas as pd
 
     HAS_PANDAS = True
 except ImportError:
     HAS_PANDAS = False
+
+CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def resolve_confined_path(path: Path | str, root: Path | str) -> Path:
+    """Resolve a path and reject values that escape the allowed root.
+
+    Args:
+        path: Requested file path (relative paths are placed under root)
+        root: Directory that the resolved path must remain inside
+
+    Returns:
+        Resolved path confined to root
+
+    Raises:
+        ValueError: If the resolved path is outside root
+    """
+    root_path = Path(root).expanduser().resolve()
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = root_path / candidate
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(root_path):
+        raise ValueError(f"Path must be inside {root_path}")
+    return resolved
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix formula-like CSV cells so spreadsheets treat them as text."""
+    if isinstance(value, str) and value.startswith(CSV_FORMULA_PREFIXES):
+        return f"'{value}"
+    return value
+
+
+def neutralize_csv_dataframe(df: Any) -> Any:
+    """Return a DataFrame copy with formula-injection values neutralized."""
+    if not HAS_PANDAS:
+        raise ImportError("pandas is required for neutralize_csv_dataframe")
+    sanitized = df.copy()
+    for column in sanitized.columns:
+        sanitized[column] = sanitized[column].map(neutralize_csv_value)
+    return sanitized
 
 
 # JSON utilities
@@ -103,7 +144,7 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    neutralize_csv_dataframe(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
