@@ -8,6 +8,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+MAX_CSV_EXPORT_ROWS = 100_000
+
 # Re-export for convenience
 try:
     import pandas as pd
@@ -86,6 +89,24 @@ def write_json(
         raise
 
 
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix formula-like cells so spreadsheet apps do not execute them."""
+    if isinstance(value, str) and value[:1] in CSV_FORMULA_PREFIXES:
+        return f"'{value}"
+    return value
+
+
+def sanitize_dataframe_for_csv(df: Any, max_rows: int | None = MAX_CSV_EXPORT_ROWS) -> Any:
+    """Cap row count and neutralize CSV formula injection in cell values."""
+    if not HAS_PANDAS:
+        return df
+    if max_rows is not None and len(df) > max_rows:
+        df = df.head(max_rows).copy()
+    else:
+        df = df.copy()
+    return df.map(neutralize_csv_value)
+
+
 def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> Path:  # pd.DataFrame
     """
     Save DataFrame to CSV with consistent settings.
@@ -103,6 +124,7 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
+    df = sanitize_dataframe_for_csv(df)
     df.to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath

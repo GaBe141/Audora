@@ -1,9 +1,20 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
+    decode_cache_value,
+    encode_cache_value,
 )
 
 
@@ -118,3 +129,109 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestJsonCacheCodec:
+    """JSON cache encoding must round-trip supported types and reject gadgets."""
+
+    def test_roundtrip_primitives_and_containers(self):
+        original = {
+            "name": "Audora",
+            "count": 3,
+            "ok": True,
+            "missing": None,
+            "tags": ["a", "b"],
+            "pair": ("x", 1),
+            "blob": b"secret",
+        }
+        restored = decode_cache_value(encode_cache_value(original))
+        assert restored["name"] == "Audora"
+        assert restored["count"] == 3
+        assert restored["ok"] is True
+        assert restored["missing"] is None
+        assert restored["tags"] == ["a", "b"]
+        assert restored["pair"] == ("x", 1)
+        assert restored["blob"] == b"secret"
+
+    def test_roundtrip_dataframe(self):
+        df = pd.DataFrame({"track": ["One"], "score": [12.5]})
+        restored = decode_cache_value(encode_cache_value(df))
+        assert list(restored.columns) == ["track", "score"]
+        assert restored.iloc[0]["track"] == "One"
+        assert restored.iloc[0]["score"] == 12.5
+
+    def test_rejects_arbitrary_objects(self):
+        class Gadget:
+            pass
+
+        with pytest.raises(TypeError, match="cannot be cached safely"):
+            encode_cache_value(Gadget())
+
+    def test_signed_json_envelope_roundtrip_and_rejects_pickle_version(self):
+        class MemoryRedis:
+            def __init__(self):
+                self.store: dict[bytes | str, bytes] = {}
+
+            def get(self, key):
+                return self.store.get(key)
+
+            def set(self, key, value):
+                self.store[key] = value
+
+            def setex(self, key, ttl, value):
+                self.store[key] = value
+
+            def delete(self, *keys):
+                for key in keys:
+                    self.store.pop(key, None)
+
+            def scan(self, cursor=0, match=None, count=200):
+                return 0, [key for key in self.store if str(key).startswith("audora:")]
+
+            def exists(self, key):
+                return 1 if key in self.store else 0
+
+            def ping(self):
+                return True
+
+        backend = RedisCacheBackend(client=MemoryRedis(), signing_key=b"unit-test-key")
+        backend.set("audora:k", {"track": "Hello"}, ttl=None)
+        assert backend.get("audora:k") == {"track": "Hello"}
+
+        pickle_payload = pickle.dumps({"pwn": True})
+        signature = hmac.new(b"unit-test-key", pickle_payload, hashlib.sha256).hexdigest()
+        envelope = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": signature,
+                "payload": base64.b64encode(pickle_payload).decode("ascii"),
+            }
+        ).encode("utf-8")
+        backend._client.store["audora:legacy"] = envelope
+        assert backend.get("audora:legacy") is None
+
+    def test_clear_is_prefix_scoped(self):
+        class MemoryRedis:
+            def __init__(self):
+                self.store = {
+                    "audora:one": b"1",
+                    "other:two": b"2",
+                }
+                self.deleted = []
+
+            def scan(self, cursor=0, match=None, count=200):
+                prefix = (match or "*").rstrip("*")
+                keys = [key for key in self.store if str(key).startswith(prefix)]
+                return 0, keys
+
+            def delete(self, *keys):
+                self.deleted.extend(keys)
+                for key in keys:
+                    self.store.pop(key, None)
+
+        client = MemoryRedis()
+        backend = RedisCacheBackend(client=client, signing_key=b"unit-test-key", key_prefix="audora")
+        backend.clear()
+        assert "audora:one" not in client.store
+        assert "other:two" in client.store
