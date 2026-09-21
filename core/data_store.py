@@ -5,6 +5,7 @@ Handles trending data, viral predictions, and cross-platform analysis.
 
 import json
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import neutralize_csv_dataframe, resolve_confined_path
 
 
 @dataclass
@@ -927,10 +929,19 @@ class EnhancedMusicDataStore:
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
 
-    def export_to_csv(self, table: str, filepath: str, days: int | None = None) -> str:
+    def export_to_csv(
+        self,
+        table: str,
+        filepath: str,
+        days: int | None = None,
+        *,
+        export_root: str | Path | None = None,
+        max_rows: int = 10_000,
+    ) -> str:
         """Export table data to CSV.
 
         Note: Table name is validated against whitelist to prevent SQL injection.
+        Export paths are confined to the export root to prevent path traversal.
         """
         # Whitelist valid table names to prevent SQL injection
         valid_tables = {
@@ -943,6 +954,9 @@ class EnhancedMusicDataStore:
         }
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
+
+        root = Path(export_root or os.getenv("AUDORA_EXPORT_DIR", "data/exports"))
+        target = resolve_confined_path(filepath, root)
 
         with self.get_connection() as conn:
             if days:
@@ -958,13 +972,14 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            if len(df) > max_rows:
+                df = df.head(max_rows)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            neutralize_csv_dataframe(df).to_csv(target, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {target}")
 
-        return filepath
+        return str(target)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
