@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import json
 import time
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +123,56 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSignedJsonSerialization:
+    """HMAC-signed JSON envelopes must round-trip and reject unsafe payloads."""
+
+    def _backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-cache-signing-key"
+        backend._key_prefix = "audora"
+        return backend
+
+    def test_json_roundtrip(self):
+        backend = self._backend()
+        original = {"track": "Song", "score": 91, "tags": ["pop"]}
+        restored = backend._deserialize(backend._serialize(original))
+        assert restored == original
+
+    def test_dataframe_roundtrip(self):
+        backend = self._backend()
+        original = pd.DataFrame({"track": ["A", "B"], "score": [1.5, 2.5]})
+        restored = backend._deserialize(backend._serialize(original))
+        assert isinstance(restored, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored, original)
+
+    def test_rejects_unsigned_payload(self):
+        backend = self._backend()
+        assert backend._deserialize(b'{"hello": "world"}') is None
+        assert backend._deserialize(b"not-json") is None
+
+    def test_rejects_tampered_payload(self):
+        backend = self._backend()
+        envelope = json.loads(backend._serialize({"ok": True}).decode("utf-8"))
+        envelope["payload"] = base64.b64encode(b'{"t":"json","d":{"ok":false}}').decode("ascii")
+        assert backend._deserialize(json.dumps(envelope).encode("utf-8")) is None
+
+    def test_serialize_does_not_use_pickle(self):
+        backend = self._backend()
+        payload = backend._serialize({"ok": True})
+        assert b"pickle" not in payload.lower()
+        assert b"\x80" not in payload  # pickle protocol opcode prefix
+
+
+class TestCacheKeyHashing:
+    """Cache keys should use SHA-256 rather than MD5."""
+
+    def test_build_cache_key_uses_sha256(self, mock_cache):
+        key = mock_cache._build_cache_key("fn", (1, 2), {"a": "b"})
+        parts = key.split(":")
+        assert parts[0] == "fn"
+        assert len(parts) == 3
+        for digest in parts[1:]:
+            assert len(digest) == 64
+            int(digest, 16)
