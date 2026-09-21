@@ -10,11 +10,13 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
+from datetime import datetime
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,9 @@ except ImportError:
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+_CACHE_ENVELOPE_VERSION = 2
+_MAX_CACHE_PAYLOAD_BYTES = 1_048_576
 
 
 class CacheBackend:
@@ -178,20 +183,60 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
-        # This keeps the cache safe by default, with only a reduced cross-process hit rate.
+        # Fallback to process-local random key so cache entries cannot be forged.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
             "Set AUDORA_CACHE_SIGNING_KEY for shared Redis cache across processes."
         )
         return os.urandom(32)
 
+    @staticmethod
+    def _json_default(obj: Any) -> Any:
+        """Convert numpy/pandas scalars and datetimes to JSON-safe values."""
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        item = getattr(obj, "item", None)
+        if callable(item):
+            try:
+                return item()
+            except (ValueError, AttributeError, TypeError):
+                pass
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+    def _to_jsonable(self, value: Any) -> dict[str, Any]:
+        """Convert a cache value into a JSON-only envelope body."""
+        if isinstance(value, pd.DataFrame):
+            split = json.loads(value.to_json(orient="split", date_format="iso"))
+            return {"t": "dataframe", "d": split}
+        dumped = json.dumps(value, default=self._json_default)
+        return {"t": "json", "d": json.loads(dumped)}
+
+    def _from_jsonable(self, body: dict[str, Any]) -> Any:
+        """Rehydrate a JSON-only envelope body."""
+        kind = body.get("t")
+        data = body.get("d")
+        if kind == "dataframe":
+            if not isinstance(data, dict):
+                raise ValueError("Invalid dataframe payload")
+            return pd.DataFrame(
+                data=data.get("data"),
+                index=data.get("index"),
+                columns=data.get("columns"),
+            )
+        if kind == "json":
+            return data
+        raise ValueError(f"Unsupported cache payload type: {kind}")
+
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value as signed JSON (never pickle)."""
+        payload = json.dumps(
+            self._to_jsonable(value), separators=(",", ":"), default=self._json_default
+        ).encode("utf-8")
+        if len(payload) > _MAX_CACHE_PAYLOAD_BYTES:
+            raise ValueError("Cache payload exceeds maximum allowed size")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": _CACHE_ENVELOPE_VERSION,
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
@@ -204,7 +249,7 @@ class RedisCacheBackend(CacheBackend):
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != _CACHE_ENVELOPE_VERSION
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -218,12 +263,20 @@ class RedisCacheBackend(CacheBackend):
                 return None
 
             payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
+            if len(payload) > _MAX_CACHE_PAYLOAD_BYTES:
+                logger.warning("Rejected cache entry that exceeds maximum payload size")
+                return None
+
             expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            body = json.loads(payload.decode("utf-8"))
+            if not isinstance(body, dict):
+                logger.warning("Rejected cache entry with non-object payload")
+                return None
+            return self._from_jsonable(body)
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -337,7 +390,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable or a DataFrame)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
