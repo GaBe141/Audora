@@ -33,8 +33,8 @@ class SecureConfig:
             )
             return
 
-        # Load with explicit encoding and override
-        load_dotenv(dotenv_path=str(self.env_file), override=True, encoding="utf-8")
+        # Load with explicit encoding; process env must win over the file
+        load_dotenv(dotenv_path=str(self.env_file), override=False, encoding="utf-8")
 
         # Validate file permissions (Unix-like systems)
         if hasattr(os, "stat") and not sys.platform.startswith("win"):
@@ -173,10 +173,9 @@ LASTFM_SHARED_SECRET=your_lastfm_shared_secret_here
 # Free tier (123) provides basic access, premium unlocks additional features
 AUDIODB_API_KEY=123
 
-# Security Notes:
-# - Never commit this file to version control
-# - Keep file permissions restrictive (chmod 600 on Unix systems)
-# - Regenerate keys if they are ever exposed
+# Cache integrity (optional but recommended for shared Redis)
+# Use a long random value. Required for cross-process Redis cache hits.
+AUDORA_CACHE_SIGNING_KEY=your_cache_signing_key_here
 """
         return template
 
