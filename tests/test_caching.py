@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+from datetime import datetime
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +125,30 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedJsonCache:
+    """Redis payloads are HMAC-signed JSON and never pickle."""
+
+    def test_roundtrip_preserves_datetime_and_dataframe(self):
+        key = b"test-signing-key"
+        frame = pd.DataFrame({"track": ["Song"], "score": [1.5]})
+        original = {"when": datetime(2026, 1, 2, 3, 4, 5), "frame": frame, "pair": (1, "a")}
+        restored = deserialize_cache_value(serialize_cache_value(original, key), key)
+        assert restored["when"] == original["when"]
+        assert restored["pair"] == (1, "a")
+        assert restored["frame"].iloc[0]["track"] == "Song"
+
+    def test_rejects_pickle_and_unsigned_payloads(self):
+        key = b"test-signing-key"
+        with pytest.raises(ValueError, match="pickle"):
+            deserialize_cache_value(pickle.dumps({"a": 1}), key)
+        with pytest.raises(ValueError, match="envelope"):
+            deserialize_cache_value(b'{"v": 1, "payload": "abc"}', key)
+
+    def test_rejects_tampered_signature(self):
+        key = b"test-signing-key"
+        blob = bytearray(serialize_cache_value({"ok": True}, key))
+        blob[-3] = (blob[-3] + 1) % 256
+        with pytest.raises(ValueError, match="signature|payload|envelope"):
+            deserialize_cache_value(bytes(blob), key)

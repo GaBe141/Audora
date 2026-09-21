@@ -8,6 +8,34 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_ROOT = PROJECT_ROOT / "data"
+MAX_CSV_EXPORT_ROWS = 100_000
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def confine_to_directory(path: Path | str, root: Path) -> Path:
+    """Resolve ``path`` and reject anything that escapes ``root``."""
+    root_resolved = root.resolve()
+    resolved = Path(path).resolve()
+    if resolved != root_resolved and root_resolved not in resolved.parents:
+        raise ValueError(f"Path must stay inside {root_resolved}")
+    return resolved
+
+
+def neutralize_csv_formulas(df: Any) -> Any:
+    """Prefix spreadsheet formula characters so CSV cells are not executed."""
+
+    def _neutralize(value: Any) -> Any:
+        if isinstance(value, str) and value and value[0] in _CSV_FORMULA_PREFIXES:
+            return "'" + value
+        return value
+
+    if hasattr(df, "map"):
+        return df.map(_neutralize)
+    return df
+
+
 # Re-export for convenience
 try:
     import pandas as pd
@@ -98,12 +126,18 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    candidate = Path(filepath)
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    filepath = confine_to_directory(candidate, DATA_ROOT)
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    frame = neutralize_csv_formulas(df)
+    if hasattr(frame, "iloc") and len(frame) > MAX_CSV_EXPORT_ROWS:
+        frame = frame.iloc[:MAX_CSV_EXPORT_ROWS]
+    frame.to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
