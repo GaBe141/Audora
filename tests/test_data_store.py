@@ -1,8 +1,11 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from datetime import datetime
+from pathlib import Path
+
 import pytest
 
-from core.data_store import EnhancedMusicDataStore
+from core.data_store import EnhancedMusicDataStore, TrendData
 
 
 class TestDataStorePooling:
@@ -107,3 +110,34 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+    def test_update_trends_bulk_serializes_metadata(self, data_store, sample_trends):
+        data_store.save_trends_bulk(sample_trends)
+        updated = data_store.update_trends_bulk(
+            [sample_trends[0].track_id], {"metadata": {"source": "unit-test"}}
+        )
+        assert updated >= 1
+
+    def test_export_to_csv_confines_path(self, data_store, sample_trends, tmp_path):
+        data_store.save_trends_bulk(sample_trends)
+        with pytest.raises(ValueError, match="inside"):
+            data_store.export_to_csv("trends", "/tmp/audora-escape.csv", export_root=tmp_path)
+
+    def test_export_to_csv_neutralizes_formulas(self, data_store, tmp_path):
+        trend = TrendData(
+            platform="spotify",
+            track_id="evil1",
+            track_name="=CMD|'/c calc'!A0",
+            artist="@SUM(1+1)",
+            score=10.0,
+            rank=1,
+            region="US",
+            trend_date=datetime.now(),
+            metadata={},
+            first_detected=datetime.now(),
+        )
+        data_store.save_trends_bulk([trend])
+        exported = data_store.export_to_csv("trends", "safe.csv", export_root=tmp_path, max_rows=10)
+        content = Path(exported).read_text(encoding="utf-8")
+        assert "'=CMD|'/c calc'!A0" in content
+        assert "'@SUM(1+1)" in content
