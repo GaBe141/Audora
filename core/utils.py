@@ -86,6 +86,26 @@ def write_json(
         raise
 
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def neutralize_csv_formula(value: Any) -> Any:
+    """Prefix spreadsheet formulas so exported CSV cannot execute as formulas."""
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
+        return f"'{value}"
+    return value
+
+
+def neutralize_dataframe_formulas(df: Any) -> Any:
+    """Return a copy of a DataFrame with CSV formula injection neutralized."""
+    if not HAS_PANDAS or df is None:
+        return df
+    sanitized = df.copy()
+    for column in sanitized.columns:
+        sanitized[column] = sanitized[column].map(neutralize_csv_formula)
+    return sanitized
+
+
 def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> Path:  # pd.DataFrame
     """
     Save DataFrame to CSV with consistent settings.
@@ -103,7 +123,7 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    neutralize_dataframe_formulas(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
