@@ -8,6 +8,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DATA_DIR = _PROJECT_ROOT / "data"
+MAX_CSV_EXPORT_ROWS = 100_000
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
 # Re-export for convenience
 try:
     import pandas as pd
@@ -15,6 +20,7 @@ try:
     HAS_PANDAS = True
 except ImportError:
     HAS_PANDAS = False
+    pd = None
 
 
 # JSON utilities
@@ -86,6 +92,52 @@ def write_json(
         raise
 
 
+def _neutralize_csv_cell(value: Any) -> Any:
+    """Prefix spreadsheet formula characters so Excel treats the cell as text."""
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def neutralize_csv_dataframe(df: Any) -> Any:
+    """Return a copy of ``df`` with formula-like string cells neutralized."""
+    if not HAS_PANDAS or pd is None:
+        raise ImportError("pandas is required for neutralize_csv_dataframe")
+    neutralized = df.map(_neutralize_csv_cell)
+    neutralized.columns = [
+        _neutralize_csv_cell(column) if isinstance(column, str) else column
+        for column in neutralized.columns
+    ]
+    return neutralized
+
+
+def prepare_csv_export(df: Any, max_rows: int = MAX_CSV_EXPORT_ROWS) -> Any:
+    """Cap export size and neutralize spreadsheet formulas."""
+    if len(df) > max_rows:
+        logger.warning("Truncating CSV export from %s to %s rows", len(df), max_rows)
+        df = df.head(max_rows).copy()
+    return neutralize_csv_dataframe(df)
+
+
+def confine_data_path(filepath: Path | str, extra_roots: list[Path] | None = None) -> Path:
+    """Resolve ``filepath`` and require it to stay inside an allowed data directory.
+
+    Relative paths are resolved against the project root, so ``../`` cannot escape it.
+    """
+    candidate = Path(filepath)
+    if not candidate.is_absolute():
+        candidate = _PROJECT_ROOT / candidate
+    resolved = candidate.resolve()
+    roots = [_DATA_DIR]
+    if extra_roots:
+        roots.extend(extra_roots)
+    for root in roots:
+        root_resolved = root.resolve()
+        if resolved == root_resolved or root_resolved in resolved.parents:
+            return resolved
+    raise ValueError(f"Refusing to write outside allowed data directories: {filepath}")
+
+
 def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> Path:  # pd.DataFrame
     """
     Save DataFrame to CSV with consistent settings.
@@ -98,12 +150,12 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = confine_data_path(filepath)
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    prepare_csv_export(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
