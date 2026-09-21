@@ -8,6 +8,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_EXPORT_DIR = (_PROJECT_ROOT / "data").resolve()
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
 # Re-export for convenience
 try:
     import pandas as pd
@@ -86,6 +90,50 @@ def write_json(
         raise
 
 
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula characters so CSV cells are not executed."""
+    if not isinstance(value, str) or not value:
+        return value
+    stripped = value.lstrip(" \t")
+    if stripped[:1] in _CSV_FORMULA_PREFIXES or value[:1] in ("\t", "\r"):
+        return "'" + value
+    return value
+
+
+def neutralize_dataframe(df: Any) -> Any:
+    """Return a copy of a DataFrame with CSV formula injection neutralized."""
+    if not HAS_PANDAS:
+        return df
+    return df.map(neutralize_csv_value)
+
+
+def resolve_csv_export_path(filepath: Path | str, root: Path | None = None) -> Path:
+    """Resolve a CSV path and keep it inside the export directory.
+
+    Relative paths may be written under the project ``data`` directory or under
+    ``root`` when that root is the database directory.
+    """
+    base = (root or _DEFAULT_EXPORT_DIR).resolve()
+    candidate = Path(filepath)
+    if not candidate.is_absolute():
+        from_cwd = (Path.cwd() / candidate).resolve()
+        from_root = (_PROJECT_ROOT / candidate).resolve()
+        if from_cwd.is_relative_to(base):
+            candidate = from_cwd
+        elif from_root.is_relative_to(base):
+            candidate = from_root
+        else:
+            candidate = (base / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+
+    if not candidate.is_relative_to(base):
+        raise ValueError("CSV export path must stay inside the export directory")
+    if candidate.suffix.lower() != ".csv":
+        raise ValueError("CSV export path must use a .csv extension")
+    return candidate
+
+
 def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> Path:  # pd.DataFrame
     """
     Save DataFrame to CSV with consistent settings.
@@ -98,12 +146,12 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = resolve_csv_export_path(filepath)
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    neutralize_dataframe(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 

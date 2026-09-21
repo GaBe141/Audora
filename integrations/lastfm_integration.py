@@ -13,7 +13,7 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
 class LastFmAPI:
@@ -40,7 +40,14 @@ class LastFmAPI:
         request_params = {"method": method, "api_key": self.api_key, "format": "json", **params}
 
         try:
-            response = self.session.get(BASE_URL, params=request_params, timeout=10)
+            response = self.session.get(
+                BASE_URL, params=request_params, timeout=10, allow_redirects=False
+            )
+            if response.status_code in {301, 302, 303, 307, 308}:
+                raise APIConnectionError(
+                    message="Last.fm redirected the request; redirects are disabled",
+                    details={"method": method},
+                )
             response.raise_for_status()
             data = response.json()
 
