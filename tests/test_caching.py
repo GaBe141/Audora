@@ -1,9 +1,20 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import base64
+import hashlib
+import hmac
+import json
+import pickle
 import time
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    _encode_cache_value,
+    load_signed_cache_value,
+    sign_cache_envelope,
 )
 
 
@@ -118,3 +129,46 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedJsonCacheEnvelope:
+    """Redis payloads must be HMAC-signed JSON, never pickle."""
+
+    def test_roundtrip_primitives_and_containers(self):
+        key = b"unit-test-signing-key"
+        value = {"name": "track", "tags": ["a", "b"], "tuple": ("x", 1), "blob": b"raw"}
+        loaded = load_signed_cache_value(key, sign_cache_envelope(key, value))
+        assert loaded["name"] == "track"
+        assert loaded["tags"] == ["a", "b"]
+        assert loaded["tuple"] == ("x", 1)
+        assert loaded["blob"] == b"raw"
+
+    def test_rejects_legacy_pickle_envelope(self):
+        key = b"unit-test-signing-key"
+        payload = pickle.dumps({"pwn": True})
+        envelope = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": hmac.new(key, payload, hashlib.sha256).hexdigest(),
+                "payload": base64.b64encode(payload).decode("ascii"),
+            }
+        ).encode("utf-8")
+        assert load_signed_cache_value(key, envelope) is None
+
+    def test_rejects_tampered_payload(self):
+        key = b"unit-test-signing-key"
+        envelope = json.loads(sign_cache_envelope(key, {"score": 1}).decode("utf-8"))
+        envelope["payload"]["d"]["score"] = 999
+        assert load_signed_cache_value(key, json.dumps(envelope).encode("utf-8")) is None
+
+    def test_rejects_unsupported_types(self):
+        with pytest.raises(TypeError, match="Unsupported cache value type"):
+            _encode_cache_value(object())
+
+    def test_dataframe_roundtrip(self):
+        key = b"unit-test-signing-key"
+        frame = pd.DataFrame({"track": ["a"], "score": [1.5]})
+        loaded = load_signed_cache_value(key, sign_cache_envelope(key, frame))
+        assert list(loaded.columns) == ["track", "score"]
+        assert loaded.iloc[0]["track"] == "a"
