@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,34 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestCsvExportSafety:
+    """CSV export must stay inside export_dir and neutralize formulas."""
+
+    def test_export_rejects_path_traversal(self, temp_db_path, tmp_path, sample_trends):
+        export_dir = tmp_path / "exports"
+        store = EnhancedMusicDataStore(
+            db_path=str(temp_db_path),
+            backup_dir=str(tmp_path / "backups"),
+            export_dir=str(export_dir),
+        )
+        store.save_trends_bulk(sample_trends)
+        with pytest.raises(ValueError, match="exports directory"):
+            store.export_to_csv("trends", str(tmp_path / "escaped.csv"))
+        store.close_pool()
+
+    def test_export_neutralizes_formula_cells(self, temp_db_path, tmp_path, sample_trends):
+        export_dir = tmp_path / "exports"
+        store = EnhancedMusicDataStore(
+            db_path=str(temp_db_path),
+            backup_dir=str(tmp_path / "backups"),
+            export_dir=str(export_dir),
+        )
+        sample_trends[0].track_name = "=cmd|' /C calc'!A0"
+        store.save_trends_bulk(sample_trends)
+        exported = store.export_to_csv("trends", "trends.csv")
+        contents = Path(exported).read_text(encoding="utf-8")
+        assert "=cmd|" not in contents or "'=cmd|" in contents
+        assert contents.splitlines()[1].count("'=") >= 1 or "'=cmd" in contents
+        store.close_pool()

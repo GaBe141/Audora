@@ -17,6 +17,34 @@ except ImportError:
     HAS_PANDAS = False
 
 
+CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+MAX_CSV_EXPORT_ROWS = 100_000
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet-formula values so CSV exports cannot execute them."""
+    if isinstance(value, str) and value.startswith(CSV_FORMULA_PREFIXES):
+        return f"'{value}"
+    return value
+
+
+def neutralize_dataframe_for_csv(df: Any, max_rows: int = MAX_CSV_EXPORT_ROWS) -> Any:
+    """Return a copy of ``df`` with formula injection neutralized and row count capped."""
+    if not HAS_PANDAS:
+        raise ImportError("pandas is required for neutralize_dataframe_for_csv")
+
+    sanitized = df.copy()
+    if len(sanitized) > max_rows:
+        logger.warning(
+            "Truncating CSV export from %s to %s rows", len(sanitized), max_rows
+        )
+        sanitized = sanitized.head(max_rows)
+
+    for column in sanitized.columns:
+        sanitized[column] = sanitized[column].map(neutralize_csv_value)
+    return sanitized
+
+
 # JSON utilities
 def read_json(path: Path | str, default: Any = None) -> Any:
     """
@@ -103,7 +131,8 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    sanitized = neutralize_dataframe_for_csv(df)
+    sanitized.to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
