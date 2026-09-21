@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
 import time
+from datetime import datetime
+
+import pandas as pd
 
 from core.caching import (
     LocalCacheBackend,
+    deserialize_signed_cache,
+    serialize_signed_cache,
 )
 
 
@@ -118,3 +123,27 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedJsonCache:
+    """Redis payloads are signed JSON and never pickle."""
+
+    def test_round_trip_and_reject_tampering(self):
+        signing_key = b"test-signing-key"
+        original = {"artist": "A", "when": datetime(2026, 1, 2, 3, 4, 5)}
+        raw = serialize_signed_cache(signing_key, original)
+
+        assert b"pickle" not in raw.lower()
+        restored = deserialize_signed_cache(signing_key, raw)
+        assert restored["artist"] == "A"
+        assert restored["when"] == original["when"]
+
+        assert deserialize_signed_cache(b"other-key", raw) is None
+        tampered = raw.replace(b"HMAC-SHA256", b"HMAC-SHA000")
+        assert deserialize_signed_cache(signing_key, tampered) is None
+
+    def test_dataframe_round_trip(self):
+        signing_key = b"test-signing-key"
+        frame = pd.DataFrame({"score": [1, 2]})
+        restored = deserialize_signed_cache(signing_key, serialize_signed_cache(signing_key, frame))
+        pd.testing.assert_frame_equal(restored, frame)
