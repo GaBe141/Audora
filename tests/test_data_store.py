@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -107,3 +109,36 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestExportToCsvSecurity:
+    """CSV export must stay inside exports/ and neutralize spreadsheet formulas."""
+
+    def test_export_rejects_path_outside_export_dir(self, data_store, tmp_path):
+        outside = tmp_path / "outside.csv"
+        with pytest.raises(ValueError, match="exports directory"):
+            data_store.export_to_csv("trends", str(outside))
+
+    def test_export_neutralizes_formula_cells(self, data_store, sample_trends):
+        from datetime import datetime
+
+        from core.data_store import TrendData
+
+        evil = TrendData(
+            platform="spotify",
+            track_id="evil1",
+            track_name="=HYPERLINK(\"http://evil\")",
+            artist="Artist A",
+            score=10.0,
+            rank=9,
+            region="US",
+            trend_date=datetime.now(),
+            metadata={"source": "test"},
+            first_detected=datetime.now(),
+        )
+        data_store.save_trends_bulk([evil])
+        dest = data_store.export_to_csv("trends", "trends.csv")
+        content = Path(dest).read_text(encoding="utf-8")
+        assert "=HYPERLINK" in content
+        assert "'=HYPERLINK" in content
+        assert Path(dest).resolve().is_relative_to(data_store.export_dir.resolve())
