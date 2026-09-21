@@ -15,6 +15,28 @@ from core.exceptions import APIConnectionError, APIResponseError
 from integrations.lastfm_integration import LastFmAPI
 
 
+class TestLastFmTransport:
+    """Last.fm requests must not leak the API key over cleartext HTTP."""
+
+    def test_uses_https_and_ignores_proxy_env(self):
+        from integrations.lastfm_integration import BASE_URL
+
+        api = LastFmAPI(api_key="test_key")
+        assert BASE_URL.startswith("https://")
+        assert api.session.trust_env is False
+
+    def test_redirect_is_rejected(self):
+        api = LastFmAPI(api_key="test_key")
+        mock_response = MagicMock()
+        mock_response.is_redirect = True
+        mock_response.status_code = 302
+        with (
+            patch.object(api.session, "get", return_value=mock_response),
+            pytest.raises(APIConnectionError, match="redirected"),
+        ):
+            api.get_top_artists_global(limit=5)
+
+
 class TestLastFmAPISuccess:
     """Test successful API responses with mocked session.get."""
 

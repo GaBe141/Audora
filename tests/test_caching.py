@@ -1,9 +1,17 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+from datetime import datetime
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    dumps_signed_cache_value,
+    loads_signed_cache_value,
 )
 
 
@@ -118,3 +126,28 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedCachePayload:
+    """Redis cache values are signed JSON and never pickle."""
+
+    def test_round_trip_json_types(self):
+        key = b"test-signing-key"
+        frame = pd.DataFrame([{"track": "Song", "score": 1.5}])
+        original = {"when": datetime(2026, 1, 2, 3, 4, 5), "frame": frame, "n": 3}
+        loaded = loads_signed_cache_value(dumps_signed_cache_value(original, key), key)
+        assert loaded["when"] == original["when"]
+        assert loaded["n"] == 3
+        assert loaded["frame"].iloc[0]["track"] == "Song"
+        assert loaded["frame"].iloc[0]["score"] == 1.5
+
+    def test_rejects_tampered_signature(self):
+        key = b"test-signing-key"
+        envelope = json.loads(dumps_signed_cache_value({"n": 1}, key))
+        envelope["sig"] = "0" * 64
+        with pytest.raises(ValueError, match="signature"):
+            loads_signed_cache_value(json.dumps(envelope).encode(), key)
+
+    def test_rejects_pickle_bytes(self):
+        with pytest.raises(ValueError, match="invalid serialization envelope"):
+            loads_signed_cache_value(pickle.dumps({"n": 1}), b"test-signing-key")
