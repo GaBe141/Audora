@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import MAX_CSV_EXPORT_ROWS, neutralize_dataframe_for_csv
 
 
 @dataclass
@@ -74,10 +75,20 @@ class EnhancedMusicDataStore:
         "is_active",
     }
 
-    def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
+    def __init__(
+        self,
+        db_path: str = "enhanced_music_trends.db",
+        backup_dir: str = "backups",
+        export_dir: str | None = None,
+    ):
         self.db_path = db_path
         self.backup_dir = Path(backup_dir)
         self.backup_dir.mkdir(exist_ok=True)
+        self.export_dir = (
+            Path(export_dir)
+            if export_dir is not None
+            else Path(__file__).resolve().parent.parent / "exports"
+        )
         self.logger = logging.getLogger(__name__)
 
         # Initialize cache
@@ -927,10 +938,23 @@ class EnhancedMusicDataStore:
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
 
+    def _resolve_export_path(self, filepath: str) -> Path:
+        """Confine CSV export paths to the configured exports directory."""
+        export_root = self.export_dir.resolve()
+        export_root.mkdir(parents=True, exist_ok=True)
+        candidate = Path(filepath)
+        resolved = candidate.resolve() if candidate.is_absolute() else (export_root / candidate).resolve()
+        try:
+            resolved.relative_to(export_root)
+        except ValueError as e:
+            raise ValueError("CSV export path must stay inside the exports directory") from e
+        return resolved
+
     def export_to_csv(self, table: str, filepath: str, days: int | None = None) -> str:
         """Export table data to CSV.
 
         Note: Table name is validated against whitelist to prevent SQL injection.
+        Export paths are confined to ``export_dir`` to prevent path traversal.
         """
         # Whitelist valid table names to prevent SQL injection
         valid_tables = {
@@ -943,6 +967,8 @@ class EnhancedMusicDataStore:
         }
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
+
+        export_path = self._resolve_export_path(filepath)
 
         with self.get_connection() as conn:
             if days:
@@ -958,13 +984,12 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            sanitized = neutralize_dataframe_for_csv(df, max_rows=MAX_CSV_EXPORT_ROWS)
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            sanitized.to_csv(export_path, index=False)
+            self.logger.info(f"Exported {len(sanitized)} rows from {table} to {export_path}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(export_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
