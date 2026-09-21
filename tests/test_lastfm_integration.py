@@ -12,7 +12,7 @@ if "integrations.config" not in sys.modules:
     sys.modules["integrations.config"] = _config_mock
 
 from core.exceptions import APIConnectionError, APIResponseError
-from integrations.lastfm_integration import LastFmAPI
+from integrations.lastfm_integration import BASE_URL, LastFmAPI
 
 
 class TestLastFmAPISuccess:
@@ -89,3 +89,15 @@ class TestLastFmAPIErrorHandling:
         with patch.object(api.session, "get", return_value=mock_response):
             with pytest.raises(APIConnectionError, match="429"):
                 api.get_top_artists_global(limit=5)
+
+    def test_requests_use_https_without_redirects(self):
+        api = LastFmAPI(api_key="test_key")
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"artists": {"artist": []}}
+        with patch.object(api.session, "get", return_value=mock_response) as mock_get:
+            api.get_top_artists_global(limit=1)
+        args, kwargs = mock_get.call_args
+        assert args[0] == BASE_URL
+        assert BASE_URL.startswith("https://")
+        assert kwargs.get("allow_redirects") is False
