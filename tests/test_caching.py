@@ -2,8 +2,12 @@
 
 import time
 
+import pandas as pd
+
 from core.caching import (
     LocalCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +122,24 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedJsonCache:
+    """Redis payloads must be signed JSON, never pickle."""
+
+    def test_round_trip_json_values(self):
+        key = b"test-signing-key"
+        frame = pd.DataFrame([{"track": "Song", "score": 1.5}])
+        raw = serialize_cache_value({"tracks": frame, "count": 1}, key)
+        restored = deserialize_cache_value(raw, key)
+        assert restored["count"] == 1
+        assert restored["tracks"].to_dict("records") == [{"track": "Song", "score": 1.5}]
+
+    def test_rejects_tampered_payload(self):
+        key = b"test-signing-key"
+        raw = bytearray(serialize_cache_value({"ok": True}, key))
+        raw[-2] = raw[-2] ^ 1
+        assert deserialize_cache_value(bytes(raw), key) is None
+
+    def test_rejects_unsigned_pickle_bytes(self):
+        assert deserialize_cache_value(b"\x80\x04\x95\x00", b"test-signing-key") is None

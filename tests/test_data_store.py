@@ -1,5 +1,7 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
@@ -102,6 +104,17 @@ class TestUpdateTrendsBulk:
     def test_update_trends_bulk_empty_returns_zero(self, data_store):
         assert data_store.update_trends_bulk([], {"score": 1}) == 0
         assert data_store.update_trends_bulk(["x"], {}) == 0
+
+    def test_export_to_csv_rejects_path_escape(self, data_store):
+        with pytest.raises(ValueError, match="escapes allowed directory"):
+            data_store.export_to_csv("trends", "/etc/audora-export.csv")
+
+    def test_export_to_csv_neutralizes_formulas(self, data_store, sample_trends):
+        sample_trends[0].track_name = "=cmd|' /C calc'!A0"
+        data_store.save_trends_bulk(sample_trends)
+        exported = data_store.export_to_csv("trends", "trends.csv")
+        contents = Path(exported).read_text(encoding="utf-8")
+        assert "'=cmd|" in contents
 
     def test_update_trends_bulk_rejects_invalid_fields(self, data_store, sample_trends):
         data_store.save_trends_bulk(sample_trends)
