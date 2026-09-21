@@ -4,18 +4,33 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
+import asyncio
+import io
 import subprocess
 import sys
 from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
 
+# Direct execution needs the project root on sys.path before first-party imports.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.data_store import EnhancedMusicDataStore  # noqa: E402
+from core.notification_service import (  # noqa: E402
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
+from core.utils import neutralize_csv_formulas  # noqa: E402
+
+_ALLOWED_DEMO_MODES = {"statistical", "trending", "multi_source", "platform", "all"}
 
 app = dash.Dash(
     __name__,
@@ -366,7 +381,6 @@ def _run_command(args: list[str]) -> tuple[str, str]:
 
 def _get_data_store():
     """Return an EnhancedMusicDataStore pointed at the default DB path."""
-    from core.data_store import EnhancedMusicDataStore
     db_path = PROJECT_ROOT / "data" / "enhanced_music_trends.db"
     return EnhancedMusicDataStore(str(db_path))
 
@@ -396,6 +410,8 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
+        if demo_value not in _ALLOWED_DEMO_MODES:
+            return "Error", "Unknown demo mode"
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
@@ -560,9 +576,7 @@ def search_history(_n, platform, min_score, days, artist_filter):
 def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
-    import io
-    import pandas as pd
-    df = pd.DataFrame(table_data)
+    df = neutralize_csv_formulas(pd.DataFrame(table_data).head(1000))
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return dcc.send_string(buf.getvalue(), "audora_trends.csv")
@@ -584,20 +598,31 @@ def export_csv(_n, table_data):
     State("input-smtp-pass", "value"),
     prevent_initial_call=True,
 )
+def _assign_webhook(svc: EnhancedNotificationService, section: str, key: str, url: str) -> None:
+    """Store a webhook URL only after SSRF validation."""
+    allow_private = section == "webhook" and svc._allow_private_webhooks()
+    svc.config[section][key] = svc._validate_webhook_url(url, allow_private=allow_private)
+
+
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
     try:
-        from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
-            svc.config["slack"]["webhook_url"] = slack_url
+            _assign_webhook(svc, "slack", "webhook_url", slack_url)
         if discord_url:
-            svc.config["discord"]["webhook_url"] = discord_url
+            _assign_webhook(svc, "discord", "webhook_url", discord_url)
         if webhook_url:
-            svc.config["webhook"]["url"] = webhook_url
+            _assign_webhook(svc, "webhook", "url", webhook_url)
         if smtp_host:
-            svc.config["email"]["smtp_server"] = smtp_host
+            host = str(smtp_host).strip()
+            if any(char.isspace() for char in host) or "://" in host:
+                return "Error: invalid SMTP host"
+            svc.config["email"]["smtp_server"] = host
         if smtp_port:
-            svc.config["email"]["port"] = int(smtp_port)
+            port = int(smtp_port)
+            if port < 1 or port > 65535:
+                return "Error: invalid SMTP port"
+            svc.config["email"]["port"] = port
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
         if smtp_pass:
@@ -621,15 +646,13 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         if not url:
             return "No URL"
         try:
-            import asyncio
-            from core.notification_service import (
-                EnhancedNotificationService,
-                NotificationChannel,
-                NotificationMessage,
-                NotificationPriority,
-            )
             svc = EnhancedNotificationService()
-            svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
+            _assign_webhook(
+                svc,
+                channel_key,
+                "webhook_url" if channel_key != "webhook" else "url",
+                url,
+            )
             channel = getattr(NotificationChannel, channel_enum_name)
             msg = NotificationMessage(
                 title="Audora test notification",

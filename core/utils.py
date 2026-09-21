@@ -6,6 +6,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
 logger = logging.getLogger(__name__)
 
 # Re-export for convenience
@@ -15,6 +18,32 @@ try:
     HAS_PANDAS = True
 except ImportError:
     HAS_PANDAS = False
+
+
+def confine_to_directory(path: Path | str, root: Path) -> Path:
+    """Resolve a path and require it to stay inside root.
+
+    Relative paths are resolved against root, not the process working directory.
+    """
+    root_resolved = root.resolve()
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = root_resolved / candidate
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(root_resolved):
+        raise ValueError(f"Path escapes allowed directory: {path}")
+    return resolved
+
+
+def neutralize_csv_formulas(df: Any) -> Any:
+    """Prefix spreadsheet formula characters so exported cells stay data."""
+
+    def _cell(value: Any) -> Any:
+        if isinstance(value, str) and value[:1] in _CSV_FORMULA_PREFIXES:
+            return "'" + value
+        return value
+
+    return df.map(_cell)
 
 
 # JSON utilities
@@ -98,12 +127,12 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = confine_to_directory(filepath, PROJECT_ROOT)
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    neutralize_csv_formulas(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
