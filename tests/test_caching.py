@@ -118,3 +118,47 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSignedJsonSerialization:
+    """Redis backend must round-trip JSON and never unpickle."""
+
+    def _backend(self):
+        from core.caching import RedisCacheBackend
+
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"unit-test-signing-key"
+        return backend
+
+    def test_roundtrip_json_and_dataframe(self):
+        import pandas as pd
+
+        backend = self._backend()
+        assert backend._deserialize(backend._serialize({"artist": "A", "score": 12})) == {
+            "artist": "A",
+            "score": 12,
+        }
+        frame = pd.DataFrame({"track": ["a"], "score": [1.5]})
+        restored = backend._deserialize(backend._serialize(frame))
+        assert list(restored.columns) == ["track", "score"]
+        assert restored.iloc[0]["track"] == "a"
+
+    def test_rejects_pickle_envelope(self):
+        import base64
+        import hashlib
+        import hmac
+        import json
+        import pickle
+
+        backend = self._backend()
+        payload = pickle.dumps({"pwn": True})
+        signature = hmac.new(backend._signing_key, payload, hashlib.sha256).hexdigest()
+        envelope = json.dumps(
+            {
+                "v": 1,
+                "alg": "HMAC-SHA256",
+                "sig": signature,
+                "payload": base64.b64encode(payload).decode("ascii"),
+            }
+        ).encode("utf-8")
+        assert backend._deserialize(envelope) is None
