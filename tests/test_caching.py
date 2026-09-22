@@ -1,9 +1,18 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
+import pickle
 import time
+from datetime import datetime
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
+    dumps_signed,
+    loads_signed,
 )
 
 
@@ -118,3 +127,53 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedCachePayload:
+    """HMAC-signed JSON cache payloads reject pickle and tampering."""
+
+    def test_round_trip_supports_datetime_tuple_and_dataframe(self):
+        key = b"test-signing-key"
+        frame = pd.DataFrame({"name": ["=cmd"], "score": [1]})
+        original = {
+            "when": datetime(2026, 9, 22, 15, 0, 0),
+            "pair": ("a", "b"),
+            "frame": frame,
+        }
+        restored = loads_signed(dumps_signed(original, key), key)
+        assert restored["when"] == original["when"]
+        assert restored["pair"] == original["pair"]
+        assert restored["frame"].iloc[0]["name"] == "=cmd"
+        assert restored["frame"].iloc[0]["score"] == 1
+
+    def test_rejects_pickle_and_unsigned_bytes(self):
+        key = b"test-signing-key"
+        with pytest.raises(ValueError, match="pickle"):
+            loads_signed(pickle.dumps({"ok": False}), key)
+        with pytest.raises(ValueError, match="pickle"):
+            loads_signed(b'{"v": 1}', key)
+
+    def test_rejects_tampered_signature(self):
+        key = b"test-signing-key"
+        envelope = json.loads(dumps_signed({"ok": True}, key))
+        envelope["sig"] = "0" * len(envelope["sig"])
+        tampered = json.dumps(envelope).encode("utf-8")
+        with pytest.raises(ValueError, match="signature"):
+            loads_signed(tampered, key)
+
+    def test_redis_get_deletes_rejected_payload(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        deleted: list[str] = []
+
+        class _Client:
+            def get(self, key: str) -> bytes:
+                return b"\x80\x04\x95\x00"
+
+            def delete(self, key: str) -> int:
+                deleted.append(key)
+                return 1
+
+        backend._client = _Client()
+        assert backend.get("audora:bad") is None
+        assert deleted == ["audora:bad"]
