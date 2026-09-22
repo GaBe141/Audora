@@ -14,7 +14,53 @@ try:
 
     HAS_PANDAS = True
 except ImportError:
+    pd = None
     HAS_PANDAS = False
+
+MAX_CSV_EXPORT_ROWS = 100_000
+_CSV_FORMULA_STARTS = ("=", "+", "-", "@")
+
+
+def neutralize_csv_formula(value: Any) -> Any:
+    """Prefix spreadsheet formula cells so Excel treats them as text."""
+    if not isinstance(value, str) or not value:
+        return value
+    probe = value.lstrip(" \t\r\n")
+    if probe[:1] in _CSV_FORMULA_STARTS:
+        return "'" + value
+    return value
+
+
+def neutralize_csv_dataframe(df: Any, *, enforce_row_cap: bool = True) -> Any:
+    """Neutralize formula text in a DataFrame before it is written as CSV."""
+    if not HAS_PANDAS or pd is None:
+        raise ImportError("pandas is required for CSV neutralization")
+    if enforce_row_cap and len(df) > MAX_CSV_EXPORT_ROWS:
+        raise ValueError(f"CSV export exceeds {MAX_CSV_EXPORT_ROWS} rows")
+    sanitized = df.copy()
+    renamed = [
+        neutralize_csv_formula(column) if isinstance(column, str) else column
+        for column in sanitized.columns
+    ]
+    sanitized.columns = renamed
+    for column in sanitized.columns:
+        series = sanitized[column]
+        if pd.api.types.is_string_dtype(series) or series.dtype == object:
+            sanitized[column] = series.map(neutralize_csv_formula)
+    return sanitized
+
+
+def confine_export_path(filepath: Path | str, root: Path) -> Path:
+    """Resolve an export path and keep it inside ``root``."""
+    export_root = root.resolve()
+    export_root.mkdir(parents=True, exist_ok=True)
+    candidate = Path(filepath)
+    if not candidate.is_absolute():
+        candidate = export_root / candidate
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(export_root):
+        raise ValueError("Export path must stay inside the exports directory")
+    return resolved
 
 
 # JSON utilities
@@ -99,10 +145,13 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
         Path object of the written file
     """
     filepath = Path(filepath)
+    if ".." in filepath.parts:
+        raise ValueError("CSV path must not contain parent directory segments")
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
+    df = neutralize_csv_dataframe(df, enforce_row_cap=False)
     df.to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
