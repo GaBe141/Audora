@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import neutralize_csv_formulas
 
 
 @dataclass
@@ -61,6 +62,8 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+
+    _MAX_EXPORT_ROWS = 100_000
     _ALLOWED_BULK_UPDATE_FIELDS = {
         "platform",
         "track_name",
@@ -787,7 +790,9 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        invalid_fields = [field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS]
+        invalid_fields = [
+            field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS
+        ]
         if invalid_fields:
             raise ValueError(
                 "Invalid update fields: "
@@ -927,6 +932,21 @@ class EnhancedMusicDataStore:
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
 
+    def _confine_export_path(self, filepath: str) -> Path:
+        """Keep CSV exports inside an exports directory next to the database."""
+        export_root = (Path(self.db_path).resolve().parent / "exports").resolve()
+        export_root.mkdir(parents=True, exist_ok=True)
+        requested = Path(filepath)
+        if requested.is_absolute():
+            resolved = requested.resolve()
+        else:
+            resolved = (export_root / requested.name).resolve()
+        if not resolved.is_relative_to(export_root):
+            raise ValueError("Export path must stay inside the exports directory")
+        if resolved.suffix.lower() != ".csv":
+            raise ValueError("Export path must be a .csv file")
+        return resolved
+
     def export_to_csv(self, table: str, filepath: str, days: int | None = None) -> str:
         """Export table data to CSV.
 
@@ -958,13 +978,14 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            if len(df) > self._MAX_EXPORT_ROWS:
+                df = df.head(self._MAX_EXPORT_ROWS)
+            df = neutralize_csv_formulas(df)
+            export_path = self._confine_export_path(filepath)
+            df.to_csv(export_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {export_path}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(export_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
@@ -1167,10 +1188,7 @@ class EnhancedMusicDataStore:
         rmse = float((errors**2).mean() ** 0.5)
 
         acc_by_platform = (
-            evaluated_df.groupby("platform")["accuracy_score"]
-            .mean()
-            .round(3)
-            .to_dict()
+            evaluated_df.groupby("platform")["accuracy_score"].mean().round(3).to_dict()
         )
 
         return {

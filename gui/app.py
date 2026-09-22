@@ -4,15 +4,29 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
+import asyncio
+import io
 import subprocess
 import sys
 from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+
+from core.data_store import EnhancedMusicDataStore
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
+from core.utils import neutralize_csv_formulas
+
+_ALLOWED_DEMO_MODES = frozenset({"statistical", "trending", "multi_source", "platform", "all"})
+_MAX_GUI_EXPORT_ROWS = 100_000
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -366,7 +380,6 @@ def _run_command(args: list[str]) -> tuple[str, str]:
 
 def _get_data_store():
     """Return an EnhancedMusicDataStore pointed at the default DB path."""
-    from core.data_store import EnhancedMusicDataStore
     db_path = PROJECT_ROOT / "data" / "enhanced_music_trends.db"
     return EnhancedMusicDataStore(str(db_path))
 
@@ -396,6 +409,8 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
+        if demo_value not in _ALLOWED_DEMO_MODES:
+            return "Error", "Unsupported demo mode"
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
@@ -560,9 +575,9 @@ def search_history(_n, platform, min_score, days, artist_filter):
 def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
-    import io
-    import pandas as pd
-    df = pd.DataFrame(table_data)
+    df = neutralize_csv_formulas(pd.DataFrame(table_data))
+    if len(df) > _MAX_GUI_EXPORT_ROWS:
+        df = df.head(_MAX_GUI_EXPORT_ROWS)
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return dcc.send_string(buf.getvalue(), "audora_trends.csv")
@@ -586,13 +601,15 @@ def export_csv(_n, table_data):
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
     try:
-        from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
+            svc._validate_webhook_url(slack_url, allow_private=False)
             svc.config["slack"]["webhook_url"] = slack_url
         if discord_url:
+            svc._validate_webhook_url(discord_url, allow_private=False)
             svc.config["discord"]["webhook_url"] = discord_url
         if webhook_url:
+            svc._validate_webhook_url(webhook_url, allow_private=svc._allow_private_webhooks())
             svc.config["webhook"]["url"] = webhook_url
         if smtp_host:
             svc.config["email"]["smtp_server"] = smtp_host
@@ -621,14 +638,9 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         if not url:
             return "No URL"
         try:
-            import asyncio
-            from core.notification_service import (
-                EnhancedNotificationService,
-                NotificationChannel,
-                NotificationMessage,
-                NotificationPriority,
-            )
             svc = EnhancedNotificationService()
+            allow_private = svc._allow_private_webhooks() if channel_key == "webhook" else False
+            svc._validate_webhook_url(url, allow_private=allow_private)
             svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
             channel = getattr(NotificationChannel, channel_enum_name)
             msg = NotificationMessage(

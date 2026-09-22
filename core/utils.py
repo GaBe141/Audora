@@ -16,6 +16,27 @@ try:
 except ImportError:
     HAS_PANDAS = False
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula characters so CSV cells stay text."""
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def neutralize_csv_formulas(df: Any) -> Any:
+    """Neutralize formula injection in text and string-dtyped columns."""
+    if not HAS_PANDAS:
+        return df
+    sanitized = df.copy()
+    for column in sanitized.columns:
+        series = sanitized[column]
+        if pd.api.types.is_string_dtype(series) or series.dtype == object:
+            sanitized[column] = series.map(neutralize_csv_value)
+    return sanitized
+
 
 # JSON utilities
 def read_json(path: Path | str, default: Any = None) -> Any:
@@ -103,7 +124,7 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    neutralize_csv_formulas(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
