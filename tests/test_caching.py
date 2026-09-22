@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    dumps_signed,
+    loads_signed,
 )
 
 
@@ -118,3 +123,49 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisClearScope:
+    """clear() must not wipe unrelated keys in a shared Redis database."""
+
+    def test_clear_deletes_only_prefixed_keys(self):
+        from core.caching import RedisCacheBackend
+
+        class _Client:
+            def __init__(self) -> None:
+                self.deleted: list[bytes] = []
+                self.flushed = False
+
+            def scan_iter(self, match: str, count: int):
+                assert match == "audora:*"
+                assert count == 200
+                return [b"audora:one"]
+
+            def delete(self, *keys: bytes) -> None:
+                self.deleted.extend(keys)
+
+            def flushdb(self) -> None:
+                self.flushed = True
+
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._client = _Client()
+        backend._key_prefix = "audora:"
+        backend.clear()
+        assert backend._client.deleted == [b"audora:one"]
+        assert backend._client.flushed is False
+
+
+class TestSignedCachePayloads:
+    """Redis cache payloads must be signed JSON and must never unpickle."""
+
+    def test_round_trip_and_reject_pickle_or_bad_signature(self):
+        key = b"test-signing-key"
+        token = dumps_signed({"ok": True, "n": 2}, key)
+        assert loads_signed(token, key) == {"ok": True, "n": 2}
+
+        with pytest.raises(ValueError, match="pickle"):
+            loads_signed(pickle.dumps({"ok": True}), key)
+        with pytest.raises(ValueError, match="pickle"):
+            loads_signed(b'{"v": 1, "payload": "abc"}', key)
+        with pytest.raises(ValueError, match="signature"):
+            loads_signed(token, b"other-key")

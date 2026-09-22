@@ -89,3 +89,29 @@ class TestLastFmAPIErrorHandling:
         with patch.object(api.session, "get", return_value=mock_response):
             with pytest.raises(APIConnectionError, match="429"):
                 api.get_top_artists_global(limit=5)
+
+    def test_requests_use_https_and_do_not_follow_redirects(self):
+        api = LastFmAPI(api_key="test_key")
+        assert api.session.trust_env is False
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.is_redirect = False
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"artists": {"artist": []}}
+        with patch.object(api.session, "get", return_value=mock_response) as get:
+            df = api.get_top_artists_global(limit=1)
+        assert df.empty
+        args, kwargs = get.call_args
+        assert args[0].startswith("https://")
+        assert kwargs["allow_redirects"] is False
+
+    def test_redirect_response_is_rejected(self):
+        api = LastFmAPI(api_key="test_key")
+        mock_response = MagicMock()
+        mock_response.is_redirect = True
+        mock_response.status_code = 302
+        with (
+            patch.object(api.session, "get", return_value=mock_response),
+            pytest.raises(APIConnectionError, match="redirect"),
+        ):
+            api.get_top_artists_global(limit=1)
