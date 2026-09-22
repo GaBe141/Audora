@@ -1,8 +1,9 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+import pandas as pd
 import pytest
 
-from core.data_store import EnhancedMusicDataStore
+from core.data_store import EnhancedMusicDataStore, neutralize_csv_formulas
 
 
 class TestDataStorePooling:
@@ -107,3 +108,19 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestCsvExportSafety:
+    """CSV exports neutralize formulas and stay inside the exports directory."""
+
+    def test_string_dtype_formulas_are_prefixed(self):
+        frame = pd.DataFrame({"formula": pd.Series(["=1+1", "safe"], dtype="string")})
+        sanitized = neutralize_csv_formulas(frame)
+        assert sanitized.iloc[0]["formula"] == "'=1+1"
+        assert sanitized.iloc[1]["formula"] == "safe"
+
+    def test_export_rejects_paths_outside_exports(self, data_store, tmp_path):
+        outside = tmp_path / "escape.csv"
+        with pytest.raises(ValueError, match="exports"):
+            data_store.export_to_csv("trends", str(outside))
+        assert not outside.exists()

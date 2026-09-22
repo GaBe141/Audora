@@ -16,6 +16,40 @@ import pandas as pd
 
 from core.caching import get_cache
 
+_MAX_CSV_EXPORT_ROWS = 100_000
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _neutralize_csv_cell(value: Any) -> Any:
+    """Prefix spreadsheet formula text so exported cells stay data."""
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def neutralize_csv_formulas(frame: pd.DataFrame) -> pd.DataFrame:
+    """Neutralize formula injection in text columns, including pandas string dtype."""
+    sanitized = frame.copy()
+    for column in sanitized.columns:
+        series = sanitized[column]
+        if not (pd.api.types.is_string_dtype(series) or pd.api.types.is_object_dtype(series)):
+            continue
+        sanitized[column] = series.map(_neutralize_csv_cell)
+    return sanitized
+
+
+def _confine_export_path(filepath: str) -> Path:
+    """Resolve a CSV path and require it to stay under the project exports directory."""
+    export_root = (Path(__file__).resolve().parent.parent / "exports").resolve()
+    requested = Path(filepath)
+    destination = (
+        requested.resolve() if requested.is_absolute() else (export_root / requested).resolve()
+    )
+    if not destination.is_relative_to(export_root) or destination.suffix.lower() != ".csv":
+        raise ValueError("CSV export path must stay inside the exports directory and use .csv")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    return destination
+
 
 @dataclass
 class TrendData:
@@ -944,27 +978,34 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        destination = _confine_export_path(filepath)
         with self.get_connection() as conn:
-            if days:
-                # Use parameterized query for days parameter
+            if days is not None:
+                try:
+                    day_count = int(days)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("days must be an integer") from exc
+                if day_count < 0:
+                    raise ValueError("days must be non-negative")
+                # Table name is validated above. Values stay bound parameters.
                 query = f"""
                 SELECT * FROM {table}
                 WHERE datetime(created_at) >= datetime('now', ?)
                 ORDER BY created_at DESC
+                LIMIT ?
                 """
-                df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
+                df = pd.read_sql_query(
+                    query, conn, params=[f"-{day_count} days", _MAX_CSV_EXPORT_ROWS]
+                )
             else:
-                # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
-                df = pd.read_sql_query(query, conn)
+                query = f"SELECT * FROM {table} ORDER BY created_at DESC LIMIT ?"
+                df = pd.read_sql_query(query, conn, params=[_MAX_CSV_EXPORT_ROWS])
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            df = neutralize_csv_formulas(df)
+            df.to_csv(destination, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {destination}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(destination)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
