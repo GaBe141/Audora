@@ -1,8 +1,12 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
+import pandas as pd
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
+from core.utils import prepare_csv_export
 
 
 class TestDataStorePooling:
@@ -107,3 +111,21 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestCsvExportSafety:
+    """CSV exports stay inside allowed directories and neutralize formulas."""
+
+    def test_export_rejects_path_escape(self, data_store):
+        with pytest.raises(ValueError, match="allowed data directories"):
+            data_store.export_to_csv("trends", "/etc/passwd")
+
+    def test_export_writes_inside_database_directory(self, data_store, temp_db_path):
+        written = data_store.export_to_csv("trends", str(temp_db_path.parent / "trends.csv"))
+        assert Path(written).is_file()
+        assert Path(written).parent == temp_db_path.parent
+
+    def test_prepare_csv_export_neutralizes_formulas(self):
+        frame = pd.DataFrame([{"name": "=cmd|'/c calc'!A0", "score": 1}])
+        exported = prepare_csv_export(frame)
+        assert exported.iloc[0]["name"].startswith("'=")
