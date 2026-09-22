@@ -4,17 +4,20 @@ Provides a unified caching interface with Redis support and automatic
 fallback to in-memory caching when Redis is unavailable.
 """
 
-import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
+import math
 import os
-import pickle
 import time
 from collections.abc import Callable
+from datetime import datetime
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,129 @@ except ImportError:
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+_MAX_CACHE_PAYLOAD_BYTES = 5_000_000
+_SIGNED_CACHE_VERSION = 2
+_TAGGED_TYPES = frozenset({"datetime", "tuple", "dataframe", "dict"})
+
+
+def _canonical_json(value: Any) -> bytes:
+    """Return deterministic UTF-8 JSON used as the HMAC input."""
+    return json.dumps(
+        value, separators=(",", ":"), sort_keys=True, ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
+
+
+def _encode_cache_value(value: Any) -> Any:
+    """Encode a cache value as JSON-safe data. Never uses pickle."""
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, datetime):
+        return {"__t": "datetime", "v": value.isoformat()}
+    if isinstance(value, tuple):
+        return {"__t": "tuple", "v": [_encode_cache_value(item) for item in value]}
+    if isinstance(value, list):
+        return [_encode_cache_value(item) for item in value]
+    if isinstance(value, dict):
+        encoded = {str(key): _encode_cache_value(item) for key, item in value.items()}
+        if set(encoded) == {"__t", "v"} and encoded.get("__t") in _TAGGED_TYPES:
+            return {"__t": "dict", "v": encoded}
+        return encoded
+    if isinstance(value, pd.Timestamp):
+        return {"__t": "datetime", "v": value.isoformat()}
+    if isinstance(value, pd.DataFrame):
+        payload = value.to_json(orient="split", date_format="iso")
+        return {"__t": "dataframe", "v": payload}
+    if hasattr(value, "item") and callable(value.item):
+        try:
+            converted = value.item()
+        except (ValueError, AttributeError):
+            converted = value
+        if converted is not value and type(converted) is not type(value):
+            return _encode_cache_value(converted)
+    raise TypeError(f"Unsupported cache value type: {type(value).__name__}")
+
+
+def _decode_cache_value(value: Any) -> Any:
+    """Reverse _encode_cache_value."""
+    if isinstance(value, dict) and set(value) == {"__t", "v"} and value.get("__t") in _TAGGED_TYPES:
+        tag = value["__t"]
+        raw = value["v"]
+        if tag == "datetime":
+            if not isinstance(raw, str):
+                raise ValueError("Rejected cache datetime payload")
+            return datetime.fromisoformat(raw)
+        if tag == "tuple":
+            if not isinstance(raw, list):
+                raise ValueError("Rejected cache tuple payload")
+            return tuple(_decode_cache_value(item) for item in raw)
+        if tag == "dataframe":
+            if not isinstance(raw, str):
+                raise ValueError("Rejected cache dataframe payload")
+            return pd.read_json(io.StringIO(raw), orient="split")
+        if tag == "dict":
+            if not isinstance(raw, dict):
+                raise ValueError("Rejected cache dict payload")
+            return {key: _decode_cache_value(item) for key, item in raw.items()}
+        raise ValueError("Rejected cache payload")
+    if isinstance(value, list):
+        return [_decode_cache_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _decode_cache_value(item) for key, item in value.items()}
+    return value
+
+
+def dumps_signed(value: Any, signing_key: bytes) -> bytes:
+    """Serialize a cache value as an HMAC-signed JSON envelope."""
+    body = _encode_cache_value(value)
+    signature = hmac.new(signing_key, _canonical_json(body), hashlib.sha256).hexdigest()
+    envelope = {
+        "v": _SIGNED_CACHE_VERSION,
+        "alg": "HMAC-SHA256",
+        "sig": signature,
+        "body": body,
+    }
+    payload = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+    if len(payload) > _MAX_CACHE_PAYLOAD_BYTES:
+        raise ValueError("Rejected oversized cache payload")
+    return payload
+
+
+def loads_signed(payload: bytes, signing_key: bytes) -> Any:
+    """Load a signed JSON cache value. Pickle and unsigned bytes are rejected."""
+    if not isinstance(payload, (bytes, bytearray)):
+        raise ValueError("Rejected cache payload")
+    raw = bytes(payload)
+    if len(raw) > _MAX_CACHE_PAYLOAD_BYTES:
+        raise ValueError("Rejected oversized cache payload")
+    # Pickle protocols start with 0x80, or with ASCII opcodes for protocol 0.
+    if raw.startswith(b"\x80") or raw.startswith((b"(dp", b"]q", b"}q", b"cos\n", b"(i")):
+        raise ValueError("Rejected unsigned or pickle cache payload")
+    try:
+        envelope = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Rejected unsigned or pickle cache payload") from exc
+    if (
+        not isinstance(envelope, dict)
+        or envelope.get("v") != _SIGNED_CACHE_VERSION
+        or envelope.get("alg") != "HMAC-SHA256"
+        or "sig" not in envelope
+        or "body" not in envelope
+    ):
+        raise ValueError("Rejected cache payload")
+    signature = envelope["sig"]
+    if not isinstance(signature, str):
+        raise ValueError("Rejected cache payload")
+    expected = hmac.new(signing_key, _canonical_json(envelope["body"]), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise ValueError("Rejected cache payload")
+    return _decode_cache_value(envelope["body"])
 
 
 class CacheBackend:
@@ -140,6 +266,7 @@ class RedisCacheBackend(CacheBackend):
         db: int = 0,
         password: str | None = None,
         max_connections: int = 10,
+        key_prefix: str = "audora",
     ) -> None:
         """Initialize Redis cache.
 
@@ -162,6 +289,7 @@ class RedisCacheBackend(CacheBackend):
             decode_responses=False,  # Keep binary mode for signed payloads
         )
         self._client = redis.Redis(connection_pool=self._pool)
+        self._key_prefix = key_prefix
         self._signing_key = self._get_signing_key()
 
         # Test connection
@@ -178,7 +306,7 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
+        # Fallback to a process-local random key so unsigned payloads cannot be loaded.
         # This keeps the cache safe by default, with only a reduced cross-process hit rate.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
@@ -187,54 +315,23 @@ class RedisCacheBackend(CacheBackend):
         return os.urandom(32)
 
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
-        envelope = {
-            "v": 1,
-            "alg": "HMAC-SHA256",
-            "sig": signature,
-            "payload": base64.b64encode(payload).decode("ascii"),
-        }
-        return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        """Serialize cache value as HMAC-signed JSON."""
+        return dumps_signed(value, self._signing_key)
 
-    def _deserialize(self, value: bytes) -> Any | None:
-        """Deserialize cache value only after signature verification."""
-        try:
-            envelope = json.loads(value.decode("utf-8"))
-            if (
-                not isinstance(envelope, dict)
-                or envelope.get("v") != 1
-                or envelope.get("alg") != "HMAC-SHA256"
-                or "sig" not in envelope
-                or "payload" not in envelope
-            ):
-                logger.warning("Rejected cache entry with invalid serialization envelope")
-                return None
-
-            payload_b64 = envelope["payload"]
-            if not isinstance(payload_b64, str):
-                logger.warning("Rejected cache entry with non-string payload")
-                return None
-
-            payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
-            expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
-                logger.warning("Rejected cache entry with invalid signature")
-                return None
-
-            return pickle.loads(payload)
-        except Exception as e:
-            logger.error(f"Failed to deserialize cache entry: {e}")
-            return None
+    def _deserialize(self, value: bytes) -> Any:
+        """Deserialize a signed JSON cache value or raise ValueError."""
+        return loads_signed(value, self._signing_key)
 
     def get(self, key: str) -> Any | None:
-        """Get value from cache."""
+        """Get value from cache. Rejected payloads are treated as cache misses."""
         try:
             value = self._client.get(key)
             if value is None:
                 return None
             return self._deserialize(value)
+        except ValueError as e:
+            logger.warning(f"Rejected Redis cache entry for key {key}: {e}")
+            return None
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -258,10 +355,19 @@ class RedisCacheBackend(CacheBackend):
             logger.error(f"Redis delete error for key {key}: {e}")
 
     def clear(self) -> None:
-        """Clear all cached values."""
+        """Delete cached keys for this prefix. Does not flush the Redis database."""
         try:
-            self._client.flushdb()
-            logger.debug("Cleared Redis cache")
+            pattern = f"{self._key_prefix}:*"
+            cursor = 0
+            deleted = 0
+            while True:
+                cursor, keys = self._client.scan(cursor=cursor, match=pattern, count=200)
+                cursor = int(cursor)
+                if keys:
+                    deleted += int(self._client.delete(*keys))
+                if cursor == 0:
+                    break
+            logger.debug(f"Cleared {deleted} Redis keys under {self._key_prefix}")
         except Exception as e:
             logger.error(f"Redis clear error: {e}")
 
@@ -299,7 +405,7 @@ class CacheManager:
             # Try Redis first, fall back to local cache
             if REDIS_AVAILABLE:
                 try:
-                    self._backend = RedisCacheBackend()
+                    self._backend = RedisCacheBackend(key_prefix=key_prefix)
                     logger.info("Using Redis cache backend")
                 except Exception as e:
                     logger.warning(f"Redis initialization failed: {e}, using local cache")
@@ -337,7 +443,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -432,12 +538,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

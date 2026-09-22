@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import MAX_CSV_EXPORT_ROWS, confine_path, neutralize_csv_formulas, project_root
 
 
 @dataclass
@@ -944,27 +945,33 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        export_root = project_root() / "exports"
+        output_path = confine_path(filepath, export_root)
+        if output_path.suffix.lower() != ".csv":
+            raise ValueError("Export path must be a .csv file")
+
         with self.get_connection() as conn:
+            row_limit = MAX_CSV_EXPORT_ROWS + 1
             if days:
-                # Use parameterized query for days parameter
                 query = f"""
                 SELECT * FROM {table}
                 WHERE datetime(created_at) >= datetime('now', ?)
                 ORDER BY created_at DESC
+                LIMIT ?
                 """
-                df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
+                df = pd.read_sql_query(query, conn, params=[f"-{days} days", row_limit])
             else:
-                # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
-                df = pd.read_sql_query(query, conn)
+                query = f"SELECT * FROM {table} ORDER BY created_at DESC LIMIT ?"
+                df = pd.read_sql_query(query, conn, params=[row_limit])
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            if len(df) > MAX_CSV_EXPORT_ROWS:
+                raise ValueError(f"CSV export exceeds {MAX_CSV_EXPORT_ROWS} rows")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            neutralize_csv_formulas(df).to_csv(output_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {output_path}")
 
-        return filepath
+        return str(output_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""

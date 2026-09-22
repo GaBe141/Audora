@@ -1,8 +1,12 @@
-"""Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
+"""Tests for core data_store pooling, bulk updates, and CSV export safety."""
 
+from pathlib import Path
+
+import pandas as pd
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
+from core.utils import neutralize_csv_formulas
 
 
 class TestDataStorePooling:
@@ -107,3 +111,27 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestCsvExportSafety:
+    """CSV export stays inside the export directory and neutralizes formulas."""
+
+    def test_string_dtype_formulas_are_neutralized(self):
+        frame = pd.DataFrame({"track": pd.Series(["=cmd|'/c calc'!A0"], dtype="string")})
+        sanitized = neutralize_csv_formulas(frame)
+        assert str(sanitized.iloc[0, 0]).startswith("'")
+
+    def test_export_rejects_paths_outside_the_export_directory(self, data_store, tmp_path):
+        with pytest.raises(ValueError, match="export"):
+            data_store.export_to_csv("trends", str(tmp_path / "out.csv"))
+
+    def test_export_neutralizes_formula_cells(self, data_store, sample_trends):
+        sample_trends[0].track_name = "=1+1"
+        data_store.save_trends_bulk(sample_trends)
+        exported = Path(data_store.export_to_csv("trends", "formula_rows.csv"))
+        try:
+            contents = exported.read_text(encoding="utf-8")
+            assert "'=1+1" in contents
+            assert exported.parent.name == "exports"
+        finally:
+            exported.unlink(missing_ok=True)
