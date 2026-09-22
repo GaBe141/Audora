@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import CSV_EXPORT_ROW_CAP, confine_to_project, neutralize_dataframe
 
 
 @dataclass
@@ -944,6 +945,7 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        destination = confine_to_project(filepath, allowed_suffixes=(".csv",))
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -951,20 +953,24 @@ class EnhancedMusicDataStore:
                 SELECT * FROM {table}
                 WHERE datetime(created_at) >= datetime('now', ?)
                 ORDER BY created_at DESC
+                LIMIT {CSV_EXPORT_ROW_CAP}
                 """
                 df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
             else:
                 # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
+                query = f"""
+                SELECT * FROM {table}
+                ORDER BY created_at DESC
+                LIMIT {CSV_EXPORT_ROW_CAP}
+                """
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            df = neutralize_dataframe(df)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(destination, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {destination}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(destination)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
