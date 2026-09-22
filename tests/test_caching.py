@@ -1,9 +1,14 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    dumps_signed,
+    loads_signed,
 )
 
 
@@ -118,3 +123,23 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedCachePayloads:
+    """Redis payloads are HMAC-signed JSON and never pickle."""
+
+    def test_round_trip_and_reject_wrong_key(self):
+        key = b"signing-key"
+        raw = dumps_signed({"score": 1, "name": "track"}, key)
+        assert loads_signed(raw, key) == {"score": 1, "name": "track"}
+        with pytest.raises(ValueError, match="signature"):
+            loads_signed(raw, b"other-key")
+
+    def test_rejects_pickle_bytes(self):
+        payload = pickle.dumps({"cmd": "not-allowed"})
+        with pytest.raises(ValueError, match="pickle"):
+            loads_signed(payload, b"k" * 32)
+
+    def test_rejects_unsigned_json(self):
+        with pytest.raises(ValueError, match="pickle|envelope"):
+            loads_signed(b'{"v": 1, "payload": "abc"}', b"k" * 32)
