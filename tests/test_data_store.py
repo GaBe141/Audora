@@ -1,8 +1,11 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
+import pandas as pd
 import pytest
 
-from core.data_store import EnhancedMusicDataStore
+from core.data_store import MAX_CSV_EXPORT_ROWS, EnhancedMusicDataStore, neutralize_csv_frame
 
 
 class TestDataStorePooling:
@@ -107,3 +110,33 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestCsvExportSecurity:
+    """CSV exports stay inside exports/ and cannot plant spreadsheet formulas."""
+
+    def test_export_neutralizes_formulas_and_confines_path(self, data_store, sample_trends):
+        sample_trends[0].track_name = "=1+1"
+        data_store.save_trends_bulk(sample_trends)
+        exported = data_store.export_to_csv("trends", "trends.csv")
+        exported_path = Path(exported)
+        assert exported_path.parent.name == "exports"
+        text = exported_path.read_text(encoding="utf-8")
+        assert "'=1+1" in text
+
+    def test_export_rejects_path_escape(self, data_store):
+        with pytest.raises(ValueError, match="exports directory"):
+            data_store.export_to_csv("trends", "../out.csv")
+
+    def test_export_row_cap(self, data_store, sample_trends, monkeypatch):
+        data_store.save_trends_bulk(sample_trends)
+        monkeypatch.setattr("core.data_store.MAX_CSV_EXPORT_ROWS", 0)
+        with pytest.raises(ValueError, match="exceeds"):
+            data_store.export_to_csv("trends", "too_many.csv")
+        assert MAX_CSV_EXPORT_ROWS == 100_000
+
+    def test_string_dtype_formulas_are_neutralized(self):
+        frame = pd.DataFrame({"name": pd.Series(["=1+1", "safe"], dtype="string")})
+        sanitized = neutralize_csv_frame(frame)
+        assert sanitized.loc[0, "name"] == "'=1+1"
+        assert sanitized.loc[1, "name"] == "safe"

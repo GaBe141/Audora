@@ -16,6 +16,30 @@ import pandas as pd
 
 from core.caching import get_cache
 
+MAX_CSV_EXPORT_ROWS = 100_000
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula characters so exported cells stay text."""
+    if not isinstance(value, str) or not value:
+        return value
+    leading = value.lstrip(" ")
+    if value.startswith(_CSV_FORMULA_PREFIXES) or leading.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def neutralize_csv_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Neutralize formula text in object and pandas string columns."""
+    if df.empty:
+        return df
+    sanitized = df.copy()
+    text_columns = list(sanitized.select_dtypes(include=["object", "string"]).columns)
+    for column in text_columns:
+        sanitized[column] = sanitized[column].map(neutralize_csv_value)
+    return sanitized
+
 
 @dataclass
 class TrendData:
@@ -61,6 +85,7 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+
     _ALLOWED_BULK_UPDATE_FIELDS = {
         "platform",
         "track_name",
@@ -787,7 +812,9 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        invalid_fields = [field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS]
+        invalid_fields = [
+            field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS
+        ]
         if invalid_fields:
             raise ValueError(
                 "Invalid update fields: "
@@ -944,6 +971,8 @@ class EnhancedMusicDataStore:
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
 
+        export_path = self._resolve_csv_export_path(filepath)
+
         with self.get_connection() as conn:
             if days:
                 # Use parameterized query for days parameter
@@ -958,13 +987,28 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            if len(df) > MAX_CSV_EXPORT_ROWS:
+                raise ValueError(f"CSV export exceeds {MAX_CSV_EXPORT_ROWS} rows")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            neutralize_csv_frame(df).to_csv(export_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {export_path}")
 
-        return filepath
+        return str(export_path)
+
+    def _resolve_csv_export_path(self, filepath: str) -> Path:
+        """Keep CSV exports inside exports/ next to the database."""
+        export_dir = (Path(self.db_path).resolve().parent / "exports").resolve()
+        candidate = Path(filepath)
+        if candidate.is_absolute():
+            resolved = candidate.resolve()
+        else:
+            resolved = (export_dir / candidate).resolve()
+        if resolved.suffix.lower() != ".csv" or not resolved.is_relative_to(export_dir):
+            raise ValueError(
+                "CSV export path must stay inside the exports directory and use a .csv suffix"
+            )
+        return resolved
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
@@ -1167,10 +1211,7 @@ class EnhancedMusicDataStore:
         rmse = float((errors**2).mean() ** 0.5)
 
         acc_by_platform = (
-            evaluated_df.groupby("platform")["accuracy_score"]
-            .mean()
-            .round(3)
-            .to_dict()
+            evaluated_df.groupby("platform")["accuracy_score"].mean().round(3).to_dict()
         )
 
         return {
