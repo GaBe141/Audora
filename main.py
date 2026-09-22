@@ -117,6 +117,10 @@ For detailed documentation, see docs/QUICK_START.md
             "platform": "scripts.complete_platform_demo",
         }
 
+        if args.demo not in set(demo_map) | {"all"}:
+            print(f"❌ Demo {args.demo} not found.")
+            return 1
+
         if args.demo == "all":
             for demo_name, demo_module in demo_map.items():
                 print(f"\n🎯 Running {demo_name} demo...")
