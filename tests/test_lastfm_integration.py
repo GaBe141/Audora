@@ -4,6 +4,7 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 # Last.fm module imports from .config which may not exist; provide a minimal mock
 if "integrations.config" not in sys.modules:
@@ -76,16 +77,68 @@ class TestLastFmAPIErrorHandling:
         mock_response = MagicMock()
         mock_response.raise_for_status = MagicMock()
         mock_response.json.return_value = {"error": 10, "message": "Invalid API key"}
-        with patch.object(api.session, "get", return_value=mock_response):
-            with pytest.raises(APIResponseError, match="Invalid API key"):
-                api.get_top_artists_global(limit=5)
+        with (
+            patch.object(api.session, "get", return_value=mock_response),
+            pytest.raises(APIResponseError, match="Invalid API key"),
+        ):
+            api.get_top_artists_global(limit=5)
 
     def test_http_error_raises_connection_error(self):
-        import requests
-
         api = LastFmAPI(api_key="test_key")
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("429")
-        with patch.object(api.session, "get", return_value=mock_response):
-            with pytest.raises(APIConnectionError, match="429"):
-                api.get_top_artists_global(limit=5)
+        with (
+            patch.object(api.session, "get", return_value=mock_response),
+            pytest.raises(APIConnectionError, match="429"),
+        ):
+            api.get_top_artists_global(limit=5)
+
+
+class TestLastFmTransportSecurity:
+    """API keys must not travel over cleartext HTTP or through redirects."""
+
+    def test_requests_use_https_without_redirects_or_env_proxy(self):
+        api = LastFmAPI(api_key="test_key")
+        assert api.session.trust_env is False
+        mock_response = MagicMock()
+        mock_response.is_redirect = False
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"artists": {"artist": []}}
+        with patch.object(api.session, "get", return_value=mock_response) as get:
+            api.get_top_artists_global(limit=1)
+        args, kwargs = get.call_args
+        assert args[0].startswith("https://")
+        assert kwargs["allow_redirects"] is False
+
+    def test_redirect_fails_closed(self):
+        api = LastFmAPI(api_key="test_key")
+        mock_response = MagicMock()
+        mock_response.is_redirect = True
+        mock_response.status_code = 302
+        with (
+            patch.object(api.session, "get", return_value=mock_response),
+            pytest.raises(APIConnectionError, match="redirected"),
+        ):
+            api.get_top_artists_global(limit=1)
+
+    def test_non_200_status_fails_closed(self):
+        api = LastFmAPI(api_key="test_key")
+        mock_response = MagicMock()
+        mock_response.is_redirect = False
+        mock_response.status_code = 500
+        with (
+            patch.object(api.session, "get", return_value=mock_response),
+            pytest.raises(APIConnectionError, match="500"),
+        ):
+            api.get_top_artists_global(limit=1)
+
+    def test_requests_exception_still_maps_to_connection_error(self):
+        api = LastFmAPI(api_key="test_key")
+        with (
+            patch.object(
+                api.session, "get", side_effect=requests.exceptions.ConnectionError("down")
+            ),
+            pytest.raises(APIConnectionError, match="down"),
+        ):
+            api.get_top_artists_global(limit=1)
