@@ -17,6 +17,41 @@ except ImportError:
     HAS_PANDAS = False
 
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula cells so exported text is not executed."""
+    if not isinstance(value, str) or not value:
+        return value
+    stripped = value.lstrip(" \t\r\n")
+    if stripped and stripped[0] in _CSV_FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
+
+def neutralize_dataframe_for_csv(df: Any) -> Any:
+    """Return a copy of a DataFrame with formula-like text cells neutralized."""
+    if not HAS_PANDAS:
+        raise ImportError("pandas is required for neutralize_dataframe_for_csv")
+
+    sanitized = df.copy()
+    renamed: dict[Any, Any] = {}
+    for column in sanitized.columns:
+        if isinstance(column, str):
+            safe_name = neutralize_csv_value(column)
+            if safe_name != column:
+                renamed[column] = safe_name
+    if renamed:
+        sanitized = sanitized.rename(columns=renamed)
+
+    for column in sanitized.columns:
+        series = sanitized[column]
+        if pd.api.types.is_string_dtype(series.dtype) or series.dtype == object:
+            sanitized[column] = series.map(neutralize_csv_value)
+    return sanitized
+
+
 # JSON utilities
 def read_json(path: Path | str, default: Any = None) -> Any:
     """
@@ -103,7 +138,7 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    neutralize_dataframe_for_csv(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
