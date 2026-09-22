@@ -1,9 +1,16 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import pickle
 import time
+from datetime import datetime
+
+import pandas as pd
+import pytest
 
 from core.caching import (
     LocalCacheBackend,
+    dumps_signed,
+    loads_signed,
 )
 
 
@@ -118,3 +125,27 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedCachePayloads:
+    """Redis payloads must be signed JSON and must never accept pickle."""
+
+    def test_roundtrip_preserves_datetime_tuple_and_dataframe(self):
+        key = b"k" * 32
+        frame = pd.DataFrame({"name": ["alpha"], "score": [1]})
+        original = {
+            "when": datetime(2026, 1, 2, 3, 4, 5),
+            "pair": (1, "a"),
+            "frame": frame,
+        }
+        restored = loads_signed(dumps_signed(original, key), key)
+        assert restored["when"] == original["when"]
+        assert restored["pair"] == (1, "a")
+        assert restored["frame"].iloc[0]["name"] == "alpha"
+
+    def test_rejects_pickle_and_unsigned_bytes(self):
+        key = b"k" * 32
+        with pytest.raises(ValueError):
+            loads_signed(pickle.dumps({"a": 1}), key)
+        with pytest.raises(ValueError):
+            loads_signed(b'{"v": 2, "payload": "e30="}', key)

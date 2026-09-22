@@ -8,13 +8,68 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+MAX_CSV_EXPORT_ROWS = 100_000
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
 # Re-export for convenience
 try:
     import pandas as pd
 
     HAS_PANDAS = True
 except ImportError:
+    pd = None
     HAS_PANDAS = False
+
+
+def neutralize_csv_cell(value: Any) -> Any:
+    """Prefix spreadsheet formula cells so exported CSV cannot execute them."""
+    if not isinstance(value, str):
+        return value
+    if value.lstrip(" \t").startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def neutralize_csv_dataframe(df: Any) -> Any:
+    """Cap export size and neutralize formula text, including pandas string columns."""
+    if not HAS_PANDAS or pd is None or not isinstance(df, pd.DataFrame):
+        return df
+
+    cleaned = df.copy()
+    if len(cleaned) > MAX_CSV_EXPORT_ROWS:
+        logger.warning(
+            "Truncating CSV export from %s to %s rows", len(cleaned), MAX_CSV_EXPORT_ROWS
+        )
+        cleaned = cleaned.iloc[:MAX_CSV_EXPORT_ROWS].copy()
+
+    for column in cleaned.columns:
+        series = cleaned[column]
+        if pd.api.types.is_string_dtype(series) or pd.api.types.is_object_dtype(series):
+            cleaned[column] = series.map(neutralize_csv_cell)
+    return cleaned
+
+
+def confine_export_path(
+    filepath: Path | str,
+    *,
+    roots: tuple[str, ...] = ("exports", "data"),
+    create_dirs: bool = True,
+) -> Path:
+    """Resolve an export path and keep it inside allowed project directories."""
+    project_root = Path(__file__).resolve().parent.parent
+    raw = Path(filepath)
+    if not raw.is_absolute() and raw.parent == Path():
+        raw = Path(roots[0]) / raw.name
+
+    candidate = raw.resolve() if raw.is_absolute() else (project_root / raw).resolve()
+    allowed_roots = [(project_root / root).resolve() for root in roots]
+    if not any(candidate != root and candidate.is_relative_to(root) for root in allowed_roots):
+        allowed = " or ".join(roots)
+        raise ValueError(f"Export path must stay inside {allowed}")
+
+    if create_dirs:
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+    return candidate
 
 
 # JSON utilities
@@ -98,10 +153,8 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
-
-    if create_dirs:
-        filepath.parent.mkdir(parents=True, exist_ok=True)
+    filepath = confine_export_path(filepath, create_dirs=create_dirs)
+    df = neutralize_csv_dataframe(df)
 
     df.to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
