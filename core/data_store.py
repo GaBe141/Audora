@@ -16,6 +16,36 @@ import pandas as pd
 
 from core.caching import get_cache
 
+_CSV_EXPORT_ROW_LIMIT = 100_000
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def neutralize_spreadsheet_formulas(frame: pd.DataFrame) -> pd.DataFrame:
+    """Prefix spreadsheet formula characters so exported text is not executed."""
+    sanitized = frame.copy()
+    for column in sanitized.columns:
+        series = sanitized[column]
+        if not (pd.api.types.is_string_dtype(series) or pd.api.types.is_object_dtype(series)):
+            continue
+
+        def _cell(value: Any) -> Any:
+            if value is None:
+                return value
+            try:
+                if pd.isna(value):
+                    return value
+            except (TypeError, ValueError):
+                pass
+            if isinstance(value, (int, float, bool)):
+                return value
+            text = value if isinstance(value, str) else str(value)
+            if text.startswith(_FORMULA_PREFIXES):
+                return f"'{text}"
+            return value
+
+        sanitized[column] = series.map(_cell)
+    return sanitized
+
 
 @dataclass
 class TrendData:
@@ -927,6 +957,16 @@ class EnhancedMusicDataStore:
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
 
+    def _csv_export_path(self, filepath: str) -> Path:
+        """Confine CSV exports to the exports directory beside the database."""
+        root = (Path(self.db_path).resolve().parent / "exports").resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        raw = Path(filepath)
+        resolved = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
+        if not resolved.is_relative_to(root) or resolved.suffix.lower() != ".csv":
+            raise ValueError("CSV export path must be a .csv file inside the exports directory")
+        return resolved
+
     def export_to_csv(self, table: str, filepath: str, days: int | None = None) -> str:
         """Export table data to CSV.
 
@@ -943,28 +983,36 @@ class EnhancedMusicDataStore:
         }
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
+        if days is not None and (
+            isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 3650
+        ):
+            raise ValueError("days must be an integer between 1 and 3650")
 
+        destination = self._csv_export_path(filepath)
         with self.get_connection() as conn:
-            if days:
+            if days is not None:
                 # Use parameterized query for days parameter
                 query = f"""
                 SELECT * FROM {table}
                 WHERE datetime(created_at) >= datetime('now', ?)
                 ORDER BY created_at DESC
+                LIMIT {_CSV_EXPORT_ROW_LIMIT}
                 """
                 df = pd.read_sql_query(query, conn, params=[f"-{days} days"])
             else:
                 # Table name is validated above, safe to use in query
-                query = f"SELECT * FROM {table} ORDER BY created_at DESC"
+                query = f"""
+                SELECT * FROM {table}
+                ORDER BY created_at DESC
+                LIMIT {_CSV_EXPORT_ROW_LIMIT}
+                """
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            neutralize_spreadsheet_formulas(df).to_csv(destination, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {destination}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(destination)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""

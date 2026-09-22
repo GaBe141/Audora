@@ -1,8 +1,11 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
+import pandas as pd
 import pytest
 
-from core.data_store import EnhancedMusicDataStore
+from core.data_store import EnhancedMusicDataStore, neutralize_spreadsheet_formulas
 
 
 class TestDataStorePooling:
@@ -107,3 +110,25 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestCsvExportSafety:
+    """CSV exports stay inside exports/ and do not emit spreadsheet formulas."""
+
+    def test_string_dtype_formulas_are_neutralized(self):
+        frame = pd.DataFrame({"name": pd.Series(["=1+1", "ok"], dtype="string")})
+        sanitized = neutralize_spreadsheet_formulas(frame)
+        assert sanitized.iloc[0]["name"] == "'=1+1"
+        assert sanitized.iloc[1]["name"] == "ok"
+
+    def test_export_confines_path_and_neutralizes_cells(self, data_store, sample_trends):
+        sample_trends[0].track_name = "=1+1"
+        data_store.save_trends_bulk(sample_trends)
+        exported = data_store.export_to_csv("trends", "trends.csv")
+        text = Path(exported).read_text(encoding="utf-8")
+        assert "'=1+1" in text
+        assert Path(exported).parent.name == "exports"
+        with pytest.raises(ValueError, match="exports"):
+            data_store.export_to_csv("trends", "../escape.csv")
+        with pytest.raises(ValueError, match="days"):
+            data_store.export_to_csv("trends", "trends.csv", days="1; drop table")
