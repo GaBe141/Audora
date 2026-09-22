@@ -4,18 +4,30 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
+import asyncio
+import io
 import subprocess
 import sys
 from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.notification_service import (  # noqa: E402
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
+from core.utils import MAX_CSV_EXPORT_ROWS, neutralize_csv_formulas  # noqa: E402
+
+_ALLOWED_DEMOS = frozenset({"statistical", "trending", "multi_source", "platform", "all"})
 
 app = dash.Dash(
     __name__,
@@ -343,6 +355,46 @@ app.layout = dbc.Container(
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _demo_args(demo_value: object) -> list[str]:
+    """Build an allowlisted demo command. Rejects unexpected client-supplied values."""
+    if not isinstance(demo_value, str) or demo_value not in _ALLOWED_DEMOS:
+        raise ValueError("Unsupported demo")
+    return [sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value]
+
+
+def _history_csv(table_data: list) -> str:
+    """Serialize history rows to CSV with formula neutralization and a row cap."""
+    if not isinstance(table_data, list) or not table_data:
+        raise ValueError("No rows to export")
+    if len(table_data) > MAX_CSV_EXPORT_ROWS:
+        raise ValueError(f"CSV export exceeds {MAX_CSV_EXPORT_ROWS} rows")
+    frame = neutralize_csv_formulas(pd.DataFrame(table_data))
+    buffer = io.StringIO()
+    frame.to_csv(buffer, index=False)
+    return buffer.getvalue()
+
+
+def _apply_channel_urls(
+    svc: EnhancedNotificationService,
+    slack_url: str | None,
+    discord_url: str | None,
+    webhook_url: str | None,
+) -> None:
+    """Validate webhook URLs before they are stored."""
+    if slack_url and slack_url.strip():
+        svc.config["slack"]["webhook_url"] = svc._validate_webhook_url(
+            slack_url.strip(), allow_private=False
+        )
+    if discord_url and discord_url.strip():
+        svc.config["discord"]["webhook_url"] = svc._validate_webhook_url(
+            discord_url.strip(), allow_private=False
+        )
+    if webhook_url and webhook_url.strip():
+        svc.config["webhook"]["url"] = svc._validate_webhook_url(
+            webhook_url.strip(), allow_private=svc._allow_private_webhooks()
+        )
+
+
 def _run_command(args: list[str]) -> tuple[str, str]:
     """Run a command in subprocess; return (status_str, combined_stdout_stderr)."""
     try:
@@ -396,7 +448,10 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
-        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
+        try:
+            return _run_command(_demo_args(demo_value))
+        except ValueError as exc:
+            return "Error", str(exc)
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
     if triggered == "btn-validate":
@@ -560,12 +615,11 @@ def search_history(_n, platform, min_score, days, artist_filter):
 def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
-    import io
-    import pandas as pd
-    df = pd.DataFrame(table_data)
-    buf = io.StringIO()
-    df.to_csv(buf, index=False)
-    return dcc.send_string(buf.getvalue(), "audora_trends.csv")
+    try:
+        csv_text = _history_csv(table_data)
+    except ValueError as exc:
+        raise dash.exceptions.PreventUpdate from exc
+    return dcc.send_string(csv_text, "audora_trends.csv")
 
 
 # ---------------------------------------------------------------------------
@@ -584,22 +638,31 @@ def export_csv(_n, table_data):
     State("input-smtp-pass", "value"),
     prevent_initial_call=True,
 )
-def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
+def save_settings(
+    _n,
+    slack_url,
+    discord_url,
+    webhook_url,
+    smtp_host,
+    smtp_port,
+    smtp_user,
+    smtp_pass,
+):
     try:
-        from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
-        if slack_url:
-            svc.config["slack"]["webhook_url"] = slack_url
-        if discord_url:
-            svc.config["discord"]["webhook_url"] = discord_url
-        if webhook_url:
-            svc.config["webhook"]["url"] = webhook_url
+        _apply_channel_urls(svc, slack_url, discord_url, webhook_url)
         if smtp_host:
-            svc.config["email"]["smtp_server"] = smtp_host
+            host = str(smtp_host).replace("\r", "").replace("\n", "").strip()
+            if any(char in host for char in " /\\@"):
+                return "Error: Invalid SMTP server"
+            svc.config["email"]["smtp_server"] = host
         if smtp_port:
-            svc.config["email"]["port"] = int(smtp_port)
+            port = int(smtp_port)
+            if port < 1 or port > 65535:
+                return "Error: Invalid SMTP port"
+            svc.config["email"]["port"] = port
         if smtp_user:
-            svc.config["email"]["username"] = smtp_user
+            svc.config["email"]["username"] = str(smtp_user).replace("\r", "").replace("\n", "")
         if smtp_pass:
             svc.config["email"]["password"] = smtp_pass
         svc.save_config()
@@ -621,15 +684,13 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         if not url:
             return "No URL"
         try:
-            import asyncio
-            from core.notification_service import (
-                EnhancedNotificationService,
-                NotificationChannel,
-                NotificationMessage,
-                NotificationPriority,
-            )
             svc = EnhancedNotificationService()
-            svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
+            validated = svc._validate_webhook_url(
+                str(url).strip(),
+                allow_private=svc._allow_private_webhooks() if channel_key == "webhook" else False,
+            )
+            config_key = "url" if channel_key == "webhook" else "webhook_url"
+            svc.config[channel_key][config_key] = validated
             channel = getattr(NotificationChannel, channel_enum_name)
             msg = NotificationMessage(
                 title="Audora test notification",

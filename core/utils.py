@@ -8,13 +8,55 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+MAX_CSV_EXPORT_ROWS = 100_000
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
+
 # Re-export for convenience
 try:
     import pandas as pd
 
     HAS_PANDAS = True
 except ImportError:
+    pd = None  # type: ignore[assignment]
     HAS_PANDAS = False
+
+
+def project_root() -> Path:
+    """Return the repository root."""
+    return Path(__file__).resolve().parent.parent
+
+
+def confine_path(path: Path | str, root: Path | None = None) -> Path:
+    """Resolve a path and reject targets that escape the allowed directory."""
+    base = (root or project_root()).resolve()
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(base):
+        raise ValueError(f"Path must stay inside {base}")
+    return resolved
+
+
+def _neutralize_cell(value: Any) -> Any:
+    """Prefix spreadsheet formula characters so exported text is not executed."""
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def neutralize_csv_formulas(df: Any) -> Any:
+    """Neutralize formula injection in text columns, including pandas string dtype."""
+    if not HAS_PANDAS or pd is None or not isinstance(df, pd.DataFrame):
+        return df
+    if df.empty:
+        return df.copy()
+    sanitized = df.copy()
+    for column in sanitized.columns:
+        series = sanitized[column]
+        if pd.api.types.is_string_dtype(series) or pd.api.types.is_object_dtype(series):
+            sanitized[column] = series.map(_neutralize_cell)
+    return sanitized
 
 
 # JSON utilities
@@ -98,14 +140,17 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    output_path = confine_path(filepath)
+    if len(df) > MAX_CSV_EXPORT_ROWS:
+        raise ValueError(f"CSV export exceeds {MAX_CSV_EXPORT_ROWS} rows")
+    sanitized = neutralize_csv_formulas(df)
 
     if create_dirs:
-        filepath.parent.mkdir(parents=True, exist_ok=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
-    logger.debug(f"Saved DataFrame to {filepath}")
-    return filepath
+    sanitized.to_csv(output_path, index=False)
+    logger.debug(f"Saved DataFrame to {output_path}")
+    return output_path
 
 
 def get_timestamp_filename(prefix: str = "", suffix: str = "") -> str:
