@@ -14,7 +14,57 @@ try:
 
     HAS_PANDAS = True
 except ImportError:
+    pd = None  # type: ignore[assignment]
     HAS_PANDAS = False
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CSV_EXPORT_ROW_CAP = 100_000
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def neutralize_csv_formula(value: Any) -> Any:
+    """Prefix spreadsheet formula cells so exported text is not executed."""
+    if not isinstance(value, str) or not value:
+        return value
+    stripped = value.lstrip(" \t")
+    if value.startswith(_FORMULA_PREFIXES) or stripped.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def neutralize_dataframe(df: Any) -> Any:
+    """Return a copy with formula-like text cells neutralized and rows capped."""
+    if not HAS_PANDAS:
+        raise RuntimeError("pandas is required to neutralize CSV exports")
+    capped = df
+    if len(df) > CSV_EXPORT_ROW_CAP:
+        logger.warning("Capping CSV export at %s rows", CSV_EXPORT_ROW_CAP)
+        capped = df.iloc[:CSV_EXPORT_ROW_CAP]
+    out = capped.copy()
+    for column in out.columns:
+        if pd is not None and (
+            out[column].dtype == object or pd.api.types.is_string_dtype(out[column])
+        ):
+            out[column] = out[column].map(neutralize_csv_formula)
+    return out
+
+
+def confine_to_project(
+    filepath: Path | str,
+    *,
+    allowed_suffixes: tuple[str, ...] | None = None,
+) -> Path:
+    """Resolve a path and refuse writes that leave the project directory."""
+    path = Path(filepath)
+    if not path.is_absolute():
+        path = (Path.cwd() / path).resolve()
+    else:
+        path = path.resolve()
+    if not path.is_relative_to(_PROJECT_ROOT):
+        raise ValueError(f"Refusing to write outside the project directory: {path}")
+    if allowed_suffixes and path.suffix.lower() not in allowed_suffixes:
+        raise ValueError(f"Refusing to write a file that is not one of {allowed_suffixes}")
+    return path
 
 
 # JSON utilities
@@ -98,12 +148,13 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = confine_to_project(filepath, allowed_suffixes=(".csv",))
+    safe_df = neutralize_dataframe(df)
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    safe_df.to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 

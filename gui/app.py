@@ -4,18 +4,33 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
+import asyncio
+import io
 import subprocess
 import sys
 from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
 
+# Path bootstrap so `python gui/app.py` can import project packages.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.data_store import EnhancedMusicDataStore  # noqa: E402
+from core.notification_service import (  # noqa: E402
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
+from core.utils import neutralize_dataframe  # noqa: E402
+
+ALLOWED_DEMO_MODES = frozenset({"statistical", "trending", "multi_source", "platform", "all"})
 
 app = dash.Dash(
     __name__,
@@ -366,9 +381,14 @@ def _run_command(args: list[str]) -> tuple[str, str]:
 
 def _get_data_store():
     """Return an EnhancedMusicDataStore pointed at the default DB path."""
-    from core.data_store import EnhancedMusicDataStore
     db_path = PROJECT_ROOT / "data" / "enhanced_music_trends.db"
     return EnhancedMusicDataStore(str(db_path))
+
+
+def _require_public_webhook(service: EnhancedNotificationService, url: str | None) -> None:
+    """Reject webhook targets that are not public HTTPS URLs."""
+    if url:
+        service._validate_webhook_url(url, allow_private=False)
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +416,11 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
-        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
+        if demo_value not in ALLOWED_DEMO_MODES:
+            return "Error", "Unknown demo"
+        return _run_command(
+            [sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", str(demo_value)]
+        )
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
     if triggered == "btn-validate":
@@ -560,9 +584,7 @@ def search_history(_n, platform, min_score, days, artist_filter):
 def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
-    import io
-    import pandas as pd
-    df = pd.DataFrame(table_data)
+    df = neutralize_dataframe(pd.DataFrame(table_data))
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return dcc.send_string(buf.getvalue(), "audora_trends.csv")
@@ -586,8 +608,10 @@ def export_csv(_n, table_data):
 )
 def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port, smtp_user, smtp_pass):
     try:
-        from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
+        _require_public_webhook(svc, slack_url)
+        _require_public_webhook(svc, discord_url)
+        _require_public_webhook(svc, webhook_url)
         if slack_url:
             svc.config["slack"]["webhook_url"] = slack_url
         if discord_url:
@@ -621,14 +645,8 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
         if not url:
             return "No URL"
         try:
-            import asyncio
-            from core.notification_service import (
-                EnhancedNotificationService,
-                NotificationChannel,
-                NotificationMessage,
-                NotificationPriority,
-            )
             svc = EnhancedNotificationService()
+            _require_public_webhook(svc, url)
             svc.config[channel_key]["webhook_url" if channel_key != "webhook" else "url"] = url
             channel = getattr(NotificationChannel, channel_enum_name)
             msg = NotificationMessage(
