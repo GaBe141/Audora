@@ -14,7 +14,32 @@ try:
 
     HAS_PANDAS = True
 except ImportError:
+    pd = None
     HAS_PANDAS = False
+
+MAX_CSV_EXPORT_ROWS = 100_000
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def neutralize_csv_formulas(df: Any) -> Any:
+    """Prefix spreadsheet formula characters so exported cells stay data."""
+    if not HAS_PANDAS or pd is None:
+        raise RuntimeError("pandas is required to neutralize CSV formulas")
+
+    def fix(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        stripped = value.lstrip(" \t\r\n")
+        if stripped[:1] in _CSV_FORMULA_PREFIXES:
+            return "'" + value
+        return value
+
+    cleaned = df.copy()
+    for column in cleaned.columns:
+        series = cleaned[column]
+        if series.dtype == object or pd.api.types.is_string_dtype(series):
+            cleaned[column] = series.map(fix)
+    return cleaned
 
 
 # JSON utilities

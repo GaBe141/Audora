@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import MAX_CSV_EXPORT_ROWS, neutralize_csv_formulas
 
 
 @dataclass
@@ -958,13 +959,28 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            if len(df) > MAX_CSV_EXPORT_ROWS:
+                self.logger.warning(
+                    "CSV export truncated from %s rows to %s",
+                    len(df),
+                    MAX_CSV_EXPORT_ROWS,
+                )
+                df = df.head(MAX_CSV_EXPORT_ROWS)
+            df = neutralize_csv_formulas(df)
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            export_root = (Path(self.db_path).resolve().parent / "exports").resolve()
+            export_root.mkdir(parents=True, exist_ok=True)
+            requested = Path(filepath)
+            target = requested if requested.is_absolute() else export_root / requested
+            target = target.resolve()
+            if target.suffix.lower() != ".csv" or not target.is_relative_to(export_root):
+                raise ValueError("CSV export path must be a .csv file inside the exports directory")
+            target.parent.mkdir(parents=True, exist_ok=True)
 
-        return filepath
+            df.to_csv(target, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {target}")
+
+        return str(target)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
