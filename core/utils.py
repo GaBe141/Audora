@@ -8,6 +8,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+CSV_EXPORT_ROW_LIMIT = 100_000
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
 # Re-export for convenience
 try:
     import pandas as pd
@@ -86,9 +89,68 @@ def write_json(
         raise
 
 
+def project_root() -> Path:
+    """Return the repository root (parent of the ``core`` package)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def confine_to_directory(filepath: Path | str, directory: Path) -> Path:
+    """Resolve ``filepath`` and require it to stay inside ``directory``.
+
+    Relative paths are resolved against ``directory``. Absolute paths outside
+    that directory are rejected so exports cannot write arbitrary files.
+    """
+    root = directory.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    raw = Path(filepath)
+    candidate = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise ValueError(f"Path must stay inside {root}")
+    if candidate == root:
+        raise ValueError("Path must name a file inside the allowed directory")
+    return candidate
+
+
+def neutralize_csv_cell(value: Any) -> Any:
+    """Prefix spreadsheet formula cells so exported CSV cannot execute them."""
+    if isinstance(value, str):
+        stripped = value.lstrip(" ")
+        if stripped.startswith(_CSV_FORMULA_PREFIXES):
+            return "'" + value
+    return value
+
+
+def neutralize_csv_frame(df: Any, *, limit_rows: bool = True) -> Any:
+    """Return a copy safe to write as CSV.
+
+    String and object columns, including pandas string dtype, are neutralized.
+    Exports are capped so a single download cannot stream an unbounded table.
+    """
+    if not HAS_PANDAS:
+        raise ImportError("pandas is required for neutralize_csv_frame")
+
+    safe = df.copy()
+    if limit_rows and len(safe) > CSV_EXPORT_ROW_LIMIT:
+        logger.warning("Truncating CSV export from %s to %s rows", len(safe), CSV_EXPORT_ROW_LIMIT)
+        safe = safe.iloc[:CSV_EXPORT_ROW_LIMIT].copy()
+
+    renamed = {column: neutralize_csv_cell(column) for column in safe.columns}
+    if any(renamed[column] != column for column in safe.columns):
+        safe = safe.rename(columns=renamed)
+
+    for column in safe.columns:
+        series = safe[column]
+        if pd.api.types.is_string_dtype(series) or pd.api.types.is_object_dtype(series):
+            safe[column] = series.map(neutralize_csv_cell)
+    return safe
+
+
 def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> Path:  # pd.DataFrame
     """
     Save DataFrame to CSV with consistent settings.
+
+    The destination must stay inside the project directory. Formula-like cells
+    are neutralized before writing.
 
     Args:
         df: DataFrame to save
@@ -98,7 +160,8 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = confine_to_directory(filepath, project_root())
+    df = neutralize_csv_frame(df)
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)

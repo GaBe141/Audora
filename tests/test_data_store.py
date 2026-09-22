@@ -1,8 +1,12 @@
 """Tests for core data_store (pooling, save_trends_bulk, get_tracks_with_artists_bulk, get_trending_summary_cached, update_trends_bulk)."""
 
+from pathlib import Path
+
+import pandas as pd
 import pytest
 
 from core.data_store import EnhancedMusicDataStore
+from core.utils import neutralize_csv_frame
 
 
 class TestDataStorePooling:
@@ -107,3 +111,29 @@ class TestUpdateTrendsBulk:
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):
             data_store.update_trends_bulk([sample_trends[0].track_id], {"score = 0; DROP TABLE": 0})
+
+
+class TestCsvExportSafety:
+    """CSV exports stay inside exports/ and neutralize formula cells."""
+
+    def test_export_rejects_paths_outside_exports(self, data_store):
+        with pytest.raises(ValueError, match="inside"):
+            data_store.export_to_csv("trends", "/tmp/audora-escape.csv")
+
+    def test_export_neutralizes_formula_cells(self, data_store, sample_trends):
+        sample_trends[0].track_name = "=1+1"
+        data_store.save_trends_bulk(sample_trends)
+        destination = Path(data_store.export_to_csv("trends", "trends.csv"))
+        try:
+            text = destination.read_text(encoding="utf-8")
+            assert "'=1+1" in text
+            assert destination.name == "trends.csv"
+            assert destination.parent.name == "exports"
+        finally:
+            destination.unlink(missing_ok=True)
+
+    def test_string_dtype_formulas_are_neutralized(self):
+        frame = pd.DataFrame({"name": pd.Series(["=2+2", "safe"], dtype="string")})
+        safe = neutralize_csv_frame(frame)
+        assert safe.iloc[0]["name"] == "'=2+2"
+        assert safe.iloc[1]["name"] == "safe"
