@@ -4,12 +4,15 @@ Supports multiple channels, smart filtering, and customizable triggers.
 """
 
 import asyncio
+import html
 import ipaddress
 import json
 import logging
 import os
-import socket
+import re
 import smtplib
+import socket
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -23,6 +26,53 @@ from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+
+_METADATA_HOSTS = {
+    "metadata.google.internal",
+    "metadata.goog",
+    "metadata",
+    "instance-data",
+    "instance-data.ec2.internal",
+}
+_NUMERIC_HOST_PART = re.compile(r"^(?:0x[0-9a-f]+|\d+)$", re.IGNORECASE)
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+
+
+class _PinnedAddressResolver(aiohttp.resolver.AbstractResolver):
+    """Resolve a webhook host only to addresses already checked for SSRF."""
+
+    def __init__(self, hostname: str, addresses: list[str]) -> None:
+        self._hostname = hostname.lower().rstrip(".")
+        self._addresses = addresses
+
+    async def resolve(
+        self, host: str, port: int = 0, family: int = socket.AF_INET
+    ) -> list[dict[str, Any]]:
+        if host.lower().rstrip(".") != self._hostname:
+            raise OSError("Webhook host does not match the validated host")
+
+        results: list[dict[str, Any]] = []
+        for ip_text in self._addresses:
+            parsed = ipaddress.ip_address(ip_text)
+            addr_family = socket.AF_INET6 if parsed.version == 6 else socket.AF_INET
+            if family not in (socket.AF_UNSPEC, 0, addr_family):
+                continue
+            results.append(
+                {
+                    "hostname": host,
+                    "host": ip_text,
+                    "port": port,
+                    "family": addr_family,
+                    "proto": socket.IPPROTO_TCP,
+                    "flags": socket.AI_NUMERICHOST,
+                }
+            )
+        if not results:
+            raise OSError("No pinned webhook addresses for the requested address family")
+        return results
+
+    async def close(self) -> None:
+        return None
 
 
 class NotificationPriority(Enum):
@@ -160,26 +210,43 @@ class EnhancedNotificationService:
             },
         }
 
-        if config_file and Path(config_file).exists():
-            try:
-                with Path(config_file).open() as f:
-                    user_config = json.load(f)
-                    # Deep merge configurations
-                    self._deep_merge(default_config, user_config)
-            except Exception as e:
-                self.logger.error(f"Failed to load config file {config_file}: {e}")
+        if config_file:
+            config_path = self._resolve_config_path(config_file)
+            if config_path.exists():
+                try:
+                    with config_path.open() as f:
+                        user_config = json.load(f)
+                        self._deep_merge(default_config, user_config)
+                except Exception as e:
+                    self.logger.error(f"Failed to load config file {config_file}: {e}")
 
-        # Also attempt to load from default config path
-        default_path = Path("config/notification_config.json")
-        if default_path.exists() and not config_file:
-            try:
-                with default_path.open() as f:
-                    user_config = json.load(f)
-                    self._deep_merge(default_config, user_config)
-            except Exception as e:
-                self.logger.warning(f"Could not load {default_path}: {e}")
+        # Load the default file from the project config directory, not the process cwd.
+        if not config_file:
+            default_path = self._project_root() / "config" / "notification_config.json"
+            if default_path.exists():
+                try:
+                    with default_path.open() as f:
+                        user_config = json.load(f)
+                        self._deep_merge(default_config, user_config)
+                except Exception as e:
+                    self.logger.warning(f"Could not load {default_path}: {e}")
 
         return default_config
+
+    def _project_root(self) -> Path:
+        """Return the repository root that contains this package."""
+        return Path(__file__).resolve().parent.parent
+
+    def _resolve_config_path(self, path: str) -> Path:
+        """Keep notification config reads and writes inside the config directory."""
+        config_dir = (self._project_root() / "config").resolve()
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = self._project_root() / candidate
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(config_dir):
+            raise ValueError("Notification config path must stay inside the config directory")
+        return resolved
 
     def save_config(self, path: str = "config/notification_config.json") -> None:
         """Persist the current channel configuration to a JSON file.
@@ -187,17 +254,24 @@ class EnhancedNotificationService:
         Args:
             path: File path to write the configuration to.
         """
-        config_path = Path(path)
+        config_path = self._resolve_config_path(path)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         # Only save channel-specific sections (not internal runtime state)
-        saveable_keys = ["email", "slack", "discord", "webhook", "sms",
-                         "default_channels", "rate_limit_per_hour"]
+        saveable_keys = [
+            "email",
+            "slack",
+            "discord",
+            "webhook",
+            "sms",
+            "default_channels",
+            "rate_limit_per_hour",
+        ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
         try:
             with config_path.open("w") as f:
                 json.dump(to_save, f, indent=2)
             if os.name != "nt":
-                os.chmod(config_path, 0o600)
+                config_path.chmod(0o600)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
@@ -211,49 +285,182 @@ class EnhancedNotificationService:
             "on",
         }
 
-    def _is_restricted_ip(self, ip: str) -> bool:
-        """Return True when the IP belongs to a non-public range."""
+    def _reject_webhook_hostname(self, hostname: str) -> None:
+        """Reject localhost aliases and cloud metadata hostnames."""
+        host = hostname.lower().rstrip(".")
+        if (
+            host == "localhost"
+            or host == "localhost.localdomain"
+            or host.endswith(".localhost")
+            or host.endswith(".localhost.localdomain")
+        ):
+            raise ValueError("Localhost webhook URLs are not allowed")
+        if (
+            host in _METADATA_HOSTS
+            or host.endswith(".metadata.google.internal")
+            or host.endswith(".metadata.goog")
+        ):
+            raise ValueError("Metadata service webhook URLs are not allowed")
+
+    def _parse_ip_literal(
+        self, hostname: str
+    ) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+        """Parse canonical and obfuscated IP literals.
+
+        Non-canonical forms such as decimal, hex, and octal addresses are
+        rejected or normalized so HTTP clients cannot interpret them differently
+        from the validator.
+        """
+        host = hostname.strip().lower().rstrip(".")
+        if "%" in host:
+            raise ValueError("Webhook URL uses an unsupported IP literal")
         try:
-            parsed = ipaddress.ip_address(ip)
-            return (
-                parsed.is_private
-                or parsed.is_loopback
+            return ipaddress.ip_address(host)
+        except ValueError:
+            pass
+
+        if _NUMERIC_HOST_PART.fullmatch(host):
+            value = int(host, 0)
+            if value < 0 or value > 0xFFFFFFFF:
+                raise ValueError("Webhook URL uses an invalid IP literal")
+            return ipaddress.IPv4Address(value)
+
+        parts = host.split(".")
+        if parts and all(_NUMERIC_HOST_PART.fullmatch(part) for part in parts):
+            if len(parts) != 4:
+                raise ValueError("Webhook URL uses an ambiguous IP literal")
+            numbers: list[int] = []
+            for part in parts:
+                if part.lower().startswith("0x") or (len(part) > 1 and part.startswith("0")):
+                    raise ValueError("Webhook URL uses an ambiguous IP literal")
+                number = int(part, 10)
+                if number > 255:
+                    raise ValueError("Webhook URL uses an ambiguous IP literal")
+                numbers.append(number)
+            return ipaddress.IPv4Address(".".join(str(number) for number in numbers))
+        return None
+
+    def _address_is_blocked(
+        self,
+        ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+        *,
+        allow_private: bool,
+    ) -> bool:
+        """Return True when an address must not receive webhook traffic.
+
+        Loopback, link-local, and other non-routable ranges stay blocked even
+        when private webhooks are explicitly enabled. That flag only allows
+        ordinary private ranges such as RFC 1918.
+        """
+        candidates: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = [ip]
+        mapped = getattr(ip, "ipv4_mapped", None)
+        if isinstance(mapped, ipaddress.IPv4Address):
+            candidates.append(mapped)
+
+        for parsed in candidates:
+            if (
+                parsed.is_loopback
                 or parsed.is_link_local
                 or parsed.is_multicast
                 or parsed.is_reserved
                 or parsed.is_unspecified
-            )
-        except ValueError:
-            return True
+            ):
+                return True
+            if parsed.is_private and not allow_private:
+                return True
+        return False
 
-    def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
-        """Validate outbound webhook URL to reduce SSRF risk."""
-        parsed = urlparse(url.strip())
+    def _inspect_webhook_url(
+        self, url: str, *, allow_private: bool = False
+    ) -> tuple[str, list[str]]:
+        """Validate a webhook URL and return the URL plus pinned addresses."""
+        cleaned = url.strip()
+        parsed = urlparse(cleaned)
         if parsed.scheme != "https":
             raise ValueError("Webhook URL must use HTTPS")
+        if parsed.username or parsed.password:
+            raise ValueError("Webhook URL must not include credentials")
         if not parsed.hostname:
             raise ValueError("Webhook URL must include a valid hostname")
 
         hostname = parsed.hostname
-        if hostname.lower() == "localhost":
-            raise ValueError("Localhost webhook URLs are not allowed")
+        self._reject_webhook_hostname(hostname)
+        literal = self._parse_ip_literal(hostname)
+        if literal is not None:
+            if self._address_is_blocked(literal, allow_private=allow_private):
+                raise ValueError("Webhook URL resolves to a private or restricted network address")
+            return cleaned, [str(literal)]
 
-        resolved_ips = set()
+        resolved: list[str] = []
         try:
-            # Validate all resolved addresses to avoid DNS-based bypass.
-            for info in socket.getaddrinfo(hostname, parsed.port or 443, proto=socket.IPPROTO_TCP):
-                resolved_ips.add(info[4][0])
+            address_info = socket.getaddrinfo(
+                hostname, parsed.port or 443, proto=socket.IPPROTO_TCP
+            )
         except socket.gaierror as e:
             raise ValueError(f"Could not resolve webhook hostname: {hostname}") from e
 
-        if not allow_private:
-            for ip in resolved_ips:
-                if self._is_restricted_ip(ip):
-                    raise ValueError(
-                        "Webhook URL resolves to a private or restricted network address"
-                    )
+        for info in address_info:
+            ip_obj = ipaddress.ip_address(info[4][0])
+            if self._address_is_blocked(ip_obj, allow_private=allow_private):
+                raise ValueError("Webhook URL resolves to a private or restricted network address")
+            rendered = str(ip_obj)
+            if rendered not in resolved:
+                resolved.append(rendered)
 
-        return url
+        if not resolved:
+            raise ValueError(f"Could not resolve webhook hostname: {hostname}")
+        return cleaned, resolved
+
+    def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
+        """Validate outbound webhook URL to reduce SSRF risk."""
+        validated, _addresses = self._inspect_webhook_url(url, allow_private=allow_private)
+        return validated
+
+    def _sanitize_header(self, value: str) -> str:
+        """Remove CR/LF so notification fields cannot inject email headers."""
+        return value.replace("\r", "").replace("\n", "").strip()
+
+    def _resolve_attachment(self, attachment_path: str) -> Path | None:
+        """Return an attachment path confined to the project directory."""
+        root = self._project_root()
+        candidate = Path(attachment_path)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(root):
+            raise ValueError("Attachment path is outside the project directory")
+        if not resolved.is_file():
+            return None
+        return resolved
+
+    async def _post_webhook(
+        self,
+        url: str,
+        addresses: list[str],
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: int = 30,
+    ) -> tuple[int, str]:
+        """POST JSON to a validated webhook without redirects or proxy env."""
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError("Webhook URL must include a valid hostname")
+
+        resolver = _PinnedAddressResolver(hostname, addresses)
+        connector = aiohttp.TCPConnector(resolver=resolver, ssl=True)
+        client_timeout = aiohttp.ClientTimeout(total=timeout)
+        async with (
+            aiohttp.ClientSession(
+                connector=connector, timeout=client_timeout, trust_env=False
+            ) as session,
+            session.post(url, json=payload, headers=headers, allow_redirects=False) as response,
+        ):
+            if response.status in _REDIRECT_STATUSES:
+                raise ValueError("Webhook redirects are not allowed")
+            body = await response.text()
+            return response.status, body[:500]
 
     def _deep_merge(self, base: dict, update: dict) -> None:
         """Deep merge configuration dictionaries."""
@@ -531,10 +738,20 @@ System status: {{ system_status }}
             return {"success": False, "error": "Email not configured"}
 
         try:
+            recipients = [
+                self._sanitize_header(str(recipient))
+                for recipient in email_config["recipients"]
+                if self._sanitize_header(str(recipient))
+            ]
+            if not recipients:
+                return {"success": False, "error": "Email not configured"}
+
             msg = MIMEMultipart("alternative")
-            msg["From"] = email_config.get("from_address", "music-discovery@example.com")
-            msg["To"] = ", ".join(email_config["recipients"])
-            msg["Subject"] = message.title
+            msg["From"] = self._sanitize_header(
+                str(email_config.get("from_address", "music-discovery@example.com"))
+            )
+            msg["To"] = ", ".join(recipients)
+            msg["Subject"] = self._sanitize_header(str(message.title))
 
             # Set priority
             if message.priority in [NotificationPriority.HIGH, NotificationPriority.CRITICAL]:
@@ -552,40 +769,51 @@ System status: {{ system_status }}
 
             msg.attach(MIMEText(text_content, "plain"))
 
-            # Add HTML version if available
-            html_content = text_content.replace("\n", "<br>")
+            # Named templates are not selected by extension, so escape every HTML body.
+            # Markup is already escaped by Jinja and must not be escaped twice.
+            if isinstance(text_content, jinja2.Markup):
+                html_content = str(text_content)
+            else:
+                html_content = html.escape(text_content)
             msg.attach(MIMEText(f"<html><body><pre>{html_content}</pre></body></html>", "html"))
 
-            # Add attachments
+            # Add attachments confined to the project directory
             if message.attachments:
                 for attachment_path in message.attachments:
-                    if Path(attachment_path).exists():
-                        with Path(attachment_path).open("rb") as f:
-                            attachment = MIMEBase("application", "octet-stream")
-                            attachment.set_payload(f.read())
-                            encoders.encode_base64(attachment)
-                            attachment.add_header(
-                                "Content-Disposition",
-                                f"attachment; filename= {Path(attachment_path).name}",
-                            )
-                            msg.attach(attachment)
+                    resolved_attachment = self._resolve_attachment(attachment_path)
+                    if resolved_attachment is None:
+                        continue
+                    with resolved_attachment.open("rb") as f:
+                        attachment = MIMEBase("application", "octet-stream")
+                        attachment.set_payload(f.read())
+                        encoders.encode_base64(attachment)
+                        attachment.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {resolved_attachment.name}",
+                        )
+                        msg.attach(attachment)
 
-            # Send email
-            server = smtplib.SMTP(email_config["smtp_server"], email_config.get("port", 587))
+            # TLS is mandatory. A saved config cannot turn it off.
+            context = ssl.create_default_context()
+            host = self._sanitize_header(str(email_config["smtp_server"]))
+            port = int(email_config.get("port", 587))
+            if port == 465:
+                server: smtplib.SMTP = smtplib.SMTP_SSL(host, port, context=context, timeout=30)
+            else:
+                server = smtplib.SMTP(host, port, timeout=30)
+            try:
+                if port != 465:
+                    server.ehlo()
+                    server.starttls(context=context)
+                    server.ehlo()
+                if email_config.get("username") and email_config.get("password"):
+                    server.login(email_config["username"], email_config["password"])
+                server.send_message(msg)
+            finally:
+                server.quit()
 
-            if email_config.get("use_tls", True):
-                server.starttls()
-
-            if email_config.get("username") and email_config.get("password"):
-                server.login(email_config["username"], email_config["password"])
-
-            server.send_message(msg)
-            server.quit()
-
-            self.logger.info(
-                f"Email notification sent to {len(email_config['recipients'])} recipients"
-            )
-            return {"success": True, "recipients": len(email_config["recipients"])}
+            self.logger.info(f"Email notification sent to {len(recipients)} recipients")
+            return {"success": True, "recipients": len(recipients)}
 
         except Exception as e:
             self.logger.error(f"Failed to send email notification: {e}")
@@ -600,7 +828,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Slack webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            webhook_url, addresses = self._inspect_webhook_url(webhook_url, allow_private=False)
             # Create Slack message format
             color_map = {
                 NotificationPriority.LOW: "good",
@@ -648,19 +876,12 @@ System status: {{ system_status }}
                 if fields:
                     slack_message["attachments"][0]["fields"] = fields
 
-            async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=slack_message) as response,
-            ):
-                if response.status == 200:
-                    self.logger.info("Slack notification sent successfully")
-                    return {"success": True, "status_code": response.status}
-                else:
-                    error_text = await response.text()
-                    self.logger.error(
-                        f"Slack notification failed: {response.status} - {error_text}"
-                    )
-                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            status, error_text = await self._post_webhook(webhook_url, addresses, slack_message)
+            if status == 200:
+                self.logger.info("Slack notification sent successfully")
+                return {"success": True, "status_code": status}
+            self.logger.error(f"Slack notification failed: {status} - {error_text}")
+            return {"success": False, "error": f"HTTP {status}: {error_text}"}
 
         except Exception as e:
             self.logger.error(f"Failed to send Slack notification: {e}")
@@ -675,7 +896,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Discord webhook URL not configured"}
 
         try:
-            webhook_url = self._validate_webhook_url(webhook_url, allow_private=False)
+            webhook_url, addresses = self._inspect_webhook_url(webhook_url, allow_private=False)
             # Format content for Discord
             content = message.content
             if message.template_vars:
@@ -715,19 +936,12 @@ System status: {{ system_status }}
                 if fields:
                     discord_message["embeds"][0]["fields"] = fields
 
-            async with (
-                aiohttp.ClientSession() as session,
-                session.post(webhook_url, json=discord_message) as response,
-            ):
-                if response.status in [200, 204]:
-                    self.logger.info("Discord notification sent successfully")
-                    return {"success": True, "status_code": response.status}
-                else:
-                    error_text = await response.text()
-                    self.logger.error(
-                        f"Discord notification failed: {response.status} - {error_text}"
-                    )
-                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            status, error_text = await self._post_webhook(webhook_url, addresses, discord_message)
+            if status in [200, 204]:
+                self.logger.info("Discord notification sent successfully")
+                return {"success": True, "status_code": status}
+            self.logger.error(f"Discord notification failed: {status} - {error_text}")
+            return {"success": False, "error": f"HTTP {status}: {error_text}"}
 
         except Exception as e:
             self.logger.error(f"Failed to send Discord notification: {e}")
@@ -752,7 +966,7 @@ System status: {{ system_status }}
             return {"success": False, "error": "Webhook URL not configured"}
 
         try:
-            url = self._validate_webhook_url(
+            url, addresses = self._inspect_webhook_url(
                 url, allow_private=self._allow_private_webhooks()
             )
             # Prepare payload
@@ -774,21 +988,14 @@ System status: {{ system_status }}
             headers = webhook_config.get("headers", {"Content-Type": "application/json"})
             timeout = webhook_config.get("timeout", 30)
 
-            async with (
-                aiohttp.ClientSession() as session,
-                session.post(
-                    url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)
-                ) as response,
-            ):
-                if 200 <= response.status < 300:
-                    self.logger.info(f"Webhook notification sent successfully: {response.status}")
-                    return {"success": True, "status_code": response.status}
-                else:
-                    error_text = await response.text()
-                    self.logger.error(
-                        f"Webhook notification failed: {response.status} - {error_text}"
-                    )
-                    return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+            status, error_text = await self._post_webhook(
+                url, addresses, payload, headers=headers, timeout=int(timeout)
+            )
+            if 200 <= status < 300:
+                self.logger.info(f"Webhook notification sent successfully: {status}")
+                return {"success": True, "status_code": status}
+            self.logger.error(f"Webhook notification failed: {status} - {error_text}")
+            return {"success": False, "error": f"HTTP {status}: {error_text}"}
 
         except Exception as e:
             self.logger.error(f"Failed to send webhook notification: {e}")
