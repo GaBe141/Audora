@@ -165,6 +165,42 @@ def _bounded_timeout(timeout: Any) -> int:
     return min(max(value, 1), 30)
 
 
+def _validate_smtp_server(host: str) -> str:
+    """Reject SMTP targets that point at the local machine or cloud metadata."""
+    cleaned = host.strip()
+    if not cleaned or any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+        raise ValueError("Invalid SMTP server")
+    if any(ch in cleaned for ch in " /\\@#?"):
+        raise ValueError("Invalid SMTP server")
+
+    hostname = cleaned.lower().rstrip(".")
+    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".localhost"):
+        raise ValueError("Localhost SMTP servers are not allowed")
+    if hostname in _METADATA_HOSTS:
+        raise ValueError("SMTP server is a restricted metadata host")
+
+    if _looks_like_ip_literal(hostname):
+        literal = _coerce_ip(hostname)
+        if literal is None or _is_blocked_ip(literal, allow_private=True):
+            raise ValueError("SMTP server resolves to a restricted network address")
+        return cleaned
+
+    try:
+        infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise ValueError(f"Could not resolve SMTP server: {hostname}") from exc
+    if not infos:
+        raise ValueError(f"Could not resolve SMTP server: {hostname}")
+    for info in infos:
+        try:
+            resolved = ipaddress.ip_address(info[4][0])
+        except ValueError as exc:
+            raise ValueError("SMTP server resolves to a restricted network address") from exc
+        if _is_blocked_ip(resolved, allow_private=True):
+            raise ValueError("SMTP server resolves to a restricted network address")
+    return cleaned
+
+
 def _parse_ipv4_part(part: str) -> int:
     token = part.strip()
     if not token:
@@ -416,14 +452,51 @@ class EnhancedNotificationService:
             "rate_limit_per_hour",
         ]
         to_save = {k: self.config[k] for k in saveable_keys if k in self.config}
+        payload = json.dumps(to_save, indent=2)
+        fd: int | None = None
         try:
-            with config_path.open("w") as f:
-                json.dump(to_save, f, indent=2)
+            fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             if os.name != "nt":
                 config_path.chmod(0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                fd = None
+                handle.write(payload)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
             self.logger.error(f"Failed to save notification config: {e}")
+            raise
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    def set_email_transport(
+        self,
+        *,
+        smtp_server: str | None = None,
+        port: int | None = None,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> None:
+        """Update SMTP settings. A host change drops any stored password not replaced now."""
+        email_config = self.config.setdefault("email", {})
+        if smtp_server is not None:
+            new_host = _validate_smtp_server(smtp_server)
+            previous = str(email_config.get("smtp_server", "")).strip()
+            if new_host != previous and not password:
+                email_config["password"] = ""
+            email_config["smtp_server"] = new_host
+        if port is not None:
+            if port < 1 or port > 65535:
+                raise ValueError("SMTP port is invalid")
+            email_config["port"] = int(port)
+        if username is not None:
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in username):
+                raise ValueError("SMTP username contains invalid control characters")
+            email_config["username"] = username
+        if password:
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in password):
+                raise ValueError("SMTP password contains invalid control characters")
+            email_config["password"] = password
 
     def _allow_private_webhooks(self) -> bool:
         """Whether private network webhook targets are allowed."""
@@ -866,9 +939,7 @@ System status: {{ system_status }}
                         )
                         msg.attach(attachment)
 
-            smtp_host = str(email_config["smtp_server"]).strip()
-            if not smtp_host or any(ord(ch) < 32 or ord(ch) == 127 for ch in smtp_host):
-                return {"success": False, "error": "Invalid SMTP server"}
+            smtp_host = _validate_smtp_server(str(email_config["smtp_server"]))
             port = int(email_config.get("port", 587))
             context = ssl.create_default_context()
             server: smtplib.SMTP | None = None
