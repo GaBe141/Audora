@@ -93,6 +93,14 @@ class _ValidatedWebhook:
     addresses: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _ValidatedSmtp:
+    """SMTP target whose addresses were checked before the connection is opened."""
+
+    hostname: str
+    addresses: tuple[str, ...]
+
+
 class _PinnedResolver(aiohttp.abc.AbstractResolver):
     """Resolve webhook hosts only to the addresses approved during validation."""
 
@@ -165,8 +173,8 @@ def _bounded_timeout(timeout: Any) -> int:
     return min(max(value, 1), 30)
 
 
-def _validate_smtp_server(host: str) -> str:
-    """Reject SMTP targets that point at the local machine or cloud metadata."""
+def _validate_smtp_target(host: str) -> _ValidatedSmtp:
+    """Reject local and metadata SMTP servers and record the addresses to dial."""
     cleaned = host.strip()
     if not cleaned or any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
         raise ValueError("Invalid SMTP server")
@@ -183,7 +191,8 @@ def _validate_smtp_server(host: str) -> str:
         literal = _coerce_ip(hostname)
         if literal is None or _is_blocked_ip(literal, allow_private=True):
             raise ValueError("SMTP server resolves to a restricted network address")
-        return cleaned
+        canonical = str(_unwrap_ip(literal))
+        return _ValidatedSmtp(hostname=canonical, addresses=(canonical,))
 
     try:
         infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
@@ -191,6 +200,7 @@ def _validate_smtp_server(host: str) -> str:
         raise ValueError(f"Could not resolve SMTP server: {hostname}") from exc
     if not infos:
         raise ValueError(f"Could not resolve SMTP server: {hostname}")
+    addresses: list[str] = []
     for info in infos:
         try:
             resolved = ipaddress.ip_address(info[4][0])
@@ -198,7 +208,53 @@ def _validate_smtp_server(host: str) -> str:
             raise ValueError("SMTP server resolves to a restricted network address") from exc
         if _is_blocked_ip(resolved, allow_private=True):
             raise ValueError("SMTP server resolves to a restricted network address")
-    return cleaned
+        addresses.append(str(resolved))
+    if not addresses:
+        raise ValueError(f"Could not resolve SMTP server: {hostname}")
+    unique = tuple(dict.fromkeys(addresses))
+    return _ValidatedSmtp(hostname=hostname, addresses=unique)
+
+
+def _validate_smtp_server(host: str) -> str:
+    """Reject SMTP targets that point at the local machine or cloud metadata."""
+    return _validate_smtp_target(host).hostname
+
+
+def _open_smtp(hostname: str, port: int, addresses: tuple[str, ...]) -> smtplib.SMTP:
+    """Open TLS to a previously validated address without resolving the name again."""
+    if port < 1 or port > 65535:
+        raise ValueError("SMTP port is invalid")
+    if not addresses:
+        raise ValueError("SMTP server has no validated address")
+
+    context = ssl.create_default_context()
+    last_error: Exception | None = None
+    for address in addresses:
+        server: smtplib.SMTP | None = None
+        try:
+            if port == 465:
+                server = smtplib.SMTP_SSL(timeout=30, context=context)
+                server._host = hostname
+                code, _message = server.connect(address, port)
+            else:
+                server = smtplib.SMTP(timeout=30)
+                code, _message = server.connect(address, port)
+            if code != 220:
+                raise OSError(f"SMTP server rejected the connection with status {code}")
+            if port != 465:
+                server._host = hostname
+                server.ehlo()
+                server.starttls(context=context)
+                server.ehlo()
+            return server
+        except Exception as exc:
+            last_error = exc
+            if server is not None:
+                try:
+                    server.close()
+                except Exception:
+                    pass
+    raise OSError(f"Could not connect to SMTP server {hostname}") from last_error
 
 
 def _parse_ipv4_part(part: str) -> int:
@@ -939,18 +995,15 @@ System status: {{ system_status }}
                         )
                         msg.attach(attachment)
 
-            smtp_host = _validate_smtp_server(str(email_config["smtp_server"]))
-            port = int(email_config.get("port", 587))
-            context = ssl.create_default_context()
+            try:
+                port = int(email_config.get("port", 587))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("SMTP port is invalid") from exc
+            target = _validate_smtp_target(str(email_config["smtp_server"]))
             server: smtplib.SMTP | None = None
             try:
-                if port == 465:
-                    server = smtplib.SMTP_SSL(smtp_host, port, context=context, timeout=30)
-                else:
-                    server = smtplib.SMTP(smtp_host, port, timeout=30)
-                    server.ehlo()
-                    server.starttls(context=context)
-                    server.ehlo()
+                # Dial the addresses captured above so a later DNS answer cannot retarget TLS.
+                server = _open_smtp(target.hostname, port, target.addresses)
 
                 if email_config.get("username") and email_config.get("password"):
                     server.login(email_config["username"], email_config["password"])
