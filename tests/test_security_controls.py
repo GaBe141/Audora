@@ -7,9 +7,17 @@ import pandas as pd
 import pytest
 
 from core.caching import dumps_signed, loads_signed
+from core.config import _is_loopback_redirect_uri
 from core.data_store import EnhancedMusicDataStore
-from core.notification_service import EnhancedNotificationService, _html_email_document
+from core.notification_service import (
+    EnhancedNotificationService,
+    _html_email_document,
+    _open_smtp,
+    _validate_smtp_target,
+)
 from core.utils import neutralize_dataframe_for_csv
+from integrations.audiodb_integration import AudioDBAPI
+from integrations.spotify_charts_integration import SpotifyChartsAPI
 
 
 class TestSignedCache:
@@ -164,3 +172,101 @@ class TestSmtpAndConfigHardening:
         assert "next-secret" in saved.read_text(encoding="utf-8")
         with pytest.raises(ValueError, match="config directory"):
             svc.save_config("../notification_config.json")
+
+    def test_smtp_dials_pinned_address_after_dns_changes(self, monkeypatch):
+        answers = [[(2, 1, 6, "", ("203.0.113.10", 0))]]
+
+        def fake_getaddrinfo(*_args, **_kwargs):
+            if not answers:
+                return [(2, 1, 6, "", ("127.0.0.1", 0))]
+            return answers.pop(0)
+
+        monkeypatch.setattr("core.notification_service.socket.getaddrinfo", fake_getaddrinfo)
+        target = _validate_smtp_target("mail.example.com")
+        assert target.addresses == ("203.0.113.10",)
+        connected: dict[str, object] = {}
+
+        class FakeSMTP:
+            def __init__(self, *args, **kwargs):
+                self._host = ""
+
+            def connect(self, host, port=0, source_address=None):
+                connected["host"] = host
+                connected["port"] = port
+                return (220, b"ok")
+
+            def ehlo(self):
+                return (250, b"ok")
+
+            def starttls(self, context=None):
+                connected["sni"] = self._host
+                return (220, b"tls")
+
+            def close(self):
+                connected["closed"] = True
+
+        monkeypatch.setattr("core.notification_service.smtplib.SMTP", FakeSMTP)
+        _open_smtp(target.hostname, 587, target.addresses)
+        assert connected["host"] == "203.0.113.10"
+        assert connected["port"] == 587
+        assert connected["sni"] == "mail.example.com"
+        assert "closed" not in connected
+
+
+class TestRedirectAndOutboundRequests:
+    """OAuth redirects and third-party clients must not leak credentials or follow redirects."""
+
+    def test_spotify_redirect_requires_a_real_loopback_host(self):
+        assert _is_loopback_redirect_uri("http://127.0.0.1:8888/callback")
+        assert _is_loopback_redirect_uri("http://localhost:8888/callback")
+        assert _is_loopback_redirect_uri("http://[::1]:8888/callback")
+        assert not _is_loopback_redirect_uri("http://localhost.evil.example/callback")
+        assert not _is_loopback_redirect_uri("http://127.0.0.1.evil.example/callback")
+        assert not _is_loopback_redirect_uri("http://127.0.0.1@evil.example/callback")
+        assert not _is_loopback_redirect_uri("http://localhost@evil.example/callback")
+        assert not _is_loopback_redirect_uri("https://127.0.0.1/callback")
+        assert not _is_loopback_redirect_uri("http://2130706433/callback")
+        assert not _is_loopback_redirect_uri("http://8.8.8.8/callback")
+
+    def test_audiodb_keeps_the_api_key_on_the_original_host(self):
+        api = AudioDBAPI(api_key="premium-key")
+        with pytest.raises(ValueError, match="endpoint"):
+            api._make_request("../search.php")
+        with pytest.raises(ValueError, match="API key"):
+            AudioDBAPI(api_key="bad/key")._make_request("search.php")
+
+        calls: dict[str, object] = {}
+
+        class Response:
+            is_redirect = False
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"ok": True}
+
+        def fake_get(url, params=None, timeout=None, allow_redirects=None):
+            calls["url"] = url
+            calls["allow_redirects"] = allow_redirects
+            return Response()
+
+        api.session.get = fake_get
+        assert api._make_request("search.php", {"s": "a"}) == {"ok": True}
+        assert calls["allow_redirects"] is False
+        assert calls["url"] == "https://www.theaudiodb.com/api/v1/json/premium-key/search.php"
+        assert api.session.trust_env is False
+
+    def test_spotify_charts_reject_path_injection(self):
+        api = SpotifyChartsAPI()
+        called = {"count": 0}
+
+        def fake_get(*_args, **_kwargs):
+            called["count"] += 1
+            raise AssertionError("chart request should not be sent")
+
+        api.session.get = fake_get
+        frame = api.get_top_200_daily(country_code="../@evil.example", date="2024-01-15")
+        assert frame.empty
+        assert called["count"] == 0
+        assert api.session.trust_env is False
