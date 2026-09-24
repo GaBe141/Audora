@@ -6,6 +6,8 @@ from typing import Any
 import pandas as pd
 import requests
 
+_ENDPOINT_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+
 # Note: config import is optional for standalone execution
 
 BASE_URL = "https://www.theaudiodb.com/api/v1/json"
@@ -17,8 +19,23 @@ class AudioDBAPI:
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key
         self.session = requests.Session()
+        self.session.trust_env = False
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second
+
+    def _api_key_segment(self) -> str:
+        """Return the URL path segment for the API key. The key must not rewrite the path."""
+        key = self.api_key or "123"
+        if not key or any(char not in _ENDPOINT_CHARS for char in key):
+            raise ValueError("Invalid AudioDB API key")
+        return key
+
+    def _endpoint_segment(self, endpoint: str) -> str:
+        """Keep requests on a single AudioDB path segment."""
+        cleaned = endpoint.strip().strip("/")
+        if not cleaned or any(char not in _ENDPOINT_CHARS for char in cleaned):
+            raise ValueError("Invalid AudioDB endpoint")
+        return cleaned
 
     def _rate_limit(self):
         """Ensure we don't exceed rate limits."""
@@ -34,14 +51,13 @@ class AudioDBAPI:
         """Make a request to AudioDB API with rate limiting."""
         self._rate_limit()
 
-        # Use API key if available, otherwise use free key (123)
-        if self.api_key:
-            url = f"{BASE_URL}/{self.api_key}/{endpoint}"
-        else:
-            url = f"{BASE_URL}/123/{endpoint}"  # Free API key is 123
+        url = f"{BASE_URL}/{self._api_key_segment()}/{self._endpoint_segment(endpoint)}"
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, timeout=15, allow_redirects=False)
+            if response.is_redirect is True:
+                print("AudioDB API error: redirects are not allowed")
+                return None
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
