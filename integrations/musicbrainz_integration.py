@@ -1,5 +1,6 @@
 """MusicBrainz API integration for comprehensive music metadata and artist relationships."""
 
+import re
 import time
 from typing import Any
 
@@ -8,6 +9,24 @@ import requests
 
 BASE_URL = "https://musicbrainz.org/ws/2/"
 USER_AGENT = "SpotifyInsights/1.0 (https://github.com/GaBe141/spotify-insights)"
+_ALLOWED_RESOURCES = frozenset({"artist", "release", "recording", "release-group", "work", "label"})
+_MBID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def safe_musicbrainz_endpoint(endpoint: str) -> str:
+    """Allow only known MusicBrainz resources and UUID identifiers."""
+    cleaned = endpoint.strip().lstrip("/")
+    if not cleaned or any(token in cleaned for token in ("..", "\\", "?", "#", " ")):
+        raise ValueError("Invalid MusicBrainz endpoint")
+    parts = cleaned.split("/")
+    if len(parts) > 2 or parts[0] not in _ALLOWED_RESOURCES:
+        raise ValueError("Invalid MusicBrainz endpoint")
+    if len(parts) == 2 and _MBID_RE.fullmatch(parts[1]) is None:
+        raise ValueError("Invalid MusicBrainz identifier")
+    return "/".join(parts)
 
 
 class MusicBrainzAPI:
@@ -15,6 +34,7 @@ class MusicBrainzAPI:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.headers.update({"User-Agent": USER_AGENT})
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second to be respectful
@@ -34,10 +54,19 @@ class MusicBrainzAPI:
         params.update({"fmt": "json"})
 
         try:
-            response = self.session.get(f"{BASE_URL}{endpoint}", params=params)
+            safe_endpoint = safe_musicbrainz_endpoint(endpoint)
+            response = self.session.get(
+                f"{BASE_URL}{safe_endpoint}",
+                params=params,
+                timeout=15,
+                allow_redirects=False,
+            )
+            if isinstance(response.status_code, int) and response.status_code != 200:
+                print(f"MusicBrainz API error: status {response.status_code}")
+                return None
             response.raise_for_status()
             return response.json()
-        except requests.exceptions.RequestException as e:
+        except (ValueError, requests.exceptions.RequestException) as e:
             print(f"MusicBrainz API error: {e}")
             return None
 
@@ -75,16 +104,16 @@ class MusicBrainzAPI:
 
         related_artists = []
         for relation in artist_details["relations"]:
-            if relation.get("type") in ["member", "collaboration", "founder", "collaboration"]:
-                if "artist" in relation:
-                    related_artists.append(
-                        {
-                            "name": relation["artist"]["name"],
-                            "mbid": relation["artist"]["id"],
-                            "relationship_type": relation["type"],
-                            "direction": relation.get("direction", "forward"),
-                        }
-                    )
+            relation_type = relation.get("type")
+            if relation_type in {"member", "collaboration", "founder"} and "artist" in relation:
+                related_artists.append(
+                    {
+                        "name": relation["artist"]["name"],
+                        "mbid": relation["artist"]["id"],
+                        "relationship_type": relation_type,
+                        "direction": relation.get("direction", "forward"),
+                    }
+                )
 
         return related_artists
 
