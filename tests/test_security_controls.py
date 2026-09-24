@@ -118,3 +118,49 @@ class TestCsvExportHardening:
                 store.export_to_csv("trends", "notes.txt")
         finally:
             store.close_pool()
+
+
+class TestSmtpAndConfigHardening:
+    """SMTP targets cannot point at loopback, and stored passwords are not reused."""
+
+    def test_rejects_loopback_metadata_and_obfuscated_literals(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="Localhost"):
+            svc.set_email_transport(smtp_server="localhost")
+        with pytest.raises(ValueError, match="restricted"):
+            svc.set_email_transport(smtp_server="127.0.0.1")
+        with pytest.raises(ValueError, match="restricted"):
+            svc.set_email_transport(smtp_server="2130706433")
+        with pytest.raises(ValueError, match="restricted"):
+            svc.set_email_transport(smtp_server="169.254.169.254")
+        with pytest.raises(ValueError, match="metadata"):
+            svc.set_email_transport(smtp_server="metadata.google.internal")
+        svc.set_email_transport(smtp_server="10.0.0.1", password="kept")
+        assert svc.config["email"]["smtp_server"] == "10.0.0.1"
+        assert svc.config["email"]["password"] == "kept"
+
+    def test_hostname_resolving_to_loopback_is_rejected(self, monkeypatch):
+        monkeypatch.setattr(
+            "core.notification_service.socket.getaddrinfo",
+            lambda *_args, **_kwargs: [(2, 1, 6, "", ("127.0.0.1", 0))],
+        )
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="restricted"):
+            svc.set_email_transport(smtp_server="mail.example.com")
+
+    def test_host_change_drops_password_and_config_is_private(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        svc = EnhancedNotificationService()
+        svc.set_email_transport(smtp_server="10.1.2.3", password="secret-value")
+        svc.set_email_transport(smtp_server="10.1.2.3", username="alice")
+        assert svc.config["email"]["password"] == "secret-value"
+        svc.set_email_transport(smtp_server="10.2.3.4")
+        assert svc.config["email"]["password"] == ""
+        svc.set_email_transport(smtp_server="10.2.3.4", password="next-secret")
+        svc.save_config()
+        saved = tmp_path / "config" / "notification_config.json"
+        mode = saved.stat().st_mode & 0o777
+        assert mode == 0o600
+        assert "next-secret" in saved.read_text(encoding="utf-8")
+        with pytest.raises(ValueError, match="config directory"):
+            svc.save_config("../notification_config.json")
