@@ -17,6 +17,7 @@ from core.notification_service import (
 )
 from core.utils import neutralize_dataframe_for_csv
 from integrations.audiodb_integration import AudioDBAPI
+from integrations.musicbrainz_integration import MusicBrainzAPI
 from integrations.spotify_charts_integration import SpotifyChartsAPI
 
 
@@ -270,3 +271,108 @@ class TestRedirectAndOutboundRequests:
         assert frame.empty
         assert called["count"] == 0
         assert api.session.trust_env is False
+
+    def test_musicbrainz_rejects_path_rewriting(self):
+        api = MusicBrainzAPI()
+        called = {"count": 0}
+
+        def fake_get(*_args, **_kwargs):
+            called["count"] += 1
+            raise AssertionError("MusicBrainz request should not be sent")
+
+        api.session.get = fake_get
+        assert api.get_artist_details("../../admin") is None
+        assert api.get_artist_details("not-a-uuid") is None
+        assert called["count"] == 0
+        assert api.session.trust_env is False
+
+        calls: dict[str, object] = {}
+
+        class Response:
+            is_redirect = False
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"id": "5b11f4ce-a62d-471e-81fc-a69a8278c7da"}
+
+        def safe_get(url, params=None, timeout=None, allow_redirects=None):
+            calls["url"] = url
+            calls["allow_redirects"] = allow_redirects
+            calls["timeout"] = timeout
+            return Response()
+
+        api.session.get = safe_get
+        result = api.get_artist_details("5b11f4ce-a62d-471e-81fc-a69a8278c7da")
+        assert result is not None
+        assert calls["allow_redirects"] is False
+        assert calls["url"] == (
+            "https://musicbrainz.org/ws/2/artist/5b11f4ce-a62d-471e-81fc-a69a8278c7da"
+        )
+
+    def test_platform_identifiers_cannot_escape_their_api(self):
+        import asyncio
+        import sys
+        from pathlib import Path
+
+        integrations = str(Path(__file__).resolve().parents[1] / "integrations")
+        sys.path.insert(0, integrations)
+        try:
+            from extended_platforms import DiscordMusicBot, RedditMusicAPI, TumblrMusicAPI
+        finally:
+            if integrations in sys.path:
+                sys.path.remove(integrations)
+
+        calls: list[tuple[str, dict]] = []
+
+        class _Response:
+            status = 200
+
+            async def json(self):
+                return {"data": {"children": []}, "response": []}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class _Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def get(self, url, **kwargs):
+                calls.append((url, kwargs))
+                return _Response()
+
+            def post(self, url, **kwargs):
+                calls.append((url, kwargs))
+                return _Response()
+
+        import extended_platforms
+
+        extended_platforms._http_session = lambda: _Session()
+
+        reddit = RedditMusicAPI("id", "secret")
+        reddit.access_token = "token"
+        reddit.token_expires = datetime.max
+        assert asyncio.run(reddit.get_music_subreddit_posts("../../api/v1/me")) == []
+        assert calls == []
+
+        tumblr = TumblrMusicAPI("key", "secret")
+        assert asyncio.run(tumblr.get_music_blog_posts("../../oauth/request_token")) == []
+        assert calls == []
+
+        discord = DiscordMusicBot("bot-token")
+        assert asyncio.run(discord.get_guild_voice_activity("../../users/@me")) == {}
+        assert calls == []
+
+        asyncio.run(reddit.get_music_subreddit_posts("popheads"))
+        assert calls[0][0] == "https://oauth.reddit.com/r/popheads/hot"
+        assert calls[0][1]["allow_redirects"] is False
+        sys.modules.pop("extended_platforms", None)
+        sys.modules.pop("social_discovery_engine", None)
