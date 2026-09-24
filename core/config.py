@@ -5,6 +5,7 @@ import sys
 import warnings
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -33,8 +34,8 @@ class SecureConfig:
             )
             return
 
-        # Load with explicit encoding and override
-        load_dotenv(dotenv_path=str(self.env_file), override=True, encoding="utf-8")
+        # A .env file must not replace credentials already provided by the environment.
+        load_dotenv(dotenv_path=str(self.env_file), override=False, encoding="utf-8")
 
         # Validate file permissions (Unix-like systems)
         if hasattr(os, "stat") and not sys.platform.startswith("win"):
@@ -57,8 +58,15 @@ class SecureConfig:
             ),
         }
 
-        # Validate redirect URI format
-        if not config["redirect_uri"].startswith(("http://localhost", "http://127.0.0.1")):
+        # Require an exact loopback host so localhost.evil.com cannot capture the OAuth code.
+        redirect = urlparse(config["redirect_uri"])
+        redirect_host = (redirect.hostname or "").lower().rstrip(".")
+        if (
+            redirect.scheme != "http"
+            or redirect_host not in {"localhost", "127.0.0.1"}
+            or redirect.username
+            or redirect.password
+        ):
             raise ValueError(
                 f"Invalid redirect URI: {config['redirect_uri']}\n"
                 "For development, use http://localhost or http://127.0.0.1"
@@ -172,6 +180,9 @@ LASTFM_SHARED_SECRET=your_lastfm_shared_secret_here
 # Get premium key from: https://www.theaudiodb.com/ (after creating account)
 # Free tier (123) provides basic access, premium unlocks additional features
 AUDIODB_API_KEY=123
+
+# HMAC key for signed Redis cache envelopes
+AUDORA_CACHE_SIGNING_KEY=
 
 # Security Notes:
 # - Never commit this file to version control
