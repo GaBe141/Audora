@@ -558,7 +558,7 @@ def search_history(_n, platform, min_score, days, artist_filter):
 
     # Optional artist filter (client-side simple substring)
     if artist_filter:
-        mask = df["artist"].str.contains(artist_filter, case=False, na=False)
+        mask = df["artist"].str.contains(artist_filter, case=False, na=False, regex=False)
         df = df[mask]
 
     # Round score
@@ -587,12 +587,6 @@ def export_csv(_n, table_data):
 # Callbacks — notification settings (Phase 4)
 # ---------------------------------------------------------------------------
 
-def _reject_control_chars(value: str, label: str) -> str:
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
-        raise ValueError(f"{label} contains invalid control characters")
-    return value
-
-
 @app.callback(
     Output("settings-save-status", "children"),
     Input("btn-save-settings", "n_clicks"),
@@ -616,19 +610,12 @@ def save_settings(
             svc.config["discord"]["webhook_url"] = svc._validate_webhook_url(str(discord_url))
         if webhook_url:
             svc.config["webhook"]["url"] = svc._validate_webhook_url(str(webhook_url))
-        if smtp_host:
-            svc.config["email"]["smtp_server"] = _reject_control_chars(
-                str(smtp_host).strip(), "SMTP host"
-            )
-        if smtp_port:
-            port = int(smtp_port)
-            if port < 1 or port > 65535:
-                raise ValueError("SMTP port is invalid")
-            svc.config["email"]["port"] = port
-        if smtp_user:
-            svc.config["email"]["username"] = _reject_control_chars(str(smtp_user), "SMTP username")
-        if smtp_pass:
-            svc.config["email"]["password"] = _reject_control_chars(str(smtp_pass), "SMTP password")
+        svc.set_email_transport(
+            smtp_server=str(smtp_host).strip() if smtp_host else None,
+            port=int(smtp_port) if smtp_port else None,
+            username=str(smtp_user) if smtp_user else None,
+            password=str(smtp_pass) if smtp_pass else None,
+        )
         svc.save_config()
         return "Saved"
     except Exception as e:
