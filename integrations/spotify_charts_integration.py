@@ -1,6 +1,7 @@
 """Spotify Charts web scraping for real streaming data and trending analysis."""
 
 import json
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -9,6 +10,8 @@ import requests
 from bs4 import BeautifulSoup
 
 CHARTS_BASE_URL = "https://charts.spotify.com"
+_CHART_COUNTRY = re.compile(r"^(?:global|[a-z]{2})$")
+_CHART_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class SpotifyChartsAPI:
@@ -16,6 +19,7 @@ class SpotifyChartsAPI:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         # Use a realistic user agent
         self.session.headers.update(
             {
@@ -33,6 +37,29 @@ class SpotifyChartsAPI:
             time.sleep(self.rate_limit_delay - time_since_last)
         self.last_request_time = time.time()
 
+    def _chart_url(self, kind: str, country_code: str, date: str) -> str:
+        """Build a charts URL from an allowlisted country and date."""
+        country = country_code.strip().lower()
+        if kind not in {"regional", "viral"} or _CHART_COUNTRY.fullmatch(country) is None:
+            raise ValueError("Invalid chart country code")
+        if _CHART_DATE.fullmatch(date) is None:
+            raise ValueError("Invalid chart date")
+        return f"{CHARTS_BASE_URL}/charts/view/{kind}-{country}-daily/{date}"
+
+    def _fetch_chart(self, url: str) -> requests.Response | None:
+        """Fetch one chart page without following redirects or using env proxies."""
+        try:
+            response = self.session.get(url, timeout=15, allow_redirects=False)
+            if response.is_redirect is True:
+                raise requests.exceptions.RequestException(
+                    "Spotify Charts redirects are not allowed"
+                )
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as exc:
+            print(f"Error fetching Spotify Charts: {exc}")
+            return None
+
     def get_top_200_daily(self, country_code: str = "global", date: str = None) -> pd.DataFrame:
         """Get top 200 tracks for a specific date and country.
 
@@ -46,57 +73,57 @@ class SpotifyChartsAPI:
             # Default to yesterday (charts are usually 1 day behind)
             date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        url = f"{CHARTS_BASE_URL}/charts/view/regional-{country_code}-daily/{date}"
-
         try:
-            response = self.session.get(url)
-            response.raise_for_status()
-
-            # Parse the HTML
-            soup = BeautifulSoup(response.content, "html.parser")
-
-            # Find the chart data (this might need adjustment based on site structure)
-            chart_data = []
-
-            # Look for the data in script tags (common pattern for charts)
-            scripts = soup.find_all("script")
-            for script in scripts:
-                if script.string and "chartEntryViewModels" in script.string:
-                    # Extract JSON data from script
-                    start = script.string.find('"chartEntryViewModels"')
-                    if start != -1:
-                        # This is a simplified extraction - real implementation would be more robust
-                        try:
-                            # Extract the JSON portion
-                            json_start = script.string.find("[", start)
-                            json_end = script.string.find("]", json_start) + 1
-                            if json_start != -1 and json_end != -1:
-                                json_str = script.string[json_start:json_end]
-                                data = json.loads(json_str)
-
-                                for entry in data:
-                                    chart_data.append(
-                                        {
-                                            "position": entry.get("currentRank", 0),
-                                            "track_name": entry.get("trackName", ""),
-                                            "artist_name": entry.get("artistNames", ""),
-                                            "streams": entry.get("streamCount", 0),
-                                            "date": date,
-                                            "country": country_code,
-                                        }
-                                    )
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            continue
-
-            # Fallback: try to parse table structure
-            if not chart_data:
-                chart_data = self._parse_table_fallback(soup, date, country_code)
-
-            return pd.DataFrame(chart_data)
-
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching Spotify Charts: {e}")
+            url = self._chart_url("regional", country_code, date)
+        except ValueError as exc:
+            print(f"Error fetching Top 200 Charts: {exc}")
             return pd.DataFrame()
+
+        response = self._fetch_chart(url)
+        if response is None:
+            return pd.DataFrame()
+
+        # Parse the HTML
+        soup = BeautifulSoup(response.content, "html.parser")
+
+        # Find the chart data (this might need adjustment based on site structure)
+        chart_data = []
+
+        # Look for the data in script tags (common pattern for charts)
+        scripts = soup.find_all("script")
+        for script in scripts:
+            if script.string and "chartEntryViewModels" in script.string:
+                # Extract JSON data from script
+                start = script.string.find('"chartEntryViewModels"')
+                if start != -1:
+                    # This is a simplified extraction - real implementation would be more robust
+                    try:
+                        # Extract the JSON portion
+                        json_start = script.string.find("[", start)
+                        json_end = script.string.find("]", json_start) + 1
+                        if json_start != -1 and json_end != -1:
+                            json_str = script.string[json_start:json_end]
+                            data = json.loads(json_str)
+
+                            for entry in data:
+                                chart_data.append(
+                                    {
+                                        "position": entry.get("currentRank", 0),
+                                        "track_name": entry.get("trackName", ""),
+                                        "artist_name": entry.get("artistNames", ""),
+                                        "streams": entry.get("streamCount", 0),
+                                        "date": date,
+                                        "country": country_code,
+                                    }
+                                )
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
+
+        # Fallback: try to parse table structure
+        if not chart_data:
+            chart_data = self._parse_table_fallback(soup, date, country_code)
+
+        return pd.DataFrame(chart_data)
 
     def _parse_table_fallback(
         self, soup: BeautifulSoup, date: str, country_code: str
@@ -138,12 +165,17 @@ class SpotifyChartsAPI:
         if date is None:
             date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        url = f"{CHARTS_BASE_URL}/charts/view/viral-{country_code}-daily/{date}"
+        try:
+            url = self._chart_url("viral", country_code, date)
+        except ValueError as exc:
+            print(f"Error fetching Viral Charts: {exc}")
+            return pd.DataFrame()
+
+        response = self._fetch_chart(url)
+        if response is None:
+            return pd.DataFrame()
 
         try:
-            response = self.session.get(url)
-            response.raise_for_status()
-
             BeautifulSoup(response.content, "html.parser")
 
             # Similar parsing logic as top_200_daily but for viral charts

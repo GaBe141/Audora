@@ -1,12 +1,33 @@
 """Secure configuration management for API keys and secrets."""
 
+import ipaddress
 import os
 import sys
 import warnings
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+
+
+def _is_loopback_redirect_uri(uri: str) -> bool:
+    """Return True only for http URLs whose host is localhost or a loopback address."""
+    parsed = urlparse(uri.strip())
+    if parsed.scheme != "http":
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    host = parsed.hostname
+    if host is None or any(char in host for char in "%\\"):
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(address.is_loopback)
 
 
 class SecureConfig:
@@ -33,8 +54,8 @@ class SecureConfig:
             )
             return
 
-        # Load with explicit encoding and override
-        load_dotenv(dotenv_path=str(self.env_file), override=True, encoding="utf-8")
+        # A .env file must not replace variables already set in the process environment.
+        load_dotenv(dotenv_path=str(self.env_file), override=False, encoding="utf-8")
 
         # Validate file permissions (Unix-like systems)
         if hasattr(os, "stat") and not sys.platform.startswith("win"):
@@ -57,8 +78,9 @@ class SecureConfig:
             ),
         }
 
-        # Validate redirect URI format
-        if not config["redirect_uri"].startswith(("http://localhost", "http://127.0.0.1")):
+        # Require a parsed loopback host. A prefix check accepts lookalike hosts
+        # such as http://localhost.evil.example and http://127.0.0.1@evil.example.
+        if not _is_loopback_redirect_uri(config["redirect_uri"]):
             raise ValueError(
                 f"Invalid redirect URI: {config['redirect_uri']}\n"
                 "For development, use http://localhost or http://127.0.0.1"
