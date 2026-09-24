@@ -8,6 +8,41 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+_MAX_CSV_CELL_LENGTH = 2000
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula characters so exported cells stay data."""
+    if not isinstance(value, str):
+        return value
+    if len(value) > _MAX_CSV_CELL_LENGTH:
+        value = value[:_MAX_CSV_CELL_LENGTH]
+    if value.lstrip(" \t\r\n")[:1] in _CSV_FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
+
+def neutralize_csv_dataframe(df: Any) -> Any:
+    """Neutralize formula-like string cells in a DataFrame before CSV export."""
+    if not HAS_PANDAS or df is None:
+        return df
+    return df.map(neutralize_csv_value)
+
+
+def confine_to_project(path: Path | str, *, root: Path | None = None) -> Path:
+    """Resolve ``path`` and reject destinations outside ``root``."""
+    base = (root or PROJECT_ROOT).resolve()
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(base) or resolved == base:
+        raise ValueError("Path escapes the project directory")
+    return resolved
+
+
 # Re-export for convenience
 try:
     import pandas as pd
@@ -98,12 +133,12 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = confine_to_project(filepath)
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    neutralize_csv_dataframe(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
