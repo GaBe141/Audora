@@ -8,6 +8,23 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def neutralize_csv_cell(value: Any) -> Any:
+    """Keep exported CSV cells as data when they look like spreadsheet formulas.
+
+    Excel and similar tools treat cells that start with ``=``, ``+``, ``-``, or ``@``
+    as formulas, including when those characters follow leading whitespace.
+    """
+    if not isinstance(value, str) or value == "":
+        return value
+    stripped = value.lstrip(" \t\r\n")
+    if value[0] in "\t\r\n" or stripped[:1] in _CSV_FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
+
 # Re-export for convenience
 try:
     import pandas as pd

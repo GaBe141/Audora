@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,53 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisSignedJson:
+    """Redis payloads are signed JSON. Pickle envelopes are rejected."""
+
+    def _backend(self) -> RedisCacheBackend:
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-signing-key"
+        backend._key_prefix = "audora"
+        return backend
+
+    def test_round_trip_json_object(self):
+        backend = self._backend()
+        raw = backend._serialize({"artist": "Ada", "score": 1})
+        assert backend._deserialize(raw) == {"artist": "Ada", "score": 1}
+
+    def test_rejects_pickle_envelope_version(self):
+        backend = self._backend()
+        raw = json.dumps(
+            {"v": 1, "alg": "HMAC-SHA256", "sig": "abc", "payload": "pickle-bytes"}
+        ).encode()
+        assert backend._deserialize(raw) is None
+
+    def test_clear_deletes_only_prefix_and_coerces_cursor(self):
+        backend = self._backend()
+
+        class _Client:
+            def __init__(self):
+                self.deleted: list[list[bytes]] = []
+                self.flush_called = False
+
+            def scan(self, cursor, match, count):
+                assert match == "audora:*"
+                assert count == 200
+                if int(cursor) == 0:
+                    return (b"5", [b"audora:one"])
+                return (0, [])
+
+            def delete(self, *keys):
+                self.deleted.append(list(keys))
+                return len(keys)
+
+            def flushdb(self):
+                self.flush_called = True
+
+        client = _Client()
+        backend._client = client
+        backend.clear()
+        assert client.deleted == [[b"audora:one"]]
+        assert client.flush_called is False
