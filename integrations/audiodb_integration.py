@@ -6,6 +6,8 @@ from typing import Any
 import pandas as pd
 import requests
 
+from core.security_utils import harden_requests_session, is_audiodb_key, require_safe_api_path
+
 # Note: config import is optional for standalone execution
 
 BASE_URL = "https://www.theaudiodb.com/api/v1/json"
@@ -15,8 +17,10 @@ class AudioDBAPI:
     """AudioDB API client for artist biographies, discographies, and metadata."""
 
     def __init__(self, api_key: str | None = None):
+        if api_key is not None and not is_audiodb_key(api_key):
+            raise ValueError("Invalid AudioDB API key")
         self.api_key = api_key
-        self.session = requests.Session()
+        self.session = harden_requests_session(requests.Session())
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second
 
@@ -41,9 +45,13 @@ class AudioDBAPI:
             url = f"{BASE_URL}/123/{endpoint}"  # Free API key is 123
 
         try:
-            response = self.session.get(url, params=params)
+            require_safe_api_path(endpoint)
+            response = self.session.get(url, params=params, timeout=30, allow_redirects=False)
             response.raise_for_status()
             return response.json()
+        except ValueError as exc:
+            print(f"AudioDB API error: {exc}")
+            return None
         except requests.exceptions.RequestException as e:
             print(f"AudioDB API error: {e}")
             return None

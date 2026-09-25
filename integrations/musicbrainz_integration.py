@@ -6,6 +6,8 @@ from typing import Any
 import pandas as pd
 import requests
 
+from core.security_utils import harden_requests_session, is_musicbrainz_id, require_safe_api_path
+
 BASE_URL = "https://musicbrainz.org/ws/2/"
 USER_AGENT = "SpotifyInsights/1.0 (https://github.com/GaBe141/spotify-insights)"
 
@@ -14,7 +16,7 @@ class MusicBrainzAPI:
     """MusicBrainz API client with rate limiting and comprehensive metadata fetching."""
 
     def __init__(self):
-        self.session = requests.Session()
+        self.session = harden_requests_session(requests.Session())
         self.session.headers.update({"User-Agent": USER_AGENT})
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second to be respectful
@@ -34,9 +36,15 @@ class MusicBrainzAPI:
         params.update({"fmt": "json"})
 
         try:
-            response = self.session.get(f"{BASE_URL}{endpoint}", params=params)
+            require_safe_api_path(endpoint)
+            response = self.session.get(
+                f"{BASE_URL}{endpoint}", params=params, timeout=30, allow_redirects=False
+            )
             response.raise_for_status()
             return response.json()
+        except ValueError as exc:
+            print(f"MusicBrainz API error: {exc}")
+            return None
         except requests.exceptions.RequestException as e:
             print(f"MusicBrainz API error: {e}")
             return None
@@ -56,6 +64,8 @@ class MusicBrainzAPI:
             "inc": "artist-rels+recording-rels+release-rels+work-rels+url-rels+tags+ratings+genres"
         }
 
+        if not is_musicbrainz_id(mbid):
+            return None
         return self._make_request(f"artist/{mbid}", params)
 
     def get_artist_releases(self, mbid: str) -> list[dict]:

@@ -8,6 +8,8 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
+from core.security_utils import harden_requests_session, is_chart_country, is_iso_date
+
 CHARTS_BASE_URL = "https://charts.spotify.com"
 
 
@@ -15,7 +17,7 @@ class SpotifyChartsAPI:
     """Spotify Charts scraper for real streaming data."""
 
     def __init__(self):
-        self.session = requests.Session()
+        self.session = harden_requests_session(requests.Session())
         # Use a realistic user agent
         self.session.headers.update(
             {
@@ -46,10 +48,14 @@ class SpotifyChartsAPI:
             # Default to yesterday (charts are usually 1 day behind)
             date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        url = f"{CHARTS_BASE_URL}/charts/view/regional-{country_code}-daily/{date}"
+        country = country_code.strip().lower()
+        if not is_chart_country(country) or not is_iso_date(date):
+            return pd.DataFrame()
+
+        url = f"{CHARTS_BASE_URL}/charts/view/regional-{country}-daily/{date}"
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=30, allow_redirects=False)
             response.raise_for_status()
 
             # Parse the HTML
@@ -138,10 +144,14 @@ class SpotifyChartsAPI:
         if date is None:
             date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        url = f"{CHARTS_BASE_URL}/charts/view/viral-{country_code}-daily/{date}"
+        country = country_code.strip().lower()
+        if not is_chart_country(country) or not is_iso_date(date):
+            return pd.DataFrame()
+
+        url = f"{CHARTS_BASE_URL}/charts/view/viral-{country}-daily/{date}"
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=30, allow_redirects=False)
             response.raise_for_status()
 
             BeautifulSoup(response.content, "html.parser")

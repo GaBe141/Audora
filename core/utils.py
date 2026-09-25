@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.security_utils import confine_project_path, neutralize_csv_dataframe
+
 logger = logging.getLogger(__name__)
 
 # Re-export for convenience
@@ -98,12 +100,12 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = confine_project_path(filepath)
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    neutralize_csv_dataframe(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
