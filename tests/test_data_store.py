@@ -103,6 +103,10 @@ class TestUpdateTrendsBulk:
         assert data_store.update_trends_bulk([], {"score": 1}) == 0
         assert data_store.update_trends_bulk(["x"], {}) == 0
 
+    def test_export_rejects_path_outside_project(self, data_store, tmp_path):
+        with pytest.raises(ValueError, match="project directory"):
+            data_store.export_to_csv("trends", str(tmp_path / "out.csv"))
+
     def test_update_trends_bulk_rejects_invalid_fields(self, data_store, sample_trends):
         data_store.save_trends_bulk(sample_trends)
         with pytest.raises(ValueError, match="Invalid update fields"):

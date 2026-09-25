@@ -1,5 +1,6 @@
 """MusicBrainz API integration for comprehensive music metadata and artist relationships."""
 
+import re
 import time
 from typing import Any
 
@@ -7,6 +8,10 @@ import pandas as pd
 import requests
 
 BASE_URL = "https://musicbrainz.org/ws/2/"
+_ENDPOINT_RE = re.compile(r"^[a-z0-9][a-z0-9_./-]{0,200}$")
+_MBID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 USER_AGENT = "SpotifyInsights/1.0 (https://github.com/GaBe141/spotify-insights)"
 
 
@@ -15,6 +20,7 @@ class MusicBrainzAPI:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.headers.update({"User-Agent": USER_AGENT})
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second to be respectful
@@ -34,12 +40,32 @@ class MusicBrainzAPI:
         params.update({"fmt": "json"})
 
         try:
-            response = self.session.get(f"{BASE_URL}{endpoint}", params=params)
+            safe_endpoint = self._safe_endpoint(endpoint)
+            response = self.session.get(
+                f"{BASE_URL}{safe_endpoint}", params=params, timeout=30, allow_redirects=False
+            )
+            if response.status_code in {301, 302, 303, 307, 308}:
+                print("MusicBrainz API error: unexpected redirect")
+                return None
             response.raise_for_status()
             return response.json()
-        except requests.exceptions.RequestException as e:
+        except (requests.exceptions.RequestException, ValueError) as e:
             print(f"MusicBrainz API error: {e}")
             return None
+
+    def _safe_endpoint(self, endpoint: str) -> str:
+        """Reject endpoints that can escape the MusicBrainz API root."""
+        if not endpoint or ".." in endpoint or endpoint.startswith(("/", "\\")) or "\\" in endpoint:
+            raise ValueError("Invalid MusicBrainz endpoint")
+        if not _ENDPOINT_RE.fullmatch(endpoint):
+            raise ValueError("Invalid MusicBrainz endpoint")
+        return endpoint
+
+    def _safe_mbid(self, mbid: str) -> str | None:
+        """Allow only UUID MusicBrainz identifiers in URL paths."""
+        if not _MBID_RE.fullmatch(mbid or ""):
+            return None
+        return mbid
 
     def search_artist(self, artist_name: str) -> dict | None:
         """Search for an artist by name."""
@@ -52,14 +78,19 @@ class MusicBrainzAPI:
 
     def get_artist_details(self, mbid: str) -> dict | None:
         """Get detailed artist information including relationships."""
+        safe_mbid = self._safe_mbid(mbid)
+        if safe_mbid is None:
+            return None
         params = {
             "inc": "artist-rels+recording-rels+release-rels+work-rels+url-rels+tags+ratings+genres"
         }
 
-        return self._make_request(f"artist/{mbid}", params)
+        return self._make_request(f"artist/{safe_mbid}", params)
 
     def get_artist_releases(self, mbid: str) -> list[dict]:
         """Get all releases for an artist."""
+        if self._safe_mbid(mbid) is None:
+            return []
         params = {"artist": mbid, "inc": "release-groups+media+recordings", "limit": 100}
 
         result = self._make_request("release", params)

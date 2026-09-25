@@ -1,6 +1,7 @@
 """Spotify Charts web scraping for real streaming data and trending analysis."""
 
 import json
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -9,6 +10,8 @@ import requests
 from bs4 import BeautifulSoup
 
 CHARTS_BASE_URL = "https://charts.spotify.com"
+_COUNTRY_RE = re.compile(r"^(?:[a-z]{2}|global)$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class SpotifyChartsAPI:
@@ -16,6 +19,7 @@ class SpotifyChartsAPI:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         # Use a realistic user agent
         self.session.headers.update(
             {
@@ -42,14 +46,23 @@ class SpotifyChartsAPI:
         """
         self._rate_limit()
 
+        country = (country_code or "").lower()
+        if not _COUNTRY_RE.fullmatch(country):
+            return pd.DataFrame()
+
         if date is None:
             # Default to yesterday (charts are usually 1 day behind)
             date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        if not _DATE_RE.fullmatch(date):
+            return pd.DataFrame()
 
-        url = f"{CHARTS_BASE_URL}/charts/view/regional-{country_code}-daily/{date}"
+        url = f"{CHARTS_BASE_URL}/charts/view/regional-{country}-daily/{date}"
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=30, allow_redirects=False)
+            if response.status_code in {301, 302, 303, 307, 308}:
+                print("Error fetching Spotify Charts: unexpected redirect")
+                return pd.DataFrame()
             response.raise_for_status()
 
             # Parse the HTML
