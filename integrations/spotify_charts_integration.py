@@ -1,6 +1,7 @@
 """Spotify Charts web scraping for real streaming data and trending analysis."""
 
 import json
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -9,6 +10,8 @@ import requests
 from bs4 import BeautifulSoup
 
 CHARTS_BASE_URL = "https://charts.spotify.com"
+_COUNTRY_RE = re.compile(r"(?:global|[a-z]{2})")
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 class SpotifyChartsAPI:
@@ -16,6 +19,7 @@ class SpotifyChartsAPI:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         # Use a realistic user agent
         self.session.headers.update(
             {
@@ -33,6 +37,16 @@ class SpotifyChartsAPI:
             time.sleep(self.rate_limit_delay - time_since_last)
         self.last_request_time = time.time()
 
+    def _chart_url(self, kind: str, country_code: str, date: str) -> str | None:
+        """Build a charts URL only for allowlisted country codes and dates."""
+        if kind not in {"regional", "viral"}:
+            return None
+        if _COUNTRY_RE.fullmatch(country_code or "") is None:
+            return None
+        if _DATE_RE.fullmatch(date or "") is None:
+            return None
+        return f"{CHARTS_BASE_URL}/charts/view/{kind}-{country_code}-daily/{date}"
+
     def get_top_200_daily(self, country_code: str = "global", date: str = None) -> pd.DataFrame:
         """Get top 200 tracks for a specific date and country.
 
@@ -40,16 +54,19 @@ class SpotifyChartsAPI:
             country_code: Country code (e.g., 'us', 'gb', 'global')
             date: Date in YYYY-MM-DD format, defaults to latest
         """
-        self._rate_limit()
-
         if date is None:
             # Default to yesterday (charts are usually 1 day behind)
             date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        url = f"{CHARTS_BASE_URL}/charts/view/regional-{country_code}-daily/{date}"
+        url = self._chart_url("regional", country_code, date)
+        if url is None:
+            return pd.DataFrame()
+        self._rate_limit()
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=15, allow_redirects=False)
+            if response.status_code in {301, 302, 303, 307, 308}:
+                return pd.DataFrame()
             response.raise_for_status()
 
             # Parse the HTML
@@ -133,15 +150,18 @@ class SpotifyChartsAPI:
 
     def get_viral_50_daily(self, country_code: str = "global", date: str = None) -> pd.DataFrame:
         """Get viral 50 tracks for a specific date and country."""
-        self._rate_limit()
-
         if date is None:
             date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        url = f"{CHARTS_BASE_URL}/charts/view/viral-{country_code}-daily/{date}"
+        url = self._chart_url("viral", country_code, date)
+        if url is None:
+            return pd.DataFrame()
+        self._rate_limit()
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=15, allow_redirects=False)
+            if response.status_code in {301, 302, 303, 307, 308}:
+                return pd.DataFrame()
             response.raise_for_status()
 
             BeautifulSoup(response.content, "html.parser")

@@ -1,5 +1,6 @@
 """MusicBrainz API integration for comprehensive music metadata and artist relationships."""
 
+import re
 import time
 from typing import Any
 
@@ -8,6 +9,10 @@ import requests
 
 BASE_URL = "https://musicbrainz.org/ws/2/"
 USER_AGENT = "SpotifyInsights/1.0 (https://github.com/GaBe141/spotify-insights)"
+_ENDPOINT_RE = re.compile(r"[A-Za-z0-9_./-]{1,200}")
+_MBID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
 
 
 class MusicBrainzAPI:
@@ -15,6 +20,7 @@ class MusicBrainzAPI:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.headers.update({"User-Agent": USER_AGENT})
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second to be respectful
@@ -27,17 +33,35 @@ class MusicBrainzAPI:
             time.sleep(self.rate_limit_delay - time_since_last)
         self.last_request_time = time.time()
 
+    def _safe_endpoint(self, endpoint: str) -> str:
+        """Reject endpoint values that can escape the MusicBrainz API path."""
+        if not isinstance(endpoint, str) or _ENDPOINT_RE.fullmatch(endpoint) is None:
+            raise ValueError("Invalid MusicBrainz endpoint")
+        if endpoint.startswith("/") or ".." in endpoint.split("/"):
+            raise ValueError("Invalid MusicBrainz endpoint")
+        return endpoint
+
     def _make_request(self, endpoint: str, params: dict[str, Any]) -> dict | None:
         """Make a request to MusicBrainz API with rate limiting."""
-        self._rate_limit()
+        try:
+            safe_endpoint = self._safe_endpoint(endpoint)
+        except ValueError as exc:
+            print(f"MusicBrainz API error: {exc}")
+            return None
 
+        self._rate_limit()
         params.update({"fmt": "json"})
 
         try:
-            response = self.session.get(f"{BASE_URL}{endpoint}", params=params)
+            response = self.session.get(
+                f"{BASE_URL}{safe_endpoint}", params=params, timeout=15, allow_redirects=False
+            )
+            if response.status_code in {301, 302, 303, 307, 308}:
+                print("MusicBrainz API error: redirect blocked")
+                return None
             response.raise_for_status()
             return response.json()
-        except requests.exceptions.RequestException as e:
+        except (requests.exceptions.RequestException, ValueError) as e:
             print(f"MusicBrainz API error: {e}")
             return None
 
@@ -52,6 +76,8 @@ class MusicBrainzAPI:
 
     def get_artist_details(self, mbid: str) -> dict | None:
         """Get detailed artist information including relationships."""
+        if _MBID_RE.fullmatch(mbid or "") is None:
+            return None
         params = {
             "inc": "artist-rels+recording-rels+release-rels+work-rels+url-rels+tags+ratings+genres"
         }

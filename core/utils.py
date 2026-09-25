@@ -16,6 +16,40 @@ try:
 except ImportError:
     HAS_PANDAS = False
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula text so exported CSV cells stay data."""
+    if not isinstance(value, str) or value == "":
+        return value
+    stripped = value.lstrip(" \t\r\n")
+    if value[0] in "\t\r" or stripped[:1] in _CSV_FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
+
+def neutralize_csv_frame(df: Any) -> Any:
+    """Neutralize formula prefixes in every column of a DataFrame."""
+    if not HAS_PANDAS:
+        raise ImportError("pandas is required for neutralize_csv_frame")
+    safe = df.copy()
+    for column in safe.columns:
+        safe[column] = safe[column].map(neutralize_csv_value)
+    return safe
+
+
+def confine_to_project(filepath: Path | str) -> Path:
+    """Resolve a path and reject destinations outside the project tree."""
+    raw = Path(filepath)
+    candidate = raw if raw.is_absolute() else _PROJECT_ROOT / raw
+    resolved = candidate.resolve()
+    root = _PROJECT_ROOT.resolve()
+    if not resolved.is_relative_to(root):
+        raise ValueError("Path must stay inside the project directory")
+    return resolved
+
 
 # JSON utilities
 def read_json(path: Path | str, default: Any = None) -> Any:
@@ -98,12 +132,12 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = confine_to_project(filepath)
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    neutralize_csv_frame(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 

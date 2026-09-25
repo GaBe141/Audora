@@ -3,8 +3,15 @@
 import sys
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
+
+# integrations.lastfm_integration imports integrations.config, which is not in the tree.
+if "integrations.config" not in sys.modules:
+    _config_mock = MagicMock()
+    _config_mock.get_config = lambda: MagicMock(get_lastfm_config=lambda: {"api_key": "test_key"})
+    sys.modules["integrations.config"] = _config_mock
 
 # Add repository root to path so imports like "from core.*" and "from analytics.*" work
 REPO_ROOT = Path(__file__).resolve().parent.parent
