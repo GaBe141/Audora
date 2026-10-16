@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import confine_path, neutralize_csv_frame, project_root
 
 
 @dataclass
@@ -61,6 +62,7 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+
     _ALLOWED_BULK_UPDATE_FIELDS = {
         "platform",
         "track_name",
@@ -76,8 +78,9 @@ class EnhancedMusicDataStore:
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = db_path
-        self.backup_dir = Path(backup_dir)
-        self.backup_dir.mkdir(exist_ok=True)
+        db_directory = Path(self.db_path).resolve().parent
+        self.backup_dir = confine_path(backup_dir, [project_root(), db_directory])
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logging.getLogger(__name__)
 
         # Initialize cache
@@ -787,7 +790,9 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        invalid_fields = [field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS]
+        invalid_fields = [
+            field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS
+        ]
         if invalid_fields:
             raise ValueError(
                 "Invalid update fields: "
@@ -919,7 +924,10 @@ class EnhancedMusicDataStore:
     def create_backup(self) -> str:
         """Create a backup of the database."""
         backup_filename = f"music_trends_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        backup_path = self.backup_dir / backup_filename
+        db_directory = Path(self.db_path).resolve().parent
+        backup_path = confine_path(
+            Path(self.backup_dir) / backup_filename, [project_root(), db_directory]
+        )
 
         with self.get_connection() as source_conn, sqlite3.connect(backup_path) as backup_conn:
             source_conn.backup(backup_conn)
@@ -958,13 +966,15 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            db_directory = Path(self.db_path).resolve().parent
+            output_path = confine_path(filepath, [project_root(), db_directory])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            export_frame = df.copy()
+            neutralize_csv_frame(export_frame)
+            export_frame.to_csv(output_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {output_path}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(output_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
@@ -1167,10 +1177,7 @@ class EnhancedMusicDataStore:
         rmse = float((errors**2).mean() ** 0.5)
 
         acc_by_platform = (
-            evaluated_df.groupby("platform")["accuracy_score"]
-            .mean()
-            .round(3)
-            .to_dict()
+            evaluated_df.groupby("platform")["accuracy_score"].mean().round(3).to_dict()
         )
 
         return {
