@@ -5,6 +5,7 @@ Handles trending data, viral predictions, and cross-platform analysis.
 
 import json
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import confine_path, neutralize_csv_frame, project_root
 
 
 @dataclass
@@ -49,6 +51,23 @@ class ViralPrediction:
     accuracy_score: float | None = None
 
 
+def database_path_from_config(config: dict[str, Any]) -> Path:
+    """Return a database path that stays inside the project.
+
+    Accepts either ``{"path": "..."}`` or the setup-script shape
+    ``{"database": {"path": "..."}}``. A working-directory config cannot
+    point SQLite at an arbitrary file.
+    """
+    raw_path = "data/enhanced_music_trends.db"
+    if isinstance(config, dict):
+        nested = config.get("database")
+        if isinstance(nested, dict) and isinstance(nested.get("path"), str):
+            raw_path = nested["path"]
+        elif isinstance(config.get("path"), str):
+            raw_path = config["path"]
+    return confine_path(raw_path)
+
+
 class EnhancedMusicDataStore:
     """
     Enhanced data persistence system for music discovery.
@@ -61,6 +80,7 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+
     _ALLOWED_BULK_UPDATE_FIELDS = {
         "platform",
         "track_name",
@@ -75,9 +95,12 @@ class EnhancedMusicDataStore:
     }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
-        self.db_path = db_path
-        self.backup_dir = Path(backup_dir)
-        self.backup_dir.mkdir(exist_ok=True)
+        self.db_path = self._normalize_db_path(db_path)
+        db_directory = (
+            project_root() if self.db_path == ":memory:" else Path(self.db_path).resolve().parent
+        )
+        self.backup_dir = confine_path(backup_dir, [project_root(), db_directory])
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logging.getLogger(__name__)
 
         # Initialize cache
@@ -95,6 +118,31 @@ class EnhancedMusicDataStore:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=10000")
             conn.execute("PRAGMA temp_store=memory")
+        self._restrict_database_permissions()
+
+    @staticmethod
+    def _normalize_db_path(db_path: str) -> str:
+        """Keep relative databases inside the project and reject symlinks.
+
+        A relative path is anchored at the project root, not the process
+        working directory. ``:memory:`` stays in-process and is not a file.
+        """
+        if db_path == ":memory:":
+            return db_path
+        candidate = Path(db_path)
+        if not candidate.is_absolute():
+            candidate = confine_path(candidate)
+        if candidate.is_symlink():
+            raise ValueError("Database path must not be a symlink")
+        return str(candidate)
+
+    def _restrict_database_permissions(self) -> None:
+        """Make a file-backed database readable only by the current user."""
+        if self.db_path == ":memory:" or os.name == "nt":
+            return
+        db_file = Path(self.db_path)
+        if db_file.is_file() and not db_file.is_symlink():
+            db_file.chmod(0o600)
 
     def _get_pooled_connection(self) -> sqlite3.Connection:
         """Get a connection from the pool or create a new one."""
@@ -787,7 +835,9 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        invalid_fields = [field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS]
+        invalid_fields = [
+            field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS
+        ]
         if invalid_fields:
             raise ValueError(
                 "Invalid update fields: "
@@ -919,7 +969,10 @@ class EnhancedMusicDataStore:
     def create_backup(self) -> str:
         """Create a backup of the database."""
         backup_filename = f"music_trends_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        backup_path = self.backup_dir / backup_filename
+        db_directory = Path(self.db_path).resolve().parent
+        backup_path = confine_path(
+            Path(self.backup_dir) / backup_filename, [project_root(), db_directory]
+        )
 
         with self.get_connection() as source_conn, sqlite3.connect(backup_path) as backup_conn:
             source_conn.backup(backup_conn)
@@ -958,13 +1011,15 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            db_directory = Path(self.db_path).resolve().parent
+            output_path = confine_path(filepath, [project_root(), db_directory])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            export_frame = df.copy()
+            neutralize_csv_frame(export_frame)
+            export_frame.to_csv(output_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {output_path}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(output_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
@@ -1167,10 +1222,7 @@ class EnhancedMusicDataStore:
         rmse = float((errors**2).mean() ** 0.5)
 
         acc_by_platform = (
-            evaluated_df.groupby("platform")["accuracy_score"]
-            .mean()
-            .round(3)
-            .to_dict()
+            evaluated_df.groupby("platform")["accuracy_score"].mean().round(3).to_dict()
         )
 
         return {

@@ -20,13 +20,12 @@ Mood Categories:
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from core.utils import load_dataframe, save_report
+from core.utils import confine_child_path, confine_path, load_dataframe, save_report
 
 
 class MoodCategory(Enum):
@@ -139,13 +138,13 @@ class MoodPlaylistGenerator:
 
     def __init__(self, data_dir: str = "data"):
         """Initialize the mood playlist generator."""
-        self.data_dir = Path(data_dir)
+        self.data_dir = confine_path(data_dir)
         self.tracks_df: pd.DataFrame | None = None
         self.mood_playlists: dict[MoodCategory, list[dict[str, Any]]] = {}
 
     def load_tracks(self, filename: str = "simple_top_tracks.csv") -> pd.DataFrame:
         """Load track data from CSV using centralized utility."""
-        filepath = self.data_dir / filename
+        filepath = confine_child_path(self.data_dir, filename)
 
         # Define expected columns
         expected_cols = [

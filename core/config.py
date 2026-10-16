@@ -5,6 +5,7 @@ import sys
 import warnings
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -19,7 +20,7 @@ class SecureConfig:
             env_file: Path to .env file. If None, searches for .env in project root.
         """
         self.project_root = Path(__file__).resolve().parent.parent
-        self.env_file = env_file or (self.project_root / ".env")
+        self.env_file = Path(env_file) if env_file else (self.project_root / ".env")
         self._config: dict[str, Any] = {}
         self._load_environment()
 
@@ -33,8 +34,8 @@ class SecureConfig:
             )
             return
 
-        # Load with explicit encoding and override
-        load_dotenv(dotenv_path=str(self.env_file), override=True, encoding="utf-8")
+        # Do not let a local .env file replace variables already set in the environment.
+        load_dotenv(dotenv_path=str(self.env_file), override=False, encoding="utf-8")
 
         # Validate file permissions (Unix-like systems)
         if hasattr(os, "stat") and not sys.platform.startswith("win"):
@@ -57,12 +58,8 @@ class SecureConfig:
             ),
         }
 
-        # Validate redirect URI format
-        if not config["redirect_uri"].startswith(("http://localhost", "http://127.0.0.1")):
-            raise ValueError(
-                f"Invalid redirect URI: {config['redirect_uri']}\n"
-                "For development, use http://localhost or http://127.0.0.1"
-            )
+        # Require an exact loopback host. startswith() would accept localhost.evil.com.
+        self._validate_redirect_uri(config["redirect_uri"])
 
         return config
 
@@ -83,6 +80,22 @@ class SecureConfig:
             )
 
         return {"api_key": api_key, "shared_secret": shared_secret or ""}
+
+    @staticmethod
+    def _validate_redirect_uri(redirect_uri: str) -> None:
+        """Accept only HTTP loopback redirect URIs with an exact host."""
+        parsed = urlparse(redirect_uri)
+        host = (parsed.hostname or "").lower()
+        if (
+            parsed.scheme != "http"
+            or host not in {"localhost", "127.0.0.1"}
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError(
+                f"Invalid redirect URI: {redirect_uri}\n"
+                "For development, use http://localhost or http://127.0.0.1"
+            )
 
     def _get_required_env(self, key: str) -> str:
         """Get required environment variable with validation."""

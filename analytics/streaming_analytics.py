@@ -14,6 +14,7 @@ sys.path.append(str(Path(__file__).parent / "src"))
 sys.path.append(str(Path(__file__).parent.parent / "core"))
 
 from analytics.statistical_analysis import StreamingDataQualityAnalyzer, StreamingForecastingEngine
+from core.utils import confine_child_path, confine_path, write_json
 from visualization.statistical_viz import (
     StatisticalVisualizationEngine,
     visualize_comprehensive_results,
@@ -26,7 +27,7 @@ class AdvancedStreamingAnalytics:
     """Advanced analytics combining multi-source data with statistical forecasting."""
 
     def __init__(self, data_dir: str = "data", verbose: bool = True):
-        self.data_dir = Path(data_dir)
+        self.data_dir = confine_path(data_dir)
         self.verbose = verbose
 
         # Initialize analyzers
@@ -61,7 +62,7 @@ class AdvancedStreamingAnalytics:
         loaded_data = {}
 
         for source, filename in data_files.items():
-            file_path = self.data_dir / filename
+            file_path = confine_child_path(self.data_dir, filename)
             if file_path.exists():
                 try:
                     df = pd.read_csv(file_path)
@@ -452,7 +453,7 @@ class AdvancedStreamingAnalytics:
         """Create comprehensive analysis report with visualizations."""
         print("\n📊 Creating comprehensive analysis report...")
 
-        output_path = Path(output_dir)
+        output_path = confine_path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
         # Combine all results
@@ -470,9 +471,6 @@ class AdvancedStreamingAnalytics:
                 "forecast_analyses": len(self.forecasts),
             },
         }
-
-        # Save results using centralized utility
-        from core.utils import write_json
 
         results_file = output_path / "comprehensive_analysis_results.json"
         write_json(str(results_file), comprehensive_results)
