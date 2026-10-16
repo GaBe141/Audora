@@ -17,6 +17,15 @@ from core.utils import write_json
 from integrations.trending_schema import TrendingSchema
 
 
+def credentialed_session() -> aiohttp.ClientSession:
+    """Open an API session that ignores proxy environment variables.
+
+    Callers must pass ``allow_redirects=False`` so a 3xx response cannot send
+    bearer tokens or API keys to a different host.
+    """
+    return aiohttp.ClientSession(trust_env=False)
+
+
 class Platform(Enum):
     """Social media platforms for music discovery."""
 
@@ -128,16 +137,19 @@ class TikTokMusicAPI:
             "fields": "music_id,title,artist,play_count,video_count,trend_score",
         }
 
+        headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
-            async with aiohttp.ClientSession() as session:
-                headers = {"Authorization": f"Bearer {self.api_key}"}
-                async with session.get(endpoint, params=params, headers=headers) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return data.get("data", [])
-                    else:
-                        print(f"TikTok API error: {response.status}")
-                        return []
+            async with (
+                credentialed_session() as session,
+                session.get(
+                    endpoint, params=params, headers=headers, allow_redirects=False
+                ) as response,
+            ):
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("data", [])
+                print(f"TikTok API error: {response.status}")
+                return []
         except Exception as e:
             print(f"TikTok API exception: {e}")
             return []
@@ -151,14 +163,17 @@ class TikTokMusicAPI:
             "fields": "video_count,play_count,share_count,hashtag_count,age_distribution,region_distribution",
         }
 
+        headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
-            async with aiohttp.ClientSession() as session:
-                headers = {"Authorization": f"Bearer {self.api_key}"}
-                async with session.get(endpoint, params=params, headers=headers) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    else:
-                        return {"error": f"API error: {response.status}"}
+            async with (
+                credentialed_session() as session,
+                session.get(
+                    endpoint, params=params, headers=headers, allow_redirects=False
+                ) as response,
+            ):
+                if response.status == 200:
+                    return await response.json()
+                return {"error": f"API error: {response.status}"}
         except Exception as e:
             return {"error": str(e)}
 
@@ -172,15 +187,18 @@ class TikTokMusicAPI:
             "fields": "music_id,title,artist,video_count,engagement_rate",
         }
 
+        headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
-            async with aiohttp.ClientSession() as session:
-                headers = {"Authorization": f"Bearer {self.api_key}"}
-                async with session.get(endpoint, params=params, headers=headers) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return data.get("data", [])
-                    else:
-                        return []
+            async with (
+                credentialed_session() as session,
+                session.get(
+                    endpoint, params=params, headers=headers, allow_redirects=False
+                ) as response,
+            ):
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("data", [])
+                return []
         except Exception as e:
             print(f"Hashtag music tracking error: {e}")
             return []
@@ -210,8 +228,8 @@ class YouTubeMusicAPI:
 
         try:
             async with (
-                aiohttp.ClientSession() as session,
-                session.get(endpoint, params=params) as response,
+                credentialed_session() as session,
+                session.get(endpoint, params=params, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     data = await response.json()
@@ -241,8 +259,8 @@ class YouTubeMusicAPI:
 
         try:
             async with (
-                aiohttp.ClientSession() as session,
-                session.get(endpoint, params=params) as response,
+                credentialed_session() as session,
+                session.get(endpoint, params=params, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     data = await response.json()
@@ -265,8 +283,8 @@ class YouTubeMusicAPI:
 
         try:
             async with (
-                aiohttp.ClientSession() as session,
-                session.get(endpoint, params=params) as response,
+                credentialed_session() as session,
+                session.get(endpoint, params=params, allow_redirects=False) as response,
             ):
                 if response.status == 200:
                     data = await response.json()
@@ -297,16 +315,19 @@ class TwitterMusicAPI:
             "user.fields": "public_metrics,verified,location",
         }
 
+        headers = {"Authorization": f"Bearer {self.bearer_token}"}
         try:
-            async with aiohttp.ClientSession() as session:
-                headers = {"Authorization": f"Bearer {self.bearer_token}"}
-                async with session.get(endpoint, params=params, headers=headers) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return data.get("data", [])
-                    else:
-                        print(f"Twitter API error: {response.status}")
-                        return []
+            async with (
+                credentialed_session() as session,
+                session.get(
+                    endpoint, params=params, headers=headers, allow_redirects=False
+                ) as response,
+            ):
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("data", [])
+                print(f"Twitter API error: {response.status}")
+                return []
         except Exception as e:
             print(f"Twitter API exception: {e}")
             return []
@@ -317,32 +338,35 @@ class TwitterMusicAPI:
 
         params = {"id": location_id}  # 1 = Worldwide, 23424977 = US
 
+        headers = {"Authorization": f"Bearer {self.bearer_token}"}
         try:
-            async with aiohttp.ClientSession() as session:
-                headers = {"Authorization": f"Bearer {self.bearer_token}"}
-                async with session.get(endpoint, params=params, headers=headers) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        trends = data[0].get("trends", []) if data else []
-                        # Filter for music-related trends
-                        music_trends = [
-                            trend
-                            for trend in trends
-                            if any(
-                                keyword in trend["name"].lower()
-                                for keyword in [
-                                    "music",
-                                    "song",
-                                    "album",
-                                    "artist",
-                                    "#np",
-                                    "#nowplaying",
-                                ]
-                            )
-                        ]
-                        return music_trends
-                    else:
-                        return []
+            async with (
+                credentialed_session() as session,
+                session.get(
+                    endpoint, params=params, headers=headers, allow_redirects=False
+                ) as response,
+            ):
+                if response.status == 200:
+                    data = await response.json()
+                    trends = data[0].get("trends", []) if data else []
+                    # Filter for music-related trends
+                    music_trends = [
+                        trend
+                        for trend in trends
+                        if any(
+                            keyword in trend["name"].lower()
+                            for keyword in [
+                                "music",
+                                "song",
+                                "album",
+                                "artist",
+                                "#np",
+                                "#nowplaying",
+                            ]
+                        )
+                    ]
+                    return music_trends
+                return []
         except Exception as e:
             print(f"Twitter trends error: {e}")
             return []

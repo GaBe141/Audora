@@ -1,5 +1,6 @@
 """MusicBrainz API integration for comprehensive music metadata and artist relationships."""
 
+import re
 import time
 from typing import Any
 
@@ -8,6 +9,8 @@ import requests
 
 BASE_URL = "https://musicbrainz.org/ws/2/"
 USER_AGENT = "SpotifyInsights/1.0 (https://github.com/GaBe141/spotify-insights)"
+_MBID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_ENDPOINT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9/_-]{0,80}$")
 
 
 class MusicBrainzAPI:
@@ -15,6 +18,7 @@ class MusicBrainzAPI:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.headers.update({"User-Agent": USER_AGENT})
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second to be respectful
@@ -32,9 +36,15 @@ class MusicBrainzAPI:
         self._rate_limit()
 
         params.update({"fmt": "json"})
+        if not isinstance(endpoint, str) or _ENDPOINT.fullmatch(endpoint) is None:
+            return None
+        if ".." in endpoint or endpoint.startswith(("/", "http")):
+            return None
 
         try:
-            response = self.session.get(f"{BASE_URL}{endpoint}", params=params)
+            response = self.session.get(
+                f"{BASE_URL}{endpoint}", params=params, timeout=10, allow_redirects=False
+            )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -52,6 +62,8 @@ class MusicBrainzAPI:
 
     def get_artist_details(self, mbid: str) -> dict | None:
         """Get detailed artist information including relationships."""
+        if not isinstance(mbid, str) or _MBID.fullmatch(mbid) is None:
+            return None
         params = {
             "inc": "artist-rels+recording-rels+release-rels+work-rels+url-rels+tags+ratings+genres"
         }
