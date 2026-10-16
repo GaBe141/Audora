@@ -1,6 +1,7 @@
 """MusicBrainz API integration for comprehensive music metadata and artist relationships."""
 
 import time
+import uuid
 from typing import Any
 
 import pandas as pd
@@ -15,6 +16,7 @@ class MusicBrainzAPI:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.headers.update({"User-Agent": USER_AGENT})
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second to be respectful
@@ -34,7 +36,9 @@ class MusicBrainzAPI:
         params.update({"fmt": "json"})
 
         try:
-            response = self.session.get(f"{BASE_URL}{endpoint}", params=params)
+            response = self.session.get(
+                f"{BASE_URL}{endpoint}", params=params, timeout=10, allow_redirects=False
+            )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -50,8 +54,16 @@ class MusicBrainzAPI:
             return result["artists"][0]
         return None
 
+    def _require_mbid(self, mbid: str) -> str:
+        """Accept only canonical MusicBrainz UUIDs in URL paths."""
+        try:
+            return str(uuid.UUID(str(mbid)))
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise ValueError("MusicBrainz id must be a UUID") from exc
+
     def get_artist_details(self, mbid: str) -> dict | None:
         """Get detailed artist information including relationships."""
+        mbid = self._require_mbid(mbid)
         params = {
             "inc": "artist-rels+recording-rels+release-rels+work-rels+url-rels+tags+ratings+genres"
         }
@@ -60,6 +72,7 @@ class MusicBrainzAPI:
 
     def get_artist_releases(self, mbid: str) -> list[dict]:
         """Get all releases for an artist."""
+        mbid = self._require_mbid(mbid)
         params = {"artist": mbid, "inc": "release-groups+media+recordings", "limit": 100}
 
         result = self._make_request("release", params)

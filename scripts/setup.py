@@ -6,11 +6,35 @@ Installs dependencies, configures services, and validates the system.
 
 import json
 import logging
+import os
 import platform
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+
+def _write_private_file(path: Path, content: str) -> None:
+    """Write a credential or config file without following a symlink."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise OSError(f"Refusing to write through symlink: {path}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    fd = os.open(path, flags, 0o600)
+    try:
+        if os.name != "nt":
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(content)
+    finally:
+        if fd != -1:
+            os.close(fd)
+
 
 # Enhanced package list with new dependencies
 ENHANCED_PACKAGES = [
@@ -191,8 +215,7 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
-                    json.dump(config_data, f, indent=2)
+                _write_private_file(config_path, json.dumps(config_data, indent=2))
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -473,8 +496,7 @@ System Status: {{ system_status }}
         for template_name, template_content in templates.items():
             template_path = self.templates_dir / template_name
             try:
-                with open(template_path, "w") as f:
-                    f.write(template_content.strip())
+                _write_private_file(template_path, template_content.strip())
                 self.logger.info(f"  Created template: {template_name}")
             except Exception as e:
                 self.logger.error(f"  Failed to create template {template_name}: {e}")
@@ -522,8 +544,7 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
-                f.write(env_template.strip())
+            _write_private_file(env_path, env_template.strip())
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True

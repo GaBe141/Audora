@@ -2,7 +2,7 @@
 
 import pytest
 
-from core.data_store import EnhancedMusicDataStore
+from core.data_store import EnhancedMusicDataStore, database_path_from_config
 
 
 class TestDataStorePooling:
@@ -17,6 +17,26 @@ class TestDataStorePooling:
             assert row[0] == 1
         data_store.close_pool()
         assert len(data_store._connection_pool) == 0 or True  # pool may be empty after return
+
+    def test_rejects_paths_outside_project_and_temp(self):
+        with pytest.raises(ValueError):
+            EnhancedMusicDataStore(db_path="/etc/audora-not-allowed.db")
+
+    def test_rejects_relative_escape(self):
+        with pytest.raises(ValueError):
+            EnhancedMusicDataStore(db_path="../outside.db")
+
+    def test_rejects_symlinked_database(self, tmp_path):
+        target = tmp_path / "real.db"
+        link = tmp_path / "link.db"
+        target.touch()
+        link.symlink_to(target)
+        with pytest.raises(ValueError):
+            EnhancedMusicDataStore(db_path=str(link))
+
+    def test_config_path_must_be_relative(self):
+        with pytest.raises(ValueError, match="relative"):
+            database_path_from_config("/tmp/configured.db")
 
     def test_multiple_connections_then_close(self, temp_db_path):
         store = EnhancedMusicDataStore(db_path=str(temp_db_path))
