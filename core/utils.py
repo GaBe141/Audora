@@ -16,6 +16,56 @@ try:
 except ImportError:
     HAS_PANDAS = False
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+_CSV_WHITESPACE = " \t\r\n"
+
+
+def project_root() -> Path:
+    """Return the repository root (parent of the core package)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def confine_path(path: Path | str, roots: list[Path] | None = None) -> Path:
+    """Resolve a path and reject targets outside the allowed roots.
+
+    Relative paths are resolved from the project root. Symlinks are followed
+    so a link inside an allowed root cannot point at a file outside it.
+    """
+    allowed_roots = roots if roots is not None else [project_root()]
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = project_root() / candidate
+    resolved = candidate.resolve()
+    for root in allowed_roots:
+        root_resolved = root.resolve()
+        if resolved == root_resolved or root_resolved in resolved.parents:
+            return resolved
+    raise ValueError("Path is outside the allowed directories")
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula text so exported CSV cells stay inert."""
+    if not isinstance(value, str) or value == "":
+        return value
+    stripped = value.lstrip(_CSV_WHITESPACE)
+    if (
+        value[0] in _CSV_FORMULA_PREFIXES
+        or value[0] in "\t\r"
+        or (stripped != "" and stripped[0] in _CSV_FORMULA_PREFIXES)
+    ):
+        return "'" + value
+    return value
+
+
+def neutralize_csv_frame(df: Any) -> Any:
+    """Neutralize formula-like strings in an exported DataFrame."""
+    if not HAS_PANDAS:
+        return df
+    for column in df.columns:
+        if df[column].dtype == object or str(df[column].dtype) == "string":
+            df[column] = df[column].map(neutralize_csv_value)
+    return df
+
 
 # JSON utilities
 def read_json(path: Path | str, default: Any = None) -> Any:
@@ -71,7 +121,7 @@ def write_json(
     Raises:
         Exception: If writing fails
     """
-    path = Path(path)
+    path = confine_path(path)
     try:
         if create_dirs:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,7 +148,9 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = confine_path(filepath)
+    df = df.copy()
+    neutralize_csv_frame(df)
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -346,10 +398,9 @@ def save_report(
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{timestamp_str}.json"
 
-    # Create full path
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    filepath = output_path / filename
+    # Create full path only after it is confined to the project.
+    filepath = confine_path(Path(output_dir) / filename)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:

@@ -1,6 +1,7 @@
 """Spotify Charts web scraping for real streaming data and trending analysis."""
 
 import json
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -16,6 +17,7 @@ class SpotifyChartsAPI:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         # Use a realistic user agent
         self.session.headers.update(
             {
@@ -24,6 +26,15 @@ class SpotifyChartsAPI:
         )
         self.last_request_time = 0
         self.rate_limit_delay = 2.0  # Be respectful with scraping
+
+    def _is_safe_chart_request(self, country_code: str, date: str) -> bool:
+        """Allow only country codes and dates that cannot escape the chart path."""
+        if not isinstance(country_code, str) or not isinstance(date, str):
+            return False
+        return bool(
+            re.fullmatch(r"[A-Za-z]{2}|global", country_code)
+            and re.fullmatch(r"\d{4}-\d{2}-\d{2}", date)
+        )
 
     def _rate_limit(self):
         """Ensure we don't exceed rate limits."""
@@ -46,10 +57,17 @@ class SpotifyChartsAPI:
             # Default to yesterday (charts are usually 1 day behind)
             date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        url = f"{CHARTS_BASE_URL}/charts/view/regional-{country_code}-daily/{date}"
+        if not self._is_safe_chart_request(country_code, date):
+            print("Invalid Spotify Charts request")
+            return pd.DataFrame()
+
+        url = f"{CHARTS_BASE_URL}/charts/view/regional-{country_code.lower()}-daily/{date}"
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=30, allow_redirects=False)
+            if response.status_code in {301, 302, 303, 307, 308}:
+                print("Error fetching Spotify Charts: redirect blocked")
+                return pd.DataFrame()
             response.raise_for_status()
 
             # Parse the HTML
@@ -138,10 +156,17 @@ class SpotifyChartsAPI:
         if date is None:
             date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        url = f"{CHARTS_BASE_URL}/charts/view/viral-{country_code}-daily/{date}"
+        if not self._is_safe_chart_request(country_code, date):
+            print("Invalid Spotify Charts request")
+            return pd.DataFrame()
+
+        url = f"{CHARTS_BASE_URL}/charts/view/viral-{country_code.lower()}-daily/{date}"
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=30, allow_redirects=False)
+            if response.status_code in {301, 302, 303, 307, 308}:
+                print("Error fetching Viral Charts: redirect blocked")
+                return pd.DataFrame()
             response.raise_for_status()
 
             BeautifulSoup(response.content, "html.parser")
