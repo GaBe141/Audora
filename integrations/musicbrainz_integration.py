@@ -6,6 +6,8 @@ from typing import Any
 import pandas as pd
 import requests
 
+from integrations.safe_http import NoRedirectRequests, is_redirect_status, is_safe_path
+
 BASE_URL = "https://musicbrainz.org/ws/2/"
 USER_AGENT = "SpotifyInsights/1.0 (https://github.com/GaBe141/spotify-insights)"
 
@@ -14,7 +16,7 @@ class MusicBrainzAPI:
     """MusicBrainz API client with rate limiting and comprehensive metadata fetching."""
 
     def __init__(self):
-        self.session = requests.Session()
+        self.session = NoRedirectRequests()
         self.session.headers.update({"User-Agent": USER_AGENT})
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second to be respectful
@@ -29,12 +31,19 @@ class MusicBrainzAPI:
 
     def _make_request(self, endpoint: str, params: dict[str, Any]) -> dict | None:
         """Make a request to MusicBrainz API with rate limiting."""
+        if not is_safe_path(endpoint):
+            print("MusicBrainz API error: rejected unsafe request path")
+            return None
+
         self._rate_limit()
 
         params.update({"fmt": "json"})
 
         try:
-            response = self.session.get(f"{BASE_URL}{endpoint}", params=params)
+            response = self.session.get(f"{BASE_URL}{endpoint}", params=params, timeout=20)
+            if is_redirect_status(response.status_code):
+                print("MusicBrainz API error: redirect was refused")
+                return None
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
