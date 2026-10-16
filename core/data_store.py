@@ -5,7 +5,9 @@ Handles trending data, viral predictions, and cross-platform analysis.
 
 import json
 import logging
+import os
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -15,6 +17,110 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import contained_output_path, neutralize_csv_frame, project_root
+
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def database_path_from_config(config_path: str) -> Path:
+    """Resolve a configured database path. Absolute config paths are rejected."""
+    raw = Path(config_path)
+    if raw.is_absolute():
+        raise ValueError("Database path in config must be relative")
+    if ".." in raw.parts:
+        raise ValueError("Database path must not contain parent segments")
+    root = project_root()
+    resolved = (root / raw).resolve()
+    if not resolved.is_relative_to(root):
+        raise ValueError("Database path escapes the project root")
+    return resolved
+
+
+def _allowed_database_location(path: Path) -> bool:
+    root = project_root()
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    return path.is_relative_to(root) or path.is_relative_to(temp_root)
+
+
+def _prepare_database_path(db_path: str) -> str:
+    """Resolve a constructor database path and reject symlink or escaped locations."""
+    if db_path == ":memory:":
+        return db_path
+
+    raw = Path(db_path)
+    root = project_root()
+    if raw.is_absolute():
+        candidate = raw
+    else:
+        if ".." in raw.parts:
+            raise ValueError("Database path must not contain parent segments")
+        candidate = root / raw
+    if candidate.is_symlink():
+        raise ValueError("Refusing to open a symlinked database file")
+    resolved = candidate.resolve()
+    if raw.is_absolute():
+        if not _allowed_database_location(resolved):
+            raise ValueError(
+                "Absolute database paths are only allowed inside the project or system temp directory"
+            )
+    elif not resolved.is_relative_to(root):
+        raise ValueError("Database path escapes the project root")
+
+    if resolved.parent.is_symlink():
+        raise ValueError("Refusing to open a symlinked database file")
+
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    if resolved.exists():
+        fd = os.open(resolved, os.O_RDWR | _NOFOLLOW)
+    else:
+        fd = os.open(resolved, os.O_CREAT | os.O_EXCL | os.O_RDWR | _NOFOLLOW, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    return str(resolved)
+
+
+def _prepare_directory(directory: str) -> Path:
+    """Resolve a backup directory inside the project or the system temp directory."""
+    raw = Path(directory)
+    root = project_root()
+    if raw.is_absolute():
+        candidate = raw
+    else:
+        if ".." in raw.parts:
+            raise ValueError("Backup directory must not contain parent segments")
+        candidate = root / raw
+    if candidate.is_symlink():
+        raise ValueError("Refusing to use a symlinked backup directory")
+    resolved = candidate.resolve()
+    if raw.is_absolute():
+        if not _allowed_database_location(resolved):
+            raise ValueError("Backup directory is outside allowed locations")
+    elif not resolved.is_relative_to(root):
+        raise ValueError("Backup directory escapes the project root")
+    resolved.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        dir_fd = os.open(resolved, os.O_RDONLY | _NOFOLLOW)
+        try:
+            os.fchmod(dir_fd, 0o700)
+        finally:
+            os.close(dir_fd)
+    return resolved
+
+
+def _restrict_db_permissions(db_path: str) -> None:
+    if db_path == ":memory:" or os.name == "nt":
+        return
+    base = Path(db_path)
+    for candidate in (base, Path(str(base) + "-wal"), Path(str(base) + "-shm")):
+        if not candidate.exists() or candidate.is_symlink():
+            continue
+        fd = os.open(candidate, os.O_RDWR | _NOFOLLOW)
+        try:
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
 
 
 @dataclass
@@ -61,6 +167,7 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+
     _ALLOWED_BULK_UPDATE_FIELDS = {
         "platform",
         "track_name",
@@ -75,9 +182,8 @@ class EnhancedMusicDataStore:
     }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
-        self.db_path = db_path
-        self.backup_dir = Path(backup_dir)
-        self.backup_dir.mkdir(exist_ok=True)
+        self.db_path = _prepare_database_path(db_path)
+        self.backup_dir = _prepare_directory(backup_dir)
         self.logger = logging.getLogger(__name__)
 
         # Initialize cache
@@ -95,6 +201,7 @@ class EnhancedMusicDataStore:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=10000")
             conn.execute("PRAGMA temp_store=memory")
+        _restrict_db_permissions(self.db_path)
 
     def _get_pooled_connection(self) -> sqlite3.Connection:
         """Get a connection from the pool or create a new one."""
@@ -787,7 +894,9 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        invalid_fields = [field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS]
+        invalid_fields = [
+            field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS
+        ]
         if invalid_fields:
             raise ValueError(
                 "Invalid update fields: "
@@ -920,9 +1029,14 @@ class EnhancedMusicDataStore:
         """Create a backup of the database."""
         backup_filename = f"music_trends_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
         backup_path = self.backup_dir / backup_filename
+        if backup_path.is_symlink():
+            raise ValueError("Refusing to write a backup through a symlink")
+        fd = os.open(backup_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | _NOFOLLOW, 0o600)
+        os.close(fd)
 
         with self.get_connection() as source_conn, sqlite3.connect(backup_path) as backup_conn:
             source_conn.backup(backup_conn)
+        _restrict_db_permissions(str(backup_path))
 
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
@@ -943,6 +1057,8 @@ class EnhancedMusicDataStore:
         }
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
+        if days is not None and (isinstance(days, bool) or not isinstance(days, int) or days < 0):
+            raise ValueError("days must be a non-negative integer")
 
         with self.get_connection() as conn:
             if days:
@@ -958,13 +1074,11 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            output_path = contained_output_path(filepath)
+            neutralize_csv_frame(df).to_csv(output_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {output_path}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(output_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
@@ -1167,10 +1281,7 @@ class EnhancedMusicDataStore:
         rmse = float((errors**2).mean() ** 0.5)
 
         acc_by_platform = (
-            evaluated_df.groupby("platform")["accuracy_score"]
-            .mean()
-            .round(3)
-            .to_dict()
+            evaluated_df.groupby("platform")["accuracy_score"].mean().round(3).to_dict()
         )
 
         return {

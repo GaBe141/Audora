@@ -4,11 +4,27 @@ Specialized for Gen Z/Alpha music discovery patterns.
 """
 
 import asyncio
+import re
 from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
-from social_discovery_engine import Platform, SocialMusicMetrics, ViralStage
+
+from integrations.social_discovery_engine import (
+    Platform,
+    SocialMusicMetrics,
+    ViralStage,
+    credentialed_session,
+)
+
+_SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+
+
+def safe_path_segment(value: str, *, field: str = "path segment") -> str:
+    """Allow a single URL path segment and reject traversal or extra slashes."""
+    if not isinstance(value, str) or _SAFE_SEGMENT.fullmatch(value) is None:
+        raise ValueError(f"Invalid {field}")
+    return value
 
 
 class RedditMusicAPI:
@@ -33,20 +49,20 @@ class RedditMusicAPI:
         data = {"grant_type": "client_credentials"}
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    auth_url, auth=auth, headers=headers, data=data
-                ) as response:
-                    if response.status == 200:
-                        token_data = await response.json()
-                        self.access_token = token_data["access_token"]
-                        self.token_expires = datetime.now() + timedelta(
-                            seconds=token_data["expires_in"]
-                        )
-                        return True
-                    else:
-                        print(f"Reddit auth failed: {response.status}")
-                        return False
+            async with (
+                credentialed_session() as session,
+                session.post(auth_url, auth=auth, headers=headers, data=data) as response,
+            ):
+                if response.status == 200:
+                    token_data = await response.json()
+                    self.access_token = token_data["access_token"]
+                    self.token_expires = datetime.now() + timedelta(
+                        seconds=token_data["expires_in"]
+                    )
+                    return True
+                else:
+                    print(f"Reddit auth failed: {response.status}")
+                    return False
         except Exception as e:
             print(f"Reddit auth error: {e}")
             return False
@@ -58,19 +74,21 @@ class RedditMusicAPI:
         if not self.access_token or datetime.now() >= self.token_expires:
             await self.authenticate()
 
-        endpoint = f"{self.base_url}/r/{subreddit}/hot"
         headers = {"Authorization": f"Bearer {self.access_token}", "User-Agent": self.user_agent}
         params = {"limit": limit, "t": time_filter}
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(endpoint, headers=headers, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return data.get("data", {}).get("children", [])
-                    else:
-                        print(f"Reddit API error: {response.status}")
-                        return []
+            endpoint = f"{self.base_url}/r/{safe_path_segment(subreddit, field='subreddit')}/hot"
+            async with (
+                credentialed_session() as session,
+                session.get(endpoint, headers=headers, params=params) as response,
+            ):
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("data", {}).get("children", [])
+                else:
+                    print(f"Reddit API error: {response.status}")
+                    return []
         except Exception as e:
             print(f"Reddit API exception: {e}")
             return []
@@ -97,7 +115,6 @@ class RedditMusicAPI:
         all_results = []
 
         for subreddit in subreddits:
-            endpoint = f"{self.base_url}/r/{subreddit}/search"
             headers = {
                 "Authorization": f"Bearer {self.access_token}",
                 "User-Agent": self.user_agent,
@@ -105,14 +122,19 @@ class RedditMusicAPI:
             params = {"q": query, "sort": "relevance", "restrict_sr": "true", "limit": 25}
 
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(endpoint, headers=headers, params=params) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            posts = data.get("data", {}).get("children", [])
-                            for post in posts:
-                                post["subreddit_source"] = subreddit
-                            all_results.extend(posts)
+                endpoint = (
+                    f"{self.base_url}/r/{safe_path_segment(subreddit, field='subreddit')}/search"
+                )
+                async with (
+                    credentialed_session() as session,
+                    session.get(endpoint, headers=headers, params=params) as response,
+                ):
+                    if response.status == 200:
+                        data = await response.json()
+                        posts = data.get("data", {}).get("children", [])
+                        for post in posts:
+                            post["subreddit_source"] = subreddit
+                        all_results.extend(posts)
             except Exception as e:
                 print(f"Reddit search error for {subreddit}: {e}")
                 continue
@@ -206,22 +228,22 @@ class TumblrMusicAPI:
         params = {"tag": query, "api_key": self.consumer_key, "limit": limit}
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(endpoint, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return data.get("response", [])
-                    else:
-                        print(f"Tumblr API error: {response.status}")
-                        return []
+            async with (
+                credentialed_session() as session,
+                session.get(endpoint, params=params) as response,
+            ):
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("response", [])
+                else:
+                    print(f"Tumblr API error: {response.status}")
+                    return []
         except Exception as e:
             print(f"Tumblr API exception: {e}")
             return []
 
     async def get_music_blog_posts(self, blog_name: str, limit: int = 20) -> list[dict[str, Any]]:
         """Get posts from a specific music blog."""
-        endpoint = f"{self.base_url}/blog/{blog_name}/posts"
-
         params = {
             "api_key": self.consumer_key,
             "limit": limit,
@@ -229,13 +251,18 @@ class TumblrMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(endpoint, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return data.get("response", {}).get("posts", [])
-                    else:
-                        return []
+            endpoint = (
+                f"{self.base_url}/blog/{safe_path_segment(blog_name, field='blog name')}/posts"
+            )
+            async with (
+                credentialed_session() as session,
+                session.get(endpoint, params=params) as response,
+            ):
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("response", {}).get("posts", [])
+                else:
+                    return []
         except Exception as e:
             print(f"Tumblr blog error: {e}")
             return []
@@ -297,13 +324,15 @@ class SoundCloudAPI:
             params["genres"] = genre
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(endpoint, params=params) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    else:
-                        print(f"SoundCloud API error: {response.status}")
-                        return []
+            async with (
+                credentialed_session() as session,
+                session.get(endpoint, params=params) as response,
+            ):
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    print(f"SoundCloud API error: {response.status}")
+                    return []
         except Exception as e:
             print(f"SoundCloud API exception: {e}")
             return []
@@ -317,21 +346,23 @@ class SoundCloudAPI:
         params = {"client_id": self.client_id, "q": query, "limit": 50}
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(endpoint, params=params) as response:
-                    if response.status == 200:
-                        users = await response.json()
+            async with (
+                credentialed_session() as session,
+                session.get(endpoint, params=params) as response,
+            ):
+                if response.status == 200:
+                    users = await response.json()
 
-                        # Filter by follower count
-                        emerging_artists = [
-                            user
-                            for user in users
-                            if min_followers <= user.get("followers_count", 0) <= max_followers
-                        ]
+                    # Filter by follower count
+                    emerging_artists = [
+                        user
+                        for user in users
+                        if min_followers <= user.get("followers_count", 0) <= max_followers
+                    ]
 
-                        return emerging_artists
-                    else:
-                        return []
+                    return emerging_artists
+                else:
+                    return []
         except Exception as e:
             print(f"SoundCloud search error: {e}")
             return []
@@ -347,17 +378,21 @@ class DiscordMusicBot:
     async def get_guild_voice_activity(self, guild_id: str) -> dict[str, Any]:
         """Get voice channel activity for music listening patterns."""
         # Note: This requires special Discord bot permissions
-        endpoint = f"{self.base_url}/guilds/{guild_id}/voice-states"
-
         headers = {"Authorization": f"Bot {self.bot_token}"}
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(endpoint, headers=headers) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    else:
-                        return {}
+            endpoint = (
+                f"{self.base_url}/guilds/"
+                f"{safe_path_segment(guild_id, field='guild id')}/voice-states"
+            )
+            async with (
+                credentialed_session() as session,
+                session.get(endpoint, headers=headers) as response,
+            ):
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    return {}
         except Exception as e:
             print(f"Discord API error: {e}")
             return {}

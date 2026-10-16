@@ -1,10 +1,15 @@
 """MusicBrainz API integration for comprehensive music metadata and artist relationships."""
 
+import re
 import time
 from typing import Any
 
 import pandas as pd
 import requests
+
+_MBID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 BASE_URL = "https://musicbrainz.org/ws/2/"
 USER_AGENT = "SpotifyInsights/1.0 (https://github.com/GaBe141/spotify-insights)"
@@ -15,6 +20,7 @@ class MusicBrainzAPI:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.headers.update({"User-Agent": USER_AGENT})
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second to be respectful
@@ -34,7 +40,9 @@ class MusicBrainzAPI:
         params.update({"fmt": "json"})
 
         try:
-            response = self.session.get(f"{BASE_URL}{endpoint}", params=params)
+            response = self.session.get(
+                f"{BASE_URL}{endpoint}", params=params, timeout=30, allow_redirects=False
+            )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -50,8 +58,15 @@ class MusicBrainzAPI:
             return result["artists"][0]
         return None
 
+    def _require_mbid(self, mbid: str) -> str:
+        """Detail lookups must be a MusicBrainz UUID, not a path fragment."""
+        if not isinstance(mbid, str) or _MBID_RE.fullmatch(mbid) is None:
+            raise ValueError("MusicBrainz id must be a UUID")
+        return mbid
+
     def get_artist_details(self, mbid: str) -> dict | None:
         """Get detailed artist information including relationships."""
+        mbid = self._require_mbid(mbid)
         params = {
             "inc": "artist-rels+recording-rels+release-rels+work-rels+url-rels+tags+ratings+genres"
         }
@@ -60,6 +75,7 @@ class MusicBrainzAPI:
 
     def get_artist_releases(self, mbid: str) -> list[dict]:
         """Get all releases for an artist."""
+        mbid = self._require_mbid(mbid)
         params = {"artist": mbid, "inc": "release-groups+media+recordings", "limit": 100}
 
         result = self._make_request("release", params)
@@ -69,6 +85,7 @@ class MusicBrainzAPI:
 
     def get_related_artists(self, mbid: str) -> list[dict]:
         """Get artists related to the given artist through various relationships."""
+        mbid = self._require_mbid(mbid)
         artist_details = self.get_artist_details(mbid)
         if not artist_details or "relations" not in artist_details:
             return []

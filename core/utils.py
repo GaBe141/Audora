@@ -2,11 +2,105 @@
 
 import json
 import logging
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_CSV_FORMULA_LEADERS = ("=", "+", "-", "@")
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def project_root() -> Path:
+    """Return the repository root (parent of the core package)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula characters so exported cells stay text."""
+    if not isinstance(value, str) or value == "":
+        return value
+    stripped = value.lstrip(" ")
+    if value[0] in (*_CSV_FORMULA_LEADERS, "\t", "\r") or (
+        stripped and stripped[0] in _CSV_FORMULA_LEADERS
+    ):
+        return "'" + value
+    return value
+
+
+def neutralize_csv_frame(df: Any) -> Any:
+    """Neutralize every cell. Pandas text columns report dtype 'str', not 'object'."""
+    if not HAS_PANDAS:
+        return df
+    mapper = getattr(df, "map", None)
+    if mapper is None:
+        return df.applymap(neutralize_csv_value)
+    return df.map(neutralize_csv_value)
+
+
+def contained_output_path(filepath: Path | str, *, create_dirs: bool = True) -> Path:
+    """Resolve an output file inside the project or the system temp directory."""
+    root = project_root()
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    path = Path(filepath)
+    if path.is_absolute():
+        candidate = path
+    else:
+        if ".." in path.parts:
+            raise ValueError("Output path must not contain parent segments")
+        candidate = root / path
+    if candidate.is_symlink():
+        raise ValueError("Refusing to write through a symlink")
+    resolved = candidate.resolve()
+    if path.is_absolute():
+        if not (resolved.is_relative_to(root) or resolved.is_relative_to(temp_root)):
+            raise ValueError("Output path is outside allowed directories")
+    elif not resolved.is_relative_to(root):
+        raise ValueError("Output path escapes the project root")
+    if resolved.parent.is_symlink():
+        raise ValueError("Refusing to write through a symlink")
+    if create_dirs:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+def write_private_text(path: Path | str, content: str) -> Path:
+    """Write text to a regular file with mode 600 and refuse to follow symlinks."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink():
+        raise OSError(f"Refusing to write through symlink: {target}")
+    fd = os.open(target, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | _NOFOLLOW, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(content)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    return target
+
+
+def ensure_private_file(path: Path | str) -> Path:
+    """Create a mode-600 file, or tighten an existing regular file. Refuse symlinks."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink():
+        raise OSError(f"Refusing to use symlink: {target}")
+    if target.exists():
+        fd = os.open(target, os.O_RDWR | _NOFOLLOW)
+    else:
+        fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY | _NOFOLLOW, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    return target
+
 
 # Re-export for convenience
 try:
@@ -98,12 +192,9 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
-
-    if create_dirs:
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-
-    df.to_csv(filepath, index=False)
+    filepath = contained_output_path(filepath, create_dirs=create_dirs)
+    frame = neutralize_csv_frame(df)
+    frame.to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
