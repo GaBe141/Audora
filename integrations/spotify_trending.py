@@ -10,6 +10,8 @@ from typing import Any, TypedDict
 import numpy as np
 import pandas as pd
 
+from core.utils import confine_child_path, resolve_within_project
+
 from .trending_schema import TrendCategory, TrendDirection, TrendingSchema
 
 
@@ -17,7 +19,7 @@ class SpotifyTrendingIntegration:
     """Integration between Spotify data and trending schema."""
 
     def __init__(self, data_dir: str = "data"):
-        self.data_dir = Path(data_dir)
+        self.data_dir = resolve_within_project(data_dir)
         self.trending_schema = TrendingSchema()
 
         # Mapping of data files to trend categories
@@ -58,7 +60,7 @@ class SpotifyTrendingIntegration:
         }
 
         for filename, category in self.file_mappings.items():
-            file_path = self.data_dir / filename
+            file_path = confine_child_path(self.data_dir, filename)
 
             if not file_path.exists():
                 print(f"   ⚠️ {filename}: File not found")
@@ -444,7 +446,7 @@ class SpotifyTrendingIntegration:
         """Create comprehensive trending analysis report."""
         print("\n📋 Creating trending analysis report...")
 
-        output_path = Path(output_dir)
+        output_path = resolve_within_project(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
         # Generate insights
@@ -479,7 +481,7 @@ class SpotifyTrendingIntegration:
         )
 
         # Create text summary
-        summary_file = output_path / "trending_summary.txt"
+        summary_file = confine_child_path(output_path, "trending_summary.txt")
         self._create_text_summary(insights, summary_file)
 
         print(f"   ✅ Report saved to {saved_path}")
@@ -531,9 +533,7 @@ class SpotifyTrendingIntegration:
                     direction_emoji = (
                         "📈"
                         if "rising" in item["direction"]
-                        else "🚀"
-                        if "viral" in item["direction"]
-                        else "📊"
+                        else "🚀" if "viral" in item["direction"] else "📊"
                     )
                     f.write(f"  {direction_emoji} {item['name']}\n")
                     f.write(
