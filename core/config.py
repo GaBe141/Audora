@@ -8,6 +8,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from .utils import open_nofollow, write_private_text
+
 
 class SecureConfig:
     """Secure configuration manager with validation and error handling."""
@@ -19,32 +21,42 @@ class SecureConfig:
             env_file: Path to .env file. If None, searches for .env in project root.
         """
         self.project_root = Path(__file__).resolve().parent.parent
-        self.env_file = env_file or (self.project_root / ".env")
+        self.env_file = Path(env_file) if env_file else (self.project_root / ".env")
         self._config: dict[str, Any] = {}
         self._load_environment()
 
     def _load_environment(self):
         """Load environment variables securely."""
-        if not self.env_file.exists():
+        env_path = Path(self.env_file)
+        if env_path.is_symlink():
+            raise ValueError("Refusing to load a symlinked environment file")
+        if not env_path.exists():
             warnings.warn(
-                f"Environment file not found: {self.env_file}\n"
+                f"Environment file not found: {env_path}\n"
                 "Create a .env file with your API credentials.",
                 UserWarning,
+                stacklevel=2,
             )
             return
 
-        # Load with explicit encoding and override
-        load_dotenv(dotenv_path=str(self.env_file), override=True, encoding="utf-8")
+        try:
+            handle = open_nofollow(env_path, "r")
+        except OSError as exc:
+            raise ValueError("Refusing to load a symlinked environment file") from exc
+
+        # Do not let a .env file replace credentials already provided by the environment.
+        with handle:
+            file_mode = oct(os.fstat(handle.fileno()).st_mode)[-3:]
+            load_dotenv(stream=handle, override=False)
 
         # Validate file permissions (Unix-like systems)
-        if hasattr(os, "stat") and not sys.platform.startswith("win"):
-            file_mode = oct(self.env_file.stat().st_mode)[-3:]
-            if file_mode != "600":
-                warnings.warn(
-                    f"Environment file permissions are too open: {file_mode}\n"
-                    f"Consider running: chmod 600 {self.env_file}",
-                    UserWarning,
-                )
+        if not sys.platform.startswith("win") and file_mode != "600":
+            warnings.warn(
+                f"Environment file permissions are too open: {file_mode}\n"
+                f"Consider running: chmod 600 {env_path}",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def get_spotify_config(self) -> dict[str, str]:
         """Get Spotify API configuration with validation."""
@@ -80,6 +92,7 @@ class SecureConfig:
                 "Last.fm API key format appears invalid. "
                 "Should be 32 character hexadecimal string.",
                 UserWarning,
+                stacklevel=2,
             )
 
         return {"api_key": api_key, "shared_secret": shared_secret or ""}
@@ -202,11 +215,7 @@ AUDIODB_API_KEY=123
             print(f"❌ No .env file found at: {self.env_file}")
             print("\n📝 Creating template .env file...")
 
-            self.env_file.write_text(self.create_env_template(), encoding="utf-8")
-
-            # Set restrictive permissions on Unix-like systems
-            if hasattr(os, "chmod") and not sys.platform.startswith("win"):
-                os.chmod(self.env_file, 0o600)
+            write_private_text(self.env_file, self.create_env_template())
 
             print(f"✅ Created template: {self.env_file}")
             print("\n🔑 Next steps:")
