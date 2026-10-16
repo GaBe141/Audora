@@ -4,8 +4,8 @@ Enhanced Music Discovery Application - Complete Integration
 This is the main application file that brings together all enhanced components.
 """
 
+import argparse
 import asyncio
-import json
 import logging
 import sys
 from datetime import datetime, timedelta
@@ -17,7 +17,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 # Import all enhanced components
 from analytics.advanced_analytics import MusicTrendAnalytics
-from core.data_store import EnhancedMusicDataStore
+from core.data_store import EnhancedMusicDataStore, database_path_from_config
 from core.notification_service import (
     EnhancedNotificationService,
     NotificationChannel,
@@ -25,6 +25,7 @@ from core.notification_service import (
     NotificationPriority,
 )
 from core.resilience import EnhancedResilience
+from core.utils import confine_child_path, read_json, resolve_within_project, write_json
 from integrations.lastfm_integration import get_lastfm_client
 from integrations.social_discovery_engine import (
     SocialMusicDiscoveryEngine,
@@ -37,8 +38,8 @@ class EnhancedMusicDiscoveryApp:
 
     def __init__(self, config_dir: str = "config"):
         """Initialize the enhanced music discovery application."""
-        self.config_dir = Path(config_dir)
-        self.data_dir = Path("data")
+        self.config_dir = resolve_within_project(config_dir)
+        self.data_dir = resolve_within_project("data")
 
         # Load configurations
         self.configs = self._load_configurations()
@@ -49,9 +50,10 @@ class EnhancedMusicDiscoveryApp:
 
         # Initialize components
         self.resilience = EnhancedResilience()
-        self.data_store = EnhancedMusicDataStore(
-            self.configs.get("database", {}).get("path", "data/enhanced_music_trends.db")
+        configured_db = self.configs.get("database", {}).get(
+            "path", "data/enhanced_music_trends.db"
         )
+        self.data_store = EnhancedMusicDataStore(database_path_from_config(str(configured_db)))
         self.analytics = MusicTrendAnalytics(self.data_store)
         self.notifications = EnhancedNotificationService()
 
@@ -74,11 +76,10 @@ class EnhancedMusicDiscoveryApp:
         }
 
         for config_type, filename in config_files.items():
-            config_path = self.config_dir / filename
             try:
+                config_path = confine_child_path(self.config_dir, filename)
                 if config_path.exists():
-                    with open(config_path) as f:
-                        configs[config_type] = json.load(f)
+                    configs[config_type] = read_json(config_path)
                 else:
                     print(f"⚠️ Config file not found: {config_path}")
                     configs[config_type] = {}
@@ -92,8 +93,8 @@ class EnhancedMusicDiscoveryApp:
         """Set up comprehensive logging."""
         log_config = self.configs.get("system", {}).get("logging", {})
 
-        # Create logs directory
-        logs_dir = Path("logs")
+        # Create logs directory inside the project
+        logs_dir = resolve_within_project("logs")
         logs_dir.mkdir(exist_ok=True)
 
         # Configure logging
@@ -273,17 +274,13 @@ class EnhancedMusicDiscoveryApp:
                                 },
                             }
                         )
-                    self.logger.info(
-                        f"✅ Last.fm: {len(discoveries) - before} tracks"
-                    )
+                    self.logger.info(f"✅ Last.fm: {len(discoveries) - before} tracks")
             except Exception as e:
                 self.logger.warning(f"⚠️ Last.fm unavailable: {e}")
 
         # --- Fallback: mock data when no API keys are configured ---
         if not discoveries:
-            self.logger.warning(
-                "No API sources returned data — using mock discovery engine"
-            )
+            self.logger.warning("No API sources returned data — using mock discovery engine")
             mock_engine = create_mock_discovery_data()
             mock_results = await mock_engine.discover_emerging_music(region="US")
             for platform_name, metrics_list in mock_results.items():
@@ -429,15 +426,10 @@ class EnhancedMusicDiscoveryApp:
                 )
 
                 # Save cycle results
-                results_file = (
-                    self.data_dir
-                    / "reports"
-                    / f"cycle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                )
-                results_file.parent.mkdir(parents=True, exist_ok=True)
-
-                with open(results_file, "w") as f:
-                    json.dump(cycle_results, f, indent=2)
+                results_name = f"cycle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                reports_dir = resolve_within_project(self.data_dir / "reports")
+                results_file = confine_child_path(reports_dir, results_name)
+                write_json(results_file, cycle_results)
 
                 # Wait for next cycle
                 await asyncio.sleep(interval_minutes * 60)
@@ -464,8 +456,6 @@ def main():
         return 1
 
     # Run mode selection
-    import argparse
-
     parser = argparse.ArgumentParser(description="Enhanced Music Discovery System")
     parser.add_argument(
         "--mode",
