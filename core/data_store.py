@@ -5,6 +5,7 @@ Handles trending data, viral predictions, and cross-platform analysis.
 
 import json
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -15,6 +16,26 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import (
+    PROJECT_ROOT,
+    is_allowed_storage_path,
+    neutralize_csv_frame,
+    resolve_within_project,
+)
+
+
+def database_path_from_config(path: str) -> str:
+    """Resolve a configured SQLite path and keep it inside the project.
+
+    Relative paths are anchored at the project root. Symlinks and non-sqlite
+    names are rejected so configuration cannot point the store at a secret file.
+    """
+    if not isinstance(path, str) or path.strip() in {"", ":memory:"}:
+        raise ValueError("Configuration cannot select an in-memory database")
+    resolved = resolve_within_project(path)
+    if resolved.suffix not in {".db", ".sqlite", ".sqlite3"}:
+        raise ValueError("Database path must use a sqlite suffix")
+    return str(resolved)
 
 
 @dataclass
@@ -61,6 +82,7 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+
     _ALLOWED_BULK_UPDATE_FIELDS = {
         "platform",
         "track_name",
@@ -75,8 +97,8 @@ class EnhancedMusicDataStore:
     }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
-        self.db_path = db_path
-        self.backup_dir = Path(backup_dir)
+        self.db_path = self._resolve_database_path(db_path)
+        self.backup_dir = self._resolve_backup_dir(backup_dir)
         self.backup_dir.mkdir(exist_ok=True)
         self.logger = logging.getLogger(__name__)
 
@@ -95,6 +117,44 @@ class EnhancedMusicDataStore:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=10000")
             conn.execute("PRAGMA temp_store=memory")
+        self._restrict_database_permissions()
+
+    def _resolve_database_path(self, db_path: str) -> str:
+        """Anchor relative databases at the project root and reject symlinks."""
+        if db_path == ":memory:":
+            return db_path
+        raw = Path(db_path)
+        if raw.suffix not in {".db", ".sqlite", ".sqlite3"}:
+            raise ValueError("Database path must use a sqlite suffix")
+        candidate = raw if raw.is_absolute() else PROJECT_ROOT / raw
+        if candidate.exists() and candidate.is_symlink():
+            raise ValueError("Symlinked database files are not allowed")
+        resolved = candidate.resolve(strict=False)
+        if not is_allowed_storage_path(resolved):
+            raise ValueError("Database path must stay inside the project or a temporary directory")
+        return str(resolved)
+
+    def _resolve_backup_dir(self, backup_dir: str) -> Path:
+        """Keep backups out of the process working directory."""
+        raw = Path(backup_dir)
+        candidate = raw if raw.is_absolute() else PROJECT_ROOT / raw
+        resolved = candidate.resolve(strict=False)
+        if self.db_path == ":memory:" and not is_allowed_storage_path(resolved):
+            raise ValueError("In-memory databases cannot back up outside the project")
+        if not is_allowed_storage_path(resolved):
+            raise ValueError(
+                "Backup directory must stay inside the project or a temporary directory"
+            )
+        return resolved
+
+    def _restrict_database_permissions(self) -> None:
+        """Limit a file-backed database to the current user."""
+        if self.db_path == ":memory:" or os.name == "nt":
+            return
+        for suffix in ("", "-wal", "-shm"):
+            db_file = Path(f"{self.db_path}{suffix}")
+            if db_file.exists() and not db_file.is_symlink():
+                db_file.chmod(0o600)
 
     def _get_pooled_connection(self) -> sqlite3.Connection:
         """Get a connection from the pool or create a new one."""
@@ -787,7 +847,9 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        invalid_fields = [field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS]
+        invalid_fields = [
+            field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS
+        ]
         if invalid_fields:
             raise ValueError(
                 "Invalid update fields: "
@@ -943,6 +1005,10 @@ class EnhancedMusicDataStore:
         }
         if table not in valid_tables:
             raise ValueError(f"Invalid table name: {table}. Must be one of {valid_tables}")
+        if days is not None:
+            days = int(days)
+            if days < 0 or days > 3650:
+                raise ValueError("Export window must be between 0 and 3650 days")
 
         with self.get_connection() as conn:
             if days:
@@ -958,13 +1024,13 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            # Keep exports inside the project and neutralize spreadsheet formulas.
+            export_path = resolve_within_project(filepath)
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            neutralize_csv_frame(df).to_csv(export_path, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {export_path}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(export_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
@@ -1167,10 +1233,7 @@ class EnhancedMusicDataStore:
         rmse = float((errors**2).mean() ** 0.5)
 
         acc_by_platform = (
-            evaluated_df.groupby("platform")["accuracy_score"]
-            .mean()
-            .round(3)
-            .to_dict()
+            evaluated_df.groupby("platform")["accuracy_score"].mean().round(3).to_dict()
         )
 
         return {

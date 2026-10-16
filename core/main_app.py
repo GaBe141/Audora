@@ -4,11 +4,10 @@ Integrates all social media APIs for Gen Z/Alpha music trend analysis.
 """
 
 import asyncio
-import json
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
+from core.utils import confine_child_path, resolve_within_project, write_json
 from integrations.api_config import SocialAPIManager
 from integrations.extended_platforms import ExtendedSocialDiscoveryEngine
 from integrations.social_discovery_engine import SocialMusicDiscoveryEngine
@@ -338,17 +337,15 @@ class ComprehensiveMusicDiscoveryApp:
     ) -> str:
         """Save comprehensive discovery report."""
         if custom_filename:
-            filename = custom_filename
+            filepath = resolve_within_project(custom_filename)
+            if filepath.suffix != ".json":
+                raise ValueError("Discovery reports must be JSON files")
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"data/comprehensive_discovery_report_{timestamp}.json"
+            filename = f"comprehensive_discovery_report_{timestamp}.json"
+            filepath = confine_child_path(resolve_within_project("data"), filename)
 
-        filepath = Path(filename)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(discovery_results, f, indent=2, default=str, ensure_ascii=False)
-
+        write_json(filepath, discovery_results)
         return str(filepath)
 
     async def run_continuous_monitoring(

@@ -16,13 +16,18 @@ Provides insights into:
 """
 
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from core.utils import ensure_datetime_column, load_dataframe, save_report
+from core.utils import (
+    confine_child_path,
+    ensure_datetime_column,
+    load_dataframe,
+    resolve_within_project,
+    save_report,
+)
 
 
 class TemporalAnalyzer:
@@ -40,13 +45,13 @@ class TemporalAnalyzer:
 
     def __init__(self, data_dir: str = "data"):
         """Initialize temporal analyzer."""
-        self.data_dir = Path(data_dir)
+        self.data_dir = resolve_within_project(data_dir)
         self.listening_history: pd.DataFrame | None = None
         self.temporal_patterns: dict[str, Any] = {}
 
     def load_listening_history(self, filename: str = "recently_played.csv") -> pd.DataFrame:
         """Load listening history from CSV file using centralized utility."""
-        filepath = self.data_dir / filename
+        filepath = confine_child_path(self.data_dir, filename)
 
         # Try to load with utility
         df = load_dataframe(filepath, default_empty=False)

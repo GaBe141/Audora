@@ -6,10 +6,15 @@ file and console output, improving observability and debugging capabilities.
 
 import json
 import logging
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from core.utils import resolve_within_project
+
+_APP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
 class JSONFormatter(logging.Formatter):
@@ -156,8 +161,13 @@ def setup_logging(
         logger.info("Application started", extra={"user": "admin"})
         ```
     """
-    # Create log directory
-    log_path = Path(log_dir)
+    # File logs stay inside the project. Console-only setup may use a temp directory.
+    if file_output:
+        if not _APP_NAME_RE.fullmatch(app_name):
+            raise ValueError("Invalid log app name")
+        log_path = resolve_within_project(log_dir)
+    else:
+        log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
     # Get root logger
