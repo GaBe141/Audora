@@ -128,8 +128,12 @@ For detailed documentation, see docs/QUICK_START.md
                 except Exception as e:
                     print(f"⚠️ Demo {demo_name} error: {e}")
         else:
+            demo_module = demo_map.get(args.demo)
+            if demo_module is None:
+                print(f"❌ Demo {args.demo} not found.")
+                return 1
             try:
-                module = __import__(demo_map[args.demo], fromlist=["main"])
+                module = __import__(demo_module, fromlist=["main"])
                 return module.main()
             except ImportError:
                 print(f"❌ Demo {args.demo} not found.")

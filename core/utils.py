@@ -2,13 +2,114 @@
 
 import json
 import logging
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Re-export for convenience
+_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def read_text_nofollow(path: Path | str) -> str:
+    """Read a text file without following a symlink."""
+    target = Path(path)
+    if target.is_symlink():
+        raise ValueError(f"Refusing to read symlink: {target}")
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(target, flags)
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            return handle.read()
+    finally:
+        if fd != -1:
+            os.close(fd)
+
+
+def write_private_text(path: Path | str, content: str) -> Path:
+    """Write text to a mode-600 file, refusing to follow a symlink."""
+    target = Path(path)
+    if target.is_symlink():
+        raise ValueError(f"Refusing to write through symlink: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(target, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(content)
+    finally:
+        if fd != -1:
+            os.close(fd)
+    return target
+
+
+def ensure_private_file(path: Path | str) -> Path:
+    """Create or tighten a mode-600 file without following a symlink."""
+    target = Path(path)
+    if target.is_symlink():
+        raise ValueError(f"Refusing to use symlinked file: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if not target.exists():
+        flags |= os.O_EXCL
+    fd = os.open(target, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    return target
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def confine_output_path(path: Path | str) -> Path:
+    """Resolve a write path under the project root or the system temp directory."""
+    candidate = Path(path)
+    project_root = _PROJECT_ROOT.resolve()
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    resolved = (
+        candidate.resolve() if candidate.is_absolute() else (project_root / candidate).resolve()
+    )
+    in_project = resolved == project_root or resolved.is_relative_to(project_root)
+    in_temp = resolved == temp_root or resolved.is_relative_to(temp_root)
+    if not in_project and not in_temp:
+        raise ValueError("Refusing to write outside the project or temp directory")
+    if resolved.is_symlink():
+        raise ValueError(f"Refusing to write through symlink: {resolved}")
+    return resolved
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula cells so exported CSV cannot execute them."""
+    if isinstance(value, str):
+        probe = value.lstrip(" \t\r\n")
+        if probe.startswith(_FORMULA_PREFIXES):
+            return "'" + value
+    return value
+
+
+def neutralize_csv_frame(df: Any) -> Any:
+    """Neutralize formula-leading values in every column of a DataFrame."""
+    if not HAS_PANDAS:
+        raise ImportError("pandas is required to neutralize CSV output")
+    return df.map(neutralize_csv_value)
+
+
 try:
     import pandas as pd
 
@@ -98,12 +199,14 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = confine_output_path(filepath)
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
+    if filepath.is_symlink():
+        raise ValueError(f"Refusing to write CSV through symlink: {filepath}")
 
-    df.to_csv(filepath, index=False)
+    neutralize_csv_frame(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 

@@ -7,13 +7,12 @@ import time
 import pandas as pd
 import requests
 
+from core.config import get_config
 from core.exceptions import APIConnectionError, APIResponseError
-
-from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
 class LastFmAPI:
@@ -22,6 +21,7 @@ class LastFmAPI:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.session = requests.Session()
+        self.session.trust_env = False
         self.last_request_time = 0
         self.rate_limit_delay = 0.2  # 5 requests per second max
 
@@ -40,7 +40,9 @@ class LastFmAPI:
         request_params = {"method": method, "api_key": self.api_key, "format": "json", **params}
 
         try:
-            response = self.session.get(BASE_URL, params=request_params, timeout=10)
+            response = self.session.get(
+                BASE_URL, params=request_params, timeout=10, allow_redirects=False
+            )
             response.raise_for_status()
             data = response.json()
 

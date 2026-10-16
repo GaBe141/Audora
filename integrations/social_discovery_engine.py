@@ -17,6 +17,25 @@ from core.utils import write_json
 from integrations.trending_schema import TrendingSchema
 
 
+def credentialed_session() -> aiohttp.ClientSession:
+    """Return a session that ignores proxy environment variables and refuses redirects."""
+    session = aiohttp.ClientSession(trust_env=False)
+    original_get = session.get
+    original_post = session.post
+
+    def get(*args: Any, **kwargs: Any) -> Any:
+        kwargs["allow_redirects"] = False
+        return original_get(*args, **kwargs)
+
+    def post(*args: Any, **kwargs: Any) -> Any:
+        kwargs["allow_redirects"] = False
+        return original_post(*args, **kwargs)
+
+    session.get = get  # type: ignore[method-assign]
+    session.post = post  # type: ignore[method-assign]
+    return session
+
+
 class Platform(Enum):
     """Social media platforms for music discovery."""
 
@@ -129,7 +148,7 @@ class TikTokMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with credentialed_session() as session:
                 headers = {"Authorization": f"Bearer {self.api_key}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:
@@ -152,7 +171,7 @@ class TikTokMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with credentialed_session() as session:
                 headers = {"Authorization": f"Bearer {self.api_key}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:
@@ -173,7 +192,7 @@ class TikTokMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with credentialed_session() as session:
                 headers = {"Authorization": f"Bearer {self.api_key}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:
@@ -210,7 +229,7 @@ class YouTubeMusicAPI:
 
         try:
             async with (
-                aiohttp.ClientSession() as session,
+                credentialed_session() as session,
                 session.get(endpoint, params=params) as response,
             ):
                 if response.status == 200:
@@ -241,7 +260,7 @@ class YouTubeMusicAPI:
 
         try:
             async with (
-                aiohttp.ClientSession() as session,
+                credentialed_session() as session,
                 session.get(endpoint, params=params) as response,
             ):
                 if response.status == 200:
@@ -265,7 +284,7 @@ class YouTubeMusicAPI:
 
         try:
             async with (
-                aiohttp.ClientSession() as session,
+                credentialed_session() as session,
                 session.get(endpoint, params=params) as response,
             ):
                 if response.status == 200:
@@ -298,7 +317,7 @@ class TwitterMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with credentialed_session() as session:
                 headers = {"Authorization": f"Bearer {self.bearer_token}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:
@@ -318,7 +337,7 @@ class TwitterMusicAPI:
         params = {"id": location_id}  # 1 = Worldwide, 23424977 = US
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with credentialed_session() as session:
                 headers = {"Authorization": f"Bearer {self.bearer_token}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:

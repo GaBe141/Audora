@@ -1,5 +1,6 @@
 """AudioDB API integration for rich artist profiles and comprehensive music metadata."""
 
+import re
 import time
 from typing import Any
 
@@ -9,14 +10,18 @@ import requests
 # Note: config import is optional for standalone execution
 
 BASE_URL = "https://www.theaudiodb.com/api/v1/json"
+_API_KEY_RE = re.compile(r"\A[A-Za-z0-9]{1,128}\Z")
 
 
 class AudioDBAPI:
     """AudioDB API client for artist biographies, discographies, and metadata."""
 
     def __init__(self, api_key: str | None = None):
+        if api_key is not None and _API_KEY_RE.fullmatch(api_key) is None:
+            raise ValueError("AudioDB API key must be alphanumeric")
         self.api_key = api_key
         self.session = requests.Session()
+        self.session.trust_env = False
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second
 
@@ -35,13 +40,15 @@ class AudioDBAPI:
         self._rate_limit()
 
         # Use API key if available, otherwise use free key (123)
+        if endpoint.startswith("/") or ".." in endpoint:
+            return None
         if self.api_key:
             url = f"{BASE_URL}/{self.api_key}/{endpoint}"
         else:
             url = f"{BASE_URL}/123/{endpoint}"  # Free API key is 123
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, timeout=15, allow_redirects=False)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
