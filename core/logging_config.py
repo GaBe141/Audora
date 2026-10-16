@@ -6,10 +6,13 @@ file and console output, improving observability and debugging capabilities.
 
 import json
 import logging
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from core.utils import confine_path
 
 
 class JSONFormatter(logging.Formatter):
@@ -156,9 +159,14 @@ def setup_logging(
         logger.info("Application started", extra={"user": "admin"})
         ```
     """
-    # Create log directory
-    log_path = Path(log_dir)
-    log_path.mkdir(parents=True, exist_ok=True)
+    # File logs stay inside the project. A caller-supplied directory or app
+    # name must not create files elsewhere.
+    log_path: Path | None = None
+    if file_output:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", app_name):
+            raise ValueError("Invalid log app name")
+        log_path = confine_path(log_dir)
+        log_path.mkdir(parents=True, exist_ok=True)
 
     # Get root logger
     root_logger = logging.getLogger()
@@ -189,6 +197,7 @@ def setup_logging(
     # File handlers
     if file_output:
         timestamp = datetime.now().strftime("%Y%m%d")
+        assert log_path is not None
 
         # Main log file (all levels)
         main_log_file = log_path / f"{app_name}_{timestamp}.log"

@@ -16,6 +16,85 @@ try:
 except ImportError:
     HAS_PANDAS = False
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+_CSV_WHITESPACE = " \t\r\n"
+
+
+def project_root() -> Path:
+    """Return the repository root (parent of the core package)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def confine_path(path: Path | str, roots: list[Path] | None = None) -> Path:
+    """Resolve a path and reject targets outside the allowed roots.
+
+    Relative paths are resolved from the project root. Symlinks are followed
+    so a link inside an allowed root cannot point at a file outside it.
+    """
+    allowed_roots = roots if roots is not None else [project_root()]
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = project_root() / candidate
+    resolved = candidate.resolve()
+    for root in allowed_roots:
+        root_resolved = root.resolve()
+        if resolved == root_resolved or root_resolved in resolved.parents:
+            return resolved
+    raise ValueError("Path is outside the allowed directories")
+
+
+def confine_child_path(root: Path | str, name: str) -> Path:
+    """Join a file name under a project directory and reject traversal.
+
+    Absolute names, parent segments, and symlinks are rejected so a caller
+    cannot turn a data-directory argument into an arbitrary file read.
+    """
+    root_path = confine_path(root)
+    relative = Path(name)
+    if (
+        not isinstance(name, str)
+        or name == ""
+        or "\x00" in name
+        or relative.is_absolute()
+        or any(part in {"", ".."} for part in relative.parts)
+    ):
+        raise ValueError("File name must stay inside the data directory")
+    candidate = root_path / relative
+    if candidate.is_symlink():
+        raise ValueError("Data file must not be a symlink")
+    resolved = candidate.resolve()
+    if resolved != root_path and root_path not in resolved.parents:
+        raise ValueError("File name must stay inside the data directory")
+    return resolved
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula text so exported CSV cells stay inert."""
+    if not isinstance(value, str) or value == "":
+        return value
+    stripped = value.lstrip(_CSV_WHITESPACE)
+    if (
+        value[0] in _CSV_FORMULA_PREFIXES
+        or value[0] in "\t\r"
+        or (stripped != "" and stripped[0] in _CSV_FORMULA_PREFIXES)
+    ):
+        return "'" + value
+    return value
+
+
+def neutralize_csv_frame(df: Any) -> Any:
+    """Neutralize formula-like strings in an exported DataFrame.
+
+    Pandas 2.3 stores text as a dedicated string dtype whose name is ``str``,
+    so a check for ``object`` or ``string`` skips those columns and leaves
+    spreadsheet formulas intact.
+    """
+    if not HAS_PANDAS:
+        return df
+    for column in df.columns:
+        df[column] = df[column].map(neutralize_csv_value)
+    return df
+
 
 # JSON utilities
 def read_json(path: Path | str, default: Any = None) -> Any:
@@ -32,7 +111,13 @@ def read_json(path: Path | str, default: Any = None) -> Any:
     Raises:
         json.JSONDecodeError: If JSON is malformed and no default provided
     """
-    path = Path(path)
+    try:
+        path = confine_path(path)
+    except ValueError:
+        logger.error("Refusing to read JSON outside the project directory")
+        if default is not None:
+            return default
+        raise
     try:
         with path.open("r", encoding="utf-8") as fh:
             return json.load(fh)
@@ -71,7 +156,7 @@ def write_json(
     Raises:
         Exception: If writing fails
     """
-    path = Path(path)
+    path = confine_path(path)
     try:
         if create_dirs:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,7 +183,9 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = confine_path(filepath)
+    df = df.copy()
+    neutralize_csv_frame(df)
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -198,7 +285,15 @@ def load_dataframe(
     if not HAS_PANDAS:
         raise ImportError("pandas is required for load_dataframe")
 
-    filepath = Path(filepath)
+    try:
+        filepath = confine_path(filepath)
+    except ValueError:
+        logger.error("Refusing to read a CSV outside the project directory")
+        return pd.DataFrame() if default_empty else None
+
+    if filepath.is_symlink():
+        logger.error("Refusing to read a symlinked CSV")
+        return pd.DataFrame() if default_empty else None
 
     if not filepath.exists():
         logger.warning(f"CSV file not found: {filepath}")
@@ -346,10 +441,9 @@ def save_report(
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{timestamp_str}.json"
 
-    # Create full path
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    filepath = output_path / filename
+    # Create full path only after it is confined to the project.
+    filepath = confine_path(Path(output_dir) / filename)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:

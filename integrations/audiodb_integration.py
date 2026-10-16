@@ -1,10 +1,15 @@
 """AudioDB API integration for rich artist profiles and comprehensive music metadata."""
 
+import re
 import time
 from typing import Any
 
 import pandas as pd
 import requests
+
+_ENDPOINT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,80}")
+_API_KEY_RE = re.compile(r"[A-Za-z0-9]{1,64}")
+_REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
 
 # Note: config import is optional for standalone execution
 
@@ -17,6 +22,7 @@ class AudioDBAPI:
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key
         self.session = requests.Session()
+        self.session.trust_env = False
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second
 
@@ -34,14 +40,25 @@ class AudioDBAPI:
         """Make a request to AudioDB API with rate limiting."""
         self._rate_limit()
 
-        # Use API key if available, otherwise use free key (123)
-        if self.api_key:
-            url = f"{BASE_URL}/{self.api_key}/{endpoint}"
-        else:
-            url = f"{BASE_URL}/123/{endpoint}"  # Free API key is 123
+        if (
+            not isinstance(endpoint, str)
+            or not _ENDPOINT_RE.fullmatch(endpoint)
+            or ".." in endpoint
+        ):
+            print("AudioDB API error: invalid endpoint")
+            return None
+
+        api_key = self.api_key or "123"
+        if not _API_KEY_RE.fullmatch(api_key):
+            print("AudioDB API error: invalid API key")
+            return None
+        url = f"{BASE_URL}/{api_key}/{endpoint}"
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, timeout=30, allow_redirects=False)
+            if response.status_code in _REDIRECT_STATUS_CODES:
+                print("AudioDB API error: redirect blocked")
+                return None
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:

@@ -1,10 +1,14 @@
 """MusicBrainz API integration for comprehensive music metadata and artist relationships."""
 
+import re
 import time
 from typing import Any
 
 import pandas as pd
 import requests
+
+_ENDPOINT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9./_-]{0,180}")
+_REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
 
 BASE_URL = "https://musicbrainz.org/ws/2/"
 USER_AGENT = "SpotifyInsights/1.0 (https://github.com/GaBe141/spotify-insights)"
@@ -15,6 +19,7 @@ class MusicBrainzAPI:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.headers.update({"User-Agent": USER_AGENT})
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second to be respectful
@@ -27,6 +32,16 @@ class MusicBrainzAPI:
             time.sleep(self.rate_limit_delay - time_since_last)
         self.last_request_time = time.time()
 
+    def _safe_endpoint(self, endpoint: str) -> str:
+        """Reject endpoints that can escape the MusicBrainz API path."""
+        if (
+            not isinstance(endpoint, str)
+            or not _ENDPOINT_RE.fullmatch(endpoint)
+            or any(part in {"", ".", ".."} for part in endpoint.split("/"))
+        ):
+            raise ValueError("Invalid MusicBrainz endpoint")
+        return endpoint
+
     def _make_request(self, endpoint: str, params: dict[str, Any]) -> dict | None:
         """Make a request to MusicBrainz API with rate limiting."""
         self._rate_limit()
@@ -34,7 +49,13 @@ class MusicBrainzAPI:
         params.update({"fmt": "json"})
 
         try:
-            response = self.session.get(f"{BASE_URL}{endpoint}", params=params)
+            safe_endpoint = self._safe_endpoint(endpoint)
+            response = self.session.get(
+                f"{BASE_URL}{safe_endpoint}", params=params, timeout=30, allow_redirects=False
+            )
+            if response.status_code in _REDIRECT_STATUS_CODES:
+                print("MusicBrainz API error: redirect blocked")
+                return None
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
