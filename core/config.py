@@ -8,6 +8,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from core.utils import write_private_text
+
 
 class SecureConfig:
     """Secure configuration manager with validation and error handling."""
@@ -25,26 +27,60 @@ class SecureConfig:
 
     def _load_environment(self):
         """Load environment variables securely."""
-        if not self.env_file.exists():
+        env_path = Path(self.env_file)
+        if env_path.is_symlink():
             warnings.warn(
-                f"Environment file not found: {self.env_file}\n"
-                "Create a .env file with your API credentials.",
+                f"Refusing to load symlinked environment file: {env_path}",
                 UserWarning,
+                stacklevel=2,
             )
             return
 
-        # Load with explicit encoding and override
-        load_dotenv(dotenv_path=str(self.env_file), override=True, encoding="utf-8")
+        if not env_path.exists():
+            warnings.warn(
+                f"Environment file not found: {env_path}\n"
+                "Create a .env file with your API credentials.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return
 
-        # Validate file permissions (Unix-like systems)
-        if hasattr(os, "stat") and not sys.platform.startswith("win"):
-            file_mode = oct(self.env_file.stat().st_mode)[-3:]
-            if file_mode != "600":
-                warnings.warn(
-                    f"Environment file permissions are too open: {file_mode}\n"
-                    f"Consider running: chmod 600 {self.env_file}",
-                    UserWarning,
-                )
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        fd = -1
+        try:
+            fd = os.open(env_path, os.O_RDONLY | nofollow)
+        except OSError as exc:
+            warnings.warn(
+                f"Refusing to load environment file: {exc}",
+                UserWarning,
+                stacklevel=2,
+            )
+            return
+
+        try:
+            # Validate file permissions (Unix-like systems) on the opened descriptor.
+            if hasattr(os, "fstat") and not sys.platform.startswith("win"):
+                file_mode = oct(os.fstat(fd).st_mode)[-3:]
+                if file_mode != "600":
+                    warnings.warn(
+                        f"Environment file permissions are too open: {file_mode}\n"
+                        f"Consider running: chmod 600 {env_path}",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+            with os.fdopen(fd, "r", encoding="utf-8-sig") as handle:
+                fd = -1
+                # Process environment wins over a local file.
+                load_dotenv(stream=handle, override=False)
+        except Exception as exc:
+            warnings.warn(
+                f"Failed to load environment file: {exc}",
+                UserWarning,
+                stacklevel=2,
+            )
+        finally:
+            if fd >= 0:
+                os.close(fd)
 
     def get_spotify_config(self) -> dict[str, str]:
         """Get Spotify API configuration with validation."""
@@ -80,6 +116,7 @@ class SecureConfig:
                 "Last.fm API key format appears invalid. "
                 "Should be 32 character hexadecimal string.",
                 UserWarning,
+                stacklevel=2,
             )
 
         return {"api_key": api_key, "shared_secret": shared_secret or ""}
@@ -202,11 +239,7 @@ AUDIODB_API_KEY=123
             print(f"❌ No .env file found at: {self.env_file}")
             print("\n📝 Creating template .env file...")
 
-            self.env_file.write_text(self.create_env_template(), encoding="utf-8")
-
-            # Set restrictive permissions on Unix-like systems
-            if hasattr(os, "chmod") and not sys.platform.startswith("win"):
-                os.chmod(self.env_file, 0o600)
+            write_private_text(self.env_file, self.create_env_template())
 
             print(f"✅ Created template: {self.env_file}")
             print("\n🔑 Next steps:")

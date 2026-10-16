@@ -1,9 +1,13 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
 import time
+from unittest.mock import MagicMock
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
+    deserialize_cache_value,
+    serialize_cache_value,
 )
 
 
@@ -118,3 +122,26 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedJsonCache:
+    """Redis values are HMAC-signed JSON and clear() does not flush the database."""
+
+    def test_round_trip_and_reject_tampering(self):
+        key = b"test-signing-key"
+        raw = serialize_cache_value({"track": "Song", "score": 1}, key)
+        assert deserialize_cache_value(raw, key) == {"track": "Song", "score": 1}
+        assert deserialize_cache_value(raw, b"other-key") is None
+        assert deserialize_cache_value(b"not-json", key) is None
+        assert b"pickle" not in raw
+
+    def test_clear_scans_only_the_key_prefix(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend.key_prefix = "audora"
+        client = MagicMock()
+        client.scan.return_value = (0, [b"audora:one"])
+        backend._client = client
+        backend.clear()
+        client.flushdb.assert_not_called()
+        client.scan.assert_called_once()
+        client.delete.assert_called_once_with(b"audora:one")

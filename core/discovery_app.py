@@ -17,7 +17,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 # Import all enhanced components
 from analytics.advanced_analytics import MusicTrendAnalytics
-from core.data_store import EnhancedMusicDataStore
+from core.data_store import EnhancedMusicDataStore, database_path_from_config
 from core.notification_service import (
     EnhancedNotificationService,
     NotificationChannel,
@@ -49,9 +49,10 @@ class EnhancedMusicDiscoveryApp:
 
         # Initialize components
         self.resilience = EnhancedResilience()
-        self.data_store = EnhancedMusicDataStore(
-            self.configs.get("database", {}).get("path", "data/enhanced_music_trends.db")
+        configured_db = self.configs.get("database", {}).get(
+            "path", "data/enhanced_music_trends.db"
         )
+        self.data_store = EnhancedMusicDataStore(str(database_path_from_config(str(configured_db))))
         self.analytics = MusicTrendAnalytics(self.data_store)
         self.notifications = EnhancedNotificationService()
 
@@ -273,17 +274,13 @@ class EnhancedMusicDiscoveryApp:
                                 },
                             }
                         )
-                    self.logger.info(
-                        f"✅ Last.fm: {len(discoveries) - before} tracks"
-                    )
+                    self.logger.info(f"✅ Last.fm: {len(discoveries) - before} tracks")
             except Exception as e:
                 self.logger.warning(f"⚠️ Last.fm unavailable: {e}")
 
         # --- Fallback: mock data when no API keys are configured ---
         if not discoveries:
-            self.logger.warning(
-                "No API sources returned data — using mock discovery engine"
-            )
+            self.logger.warning("No API sources returned data — using mock discovery engine")
             mock_engine = create_mock_discovery_data()
             mock_results = await mock_engine.discover_emerging_music(region="US")
             for platform_name, metrics_list in mock_results.items():
