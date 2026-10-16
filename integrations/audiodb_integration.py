@@ -6,6 +6,13 @@ from typing import Any
 import pandas as pd
 import requests
 
+from integrations.safe_http import (
+    NoRedirectRequests,
+    is_redirect_status,
+    is_safe_api_key,
+    is_safe_path,
+)
+
 # Note: config import is optional for standalone execution
 
 BASE_URL = "https://www.theaudiodb.com/api/v1/json"
@@ -16,7 +23,7 @@ class AudioDBAPI:
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key
-        self.session = requests.Session()
+        self.session = NoRedirectRequests()
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second
 
@@ -32,16 +39,19 @@ class AudioDBAPI:
         self, endpoint: str, params: dict[str, Any] | None = None
     ) -> dict[str, Any] | None:
         """Make a request to AudioDB API with rate limiting."""
-        self._rate_limit()
+        api_key = self.api_key or "123"
+        if not is_safe_path(endpoint) or not is_safe_api_key(api_key):
+            print("AudioDB API error: rejected unsafe request path")
+            return None
 
-        # Use API key if available, otherwise use free key (123)
-        if self.api_key:
-            url = f"{BASE_URL}/{self.api_key}/{endpoint}"
-        else:
-            url = f"{BASE_URL}/123/{endpoint}"  # Free API key is 123
+        self._rate_limit()
+        url = f"{BASE_URL}/{api_key}/{endpoint}"
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, timeout=20)
+            if is_redirect_status(response.status_code):
+                print("AudioDB API error: redirect was refused")
+                return None
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:

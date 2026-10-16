@@ -5,6 +5,7 @@ import sys
 import warnings
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -19,7 +20,10 @@ class SecureConfig:
             env_file: Path to .env file. If None, searches for .env in project root.
         """
         self.project_root = Path(__file__).resolve().parent.parent
-        self.env_file = env_file or (self.project_root / ".env")
+        if env_file is None:
+            self.env_file = self.project_root / ".env"
+        else:
+            self.env_file = Path(env_file)
         self._config: dict[str, Any] = {}
         self._load_environment()
 
@@ -33,8 +37,8 @@ class SecureConfig:
             )
             return
 
-        # Load with explicit encoding and override
-        load_dotenv(dotenv_path=str(self.env_file), override=True, encoding="utf-8")
+        # Existing environment variables win so a writable .env cannot replace them.
+        load_dotenv(dotenv_path=str(self.env_file), override=False, encoding="utf-8")
 
         # Validate file permissions (Unix-like systems)
         if hasattr(os, "stat") and not sys.platform.startswith("win"):
@@ -57,8 +61,15 @@ class SecureConfig:
             ),
         }
 
-        # Validate redirect URI format
-        if not config["redirect_uri"].startswith(("http://localhost", "http://127.0.0.1")):
+        # Require an exact loopback host so localhost.evil.com cannot capture tokens.
+        redirect = urlparse(config["redirect_uri"])
+        redirect_host = (redirect.hostname or "").lower()
+        if (
+            redirect.scheme != "http"
+            or redirect.username
+            or redirect.password
+            or redirect_host not in {"localhost", "127.0.0.1"}
+        ):
             raise ValueError(
                 f"Invalid redirect URI: {config['redirect_uri']}\n"
                 "For development, use http://localhost or http://127.0.0.1"

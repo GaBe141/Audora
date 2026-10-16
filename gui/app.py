@@ -14,7 +14,10 @@ import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
 
+from core.utils import neutralize_csv_dataframe
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_ALLOWED_DEMOS = frozenset({"statistical", "trending", "multi_source", "platform", "all"})
 sys.path.insert(0, str(PROJECT_ROOT))
 
 app = dash.Dash(
@@ -396,7 +399,11 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
-        return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
+        if demo_value not in _ALLOWED_DEMOS:
+            return "Error", "Unsupported demo mode"
+        return _run_command(
+            [sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value]
+        )
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
     if triggered == "btn-validate":
@@ -541,7 +548,7 @@ def search_history(_n, platform, min_score, days, artist_filter):
 
     # Optional artist filter (client-side simple substring)
     if artist_filter:
-        mask = df["artist"].str.contains(artist_filter, case=False, na=False)
+        mask = df["artist"].str.contains(artist_filter, case=False, na=False, regex=False)
         df = df[mask]
 
     # Round score
@@ -562,7 +569,7 @@ def export_csv(_n, table_data):
         raise dash.exceptions.PreventUpdate
     import io
     import pandas as pd
-    df = pd.DataFrame(table_data)
+    df = neutralize_csv_dataframe(pd.DataFrame(table_data))
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return dcc.send_string(buf.getvalue(), "audora_trends.csv")
@@ -589,15 +596,23 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         from core.notification_service import EnhancedNotificationService
         svc = EnhancedNotificationService()
         if slack_url:
+            svc._validate_webhook_url(slack_url, allow_private=False)
             svc.config["slack"]["webhook_url"] = slack_url
         if discord_url:
+            svc._validate_webhook_url(discord_url, allow_private=False)
             svc.config["discord"]["webhook_url"] = discord_url
         if webhook_url:
+            svc._validate_webhook_url(webhook_url, allow_private=svc._allow_private_webhooks())
             svc.config["webhook"]["url"] = webhook_url
-        if smtp_host:
-            svc.config["email"]["smtp_server"] = smtp_host
-        if smtp_port:
-            svc.config["email"]["port"] = int(smtp_port)
+        if smtp_host or smtp_port:
+            host = smtp_host or svc.config["email"].get("smtp_server") or ""
+            port = int(smtp_port) if smtp_port else int(svc.config["email"].get("port", 587))
+            if host:
+                svc._resolve_smtp_target(host, port)
+            if smtp_host:
+                svc.config["email"]["smtp_server"] = smtp_host
+            if smtp_port:
+                svc.config["email"]["port"] = port
         if smtp_user:
             svc.config["email"]["username"] = smtp_user
         if smtp_pass:
@@ -637,8 +652,12 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
                 priority=NotificationPriority.LOW,
                 channels=[channel],
             )
-            asyncio.run(svc.send_notification(msg))
-            return "OK"
+            result = asyncio.run(svc.send_notification(msg))
+            channel_result = result.get("delivery_results", {}).get(channel.value, {})
+            if result.get("delivered") and channel_result.get("success"):
+                return "OK"
+            error = channel_result.get("error") or "delivery failed"
+            return f"Fail: {error}"
         except Exception as e:
             return f"Fail: {e}"
 

@@ -86,6 +86,45 @@ def write_json(
         raise
 
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula text so exported CSV cells are not executed."""
+    if not isinstance(value, str):
+        return value
+    stripped = value.lstrip(" \t\r\n")
+    if stripped.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def neutralize_csv_dataframe(df: Any) -> Any:
+    """Return a copy of a DataFrame with formula-like text cells neutralized."""
+    if not HAS_PANDAS:
+        raise ImportError("pandas is required for neutralize_csv_dataframe")
+    sanitized = df.copy()
+    for column in sanitized.columns:
+        if sanitized[column].dtype == object or pd.api.types.is_string_dtype(sanitized[column]):
+            sanitized[column] = sanitized[column].map(neutralize_csv_value)
+    return sanitized
+
+
+def confine_to_roots(path: Path | str, roots: list[Path]) -> Path:
+    """Resolve a path and reject targets outside the allowed directories."""
+    if not roots:
+        raise ValueError("At least one allowed directory is required")
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = roots[0] / candidate
+    resolved = candidate.resolve()
+    for root in roots:
+        root_resolved = root.resolve()
+        if resolved == root_resolved or root_resolved in resolved.parents:
+            return resolved
+    raise ValueError("Path must stay inside an allowed directory")
+
+
 def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> Path:  # pd.DataFrame
     """
     Save DataFrame to CSV with consistent settings.
@@ -103,7 +142,7 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    neutralize_csv_dataframe(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
