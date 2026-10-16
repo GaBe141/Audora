@@ -28,6 +28,17 @@ import jinja2  # type: ignore[import-untyped]
 
 from core.utils import open_nofollow, resolve_within_project
 
+# Ranges Python 3.12 does not treat as private, plus transition prefixes that can
+# embed a private or metadata address (NAT64, 6to4, deprecated site-local).
+_ALWAYS_BLOCKED_NETWORKS = (
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("192.88.99.0/24"),
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+    ipaddress.ip_network("2002::/16"),
+    ipaddress.ip_network("fec0::/10"),
+)
+
 
 class _PinnedAddressResolver(aiohttp.abc.AbstractResolver):
     """Resolve webhook hosts to the addresses already checked for SSRF."""
@@ -287,22 +298,35 @@ class EnhancedNotificationService:
             "on",
         }
 
-    def _is_restricted_ip(self, ip: str) -> bool:
-        """Return True when the IP belongs to a non-public range."""
+    def _parse_ip(self, ip: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+        """Parse an address and unwrap IPv4-mapped IPv6 values."""
         try:
             parsed = ipaddress.ip_address(ip.split("%", 1)[0])
         except ValueError:
-            return True
+            return None
         if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
-            parsed = parsed.ipv4_mapped
+            return parsed.ipv4_mapped
+        return parsed
+
+    def _is_always_blocked_ip(self, parsed: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+        """Block metadata, loopback, and transition ranges even for private opt-in."""
         return bool(
-            parsed.is_private
-            or parsed.is_loopback
+            parsed.is_loopback
             or parsed.is_link_local
             or parsed.is_multicast
             or parsed.is_reserved
             or parsed.is_unspecified
+            or any(parsed in network for network in _ALWAYS_BLOCKED_NETWORKS)
         )
+
+    def _is_restricted_ip(self, ip: str) -> bool:
+        """Return True when the IP belongs to a non-public range."""
+        parsed = self._parse_ip(ip)
+        if parsed is None:
+            return True
+        if self._is_always_blocked_ip(parsed):
+            return True
+        return bool(parsed.is_private or not parsed.is_global)
 
     def _resolve_checked_ips(
         self, hostname: str, port: int, *, allow_private: bool, kind: str
@@ -332,16 +356,16 @@ class EnhancedNotificationService:
         if not resolved_ips:
             raise ValueError(f"Could not resolve {kind} hostname: {hostname}")
 
-        if not allow_private:
-            for ip in resolved_ips:
-                if self._is_restricted_ip(ip):
-                    if kind == "webhook":
-                        raise ValueError(
-                            "Webhook URL resolves to a private or restricted network address"
-                        )
+        for ip in resolved_ips:
+            parsed = self._parse_ip(ip)
+            always_blocked = parsed is None or self._is_always_blocked_ip(parsed)
+            private_blocked = not allow_private and self._is_restricted_ip(ip)
+            if always_blocked or private_blocked:
+                if kind == "webhook":
                     raise ValueError(
-                        "SMTP server resolves to a private or restricted network address"
+                        "Webhook URL resolves to a private or restricted network address"
                     )
+                raise ValueError("SMTP server resolves to a private or restricted network address")
 
         return tuple(sorted(resolved_ips))
 

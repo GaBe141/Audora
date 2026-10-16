@@ -13,6 +13,9 @@ from core.utils import (
     neutralize_csv_frame,
     resolve_within_project,
 )
+from integrations.extended_platforms import safe_path_segment
+from integrations.musicbrainz_integration import MusicBrainzAPI
+from integrations.spotify_charts_integration import chart_url
 
 
 class TestSignedJsonCache:
@@ -91,6 +94,28 @@ class TestCsvNeutralization:
         neutralized = neutralize_csv_frame(frame)
         assert neutralized["command"].tolist() == ["'=1+1", "' =1+1", "'\t@cmd", "safe"]
         assert neutralized["score"].tolist() == [1, 2, 3, 4]
+
+
+def test_chart_url_rejects_host_injection():
+    assert chart_url("regional", "global", "2024-01-02") is not None
+    assert chart_url("regional", "US", "2024-01-02") is not None
+    assert chart_url("regional", "../@127.0.0.1", "2024-01-02") is None
+    assert chart_url("regional", "us", "2024-99-99") is None
+    assert chart_url("viral", "https://evil.test", "2024-01-02") is None
+
+
+def test_safe_path_segment_rejects_traversal():
+    assert safe_path_segment("hiphopheads") == "hiphopheads"
+    assert safe_path_segment("123456789012345678") == "123456789012345678"
+    assert safe_path_segment("../users/@me") is None
+    assert safe_path_segment("blog.example.com") is None
+    assert safe_path_segment("a/b") is None
+
+
+def test_musicbrainz_rejects_mbid_path_injection():
+    api = MusicBrainzAPI()
+    assert api.get_artist_details("../secret") is None
+    assert api.get_artist_details("not-a-uuid") is None
 
 
 def test_logging_file_output_rejects_outside_directory(tmp_path):

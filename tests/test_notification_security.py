@@ -37,6 +37,33 @@ class TestWebhookUrlValidation:
     @pytest.mark.parametrize(
         "url",
         [
+            "https://100.100.100.200/hook",
+            "https://100.64.0.1/hook",
+            "https://169.254.169.254/latest/meta-data",
+            "https://[64:ff9b::a9fe:a9fe]/hook",
+            "https://[64:ff9b::7f00:1]/hook",
+            "https://[fec0::1]/hook",
+            "https://192.88.99.1/hook",
+        ],
+    )
+    def test_rejects_metadata_and_transition_ranges(self, url):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="private or restricted"):
+            svc._validate_webhook_url(url)
+
+    def test_private_opt_in_still_blocks_metadata(self):
+        svc = EnhancedNotificationService()
+        for url in (
+            "https://169.254.169.254/hook",
+            "https://100.100.100.200/hook",
+            "https://[64:ff9b::a9fe:a9fe]/hook",
+        ):
+            with pytest.raises(ValueError, match="private or restricted"):
+                svc._validate_webhook_url(url, allow_private=True)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
             "https://127.1/hook",
             "https://0177.0.0.1/hook",
             "https://0x7f.0.0.1/hook",
