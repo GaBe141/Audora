@@ -1,6 +1,7 @@
 """Spotify Charts web scraping for real streaming data and trending analysis."""
 
 import json
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -9,6 +10,25 @@ import requests
 from bs4 import BeautifulSoup
 
 CHARTS_BASE_URL = "https://charts.spotify.com"
+_CHART_COUNTRY = re.compile(r"^(?:global|[a-z]{2})$")
+_CHART_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def chart_url(kind: str, country_code: str, date: str) -> str | None:
+    """Build a Spotify Charts URL only for a country code and calendar date."""
+    if kind not in {"regional", "viral"}:
+        return None
+    if not isinstance(country_code, str) or not isinstance(date, str):
+        return None
+    country = country_code.strip().lower()
+    chart_date = date.strip()
+    if _CHART_COUNTRY.fullmatch(country) is None or _CHART_DATE.fullmatch(chart_date) is None:
+        return None
+    try:
+        datetime.strptime(chart_date, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return f"{CHARTS_BASE_URL}/charts/view/{kind}-{country}-daily/{chart_date}"
 
 
 class SpotifyChartsAPI:
@@ -16,6 +36,7 @@ class SpotifyChartsAPI:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         # Use a realistic user agent
         self.session.headers.update(
             {
@@ -46,10 +67,12 @@ class SpotifyChartsAPI:
             # Default to yesterday (charts are usually 1 day behind)
             date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        url = f"{CHARTS_BASE_URL}/charts/view/regional-{country_code}-daily/{date}"
+        url = chart_url("regional", country_code, date)
+        if url is None:
+            return pd.DataFrame()
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=15, allow_redirects=False)
             response.raise_for_status()
 
             # Parse the HTML
@@ -138,10 +161,12 @@ class SpotifyChartsAPI:
         if date is None:
             date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        url = f"{CHARTS_BASE_URL}/charts/view/viral-{country_code}-daily/{date}"
+        url = chart_url("viral", country_code, date)
+        if url is None:
+            return pd.DataFrame()
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=15, allow_redirects=False)
             response.raise_for_status()
 
             BeautifulSoup(response.content, "html.parser")
