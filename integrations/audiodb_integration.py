@@ -1,5 +1,6 @@
 """AudioDB API integration for rich artist profiles and comprehensive music metadata."""
 
+import re
 import time
 from typing import Any
 
@@ -17,6 +18,7 @@ class AudioDBAPI:
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key
         self.session = requests.Session()
+        self.session.trust_env = False
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second
 
@@ -34,14 +36,18 @@ class AudioDBAPI:
         """Make a request to AudioDB API with rate limiting."""
         self._rate_limit()
 
-        # Use API key if available, otherwise use free key (123)
-        if self.api_key:
-            url = f"{BASE_URL}/{self.api_key}/{endpoint}"
-        else:
-            url = f"{BASE_URL}/123/{endpoint}"  # Free API key is 123
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", endpoint):
+            print("AudioDB endpoint rejected")
+            return None
+        api_key = (
+            self.api_key
+            if self.api_key and re.fullmatch(r"[A-Za-z0-9]{1,128}", self.api_key)
+            else "123"
+        )
+        url = f"{BASE_URL}/{api_key}/{endpoint}"
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, timeout=10, allow_redirects=False)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:

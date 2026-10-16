@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,89 @@ try:
     HAS_PANDAS = True
 except ImportError:
     HAS_PANDAS = False
+
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _open_flags(write: bool) -> int:
+    """Build open flags that refuse to follow symlinks."""
+    flags = os.O_RDWR | os.O_CREAT if write else os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    return flags
+
+
+def _reject_symlink(path: Path) -> None:
+    """Refuse paths whose final component is a symlink."""
+    if path.is_symlink():
+        raise ValueError(f"Refusing to use symlinked path: {path}")
+
+
+def read_nofollow_text(path: Path | str) -> str:
+    """Read a text file without following a symlink at the final path."""
+    target = Path(path)
+    _reject_symlink(target)
+    fd = os.open(target, _open_flags(write=False))
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            return handle.read()
+    finally:
+        if fd != -1:
+            os.close(fd)
+
+
+def write_private_text(path: Path | str, content: str) -> Path:
+    """Write text to a newly created or replaced file with mode 600.
+
+    The final path is opened with ``O_NOFOLLOW`` so a symlink cannot redirect
+    the write onto another file.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _reject_symlink(target)
+    flags = _open_flags(write=True) | os.O_TRUNC
+    fd = os.open(target, flags, 0o600)
+    try:
+        if os.name != "nt":
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(content)
+    finally:
+        if fd != -1:
+            os.close(fd)
+    return target
+
+
+def ensure_private_file(path: Path | str) -> Path:
+    """Create a regular file with mode 600 without following a symlink."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _reject_symlink(target)
+    fd = os.open(target, _open_flags(write=True), 0o600)
+    try:
+        if os.name != "nt":
+            os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    return target
+
+
+def neutralize_csv_cell(value: Any) -> Any:
+    """Prefix spreadsheet formula characters so exported cells stay text."""
+    if isinstance(value, str):
+        stripped = value.lstrip(" \t\r")
+        if value.startswith(_FORMULA_PREFIXES) or stripped.startswith(_FORMULA_PREFIXES):
+            return "'" + value
+    return value
+
+
+def neutralize_csv_frame(frame: Any) -> Any:
+    """Neutralize formula injection in every cell of a DataFrame."""
+    return frame.map(neutralize_csv_cell)
 
 
 # JSON utilities
@@ -34,8 +118,7 @@ def read_json(path: Path | str, default: Any = None) -> Any:
     """
     path = Path(path)
     try:
-        with path.open("r", encoding="utf-8") as fh:
-            return json.load(fh)
+        return json.loads(read_nofollow_text(path))
     except FileNotFoundError:
         if default is not None:
             logger.warning(f"JSON file not found: {path}, using default")
@@ -73,11 +156,20 @@ def write_json(
     """
     path = Path(path)
     try:
+        _reject_symlink(path)
         if create_dirs:
             path.parent.mkdir(parents=True, exist_ok=True)
 
-        with path.open("w", encoding="utf-8") as fh:
-            json.dump(obj, fh, indent=indent, ensure_ascii=ensure_ascii, default=str)
+        payload = json.dumps(obj, indent=indent, ensure_ascii=ensure_ascii, default=str)
+        flags = _open_flags(write=True) | os.O_TRUNC
+        fd = os.open(path, flags, 0o644)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fd = -1
+                fh.write(payload)
+        finally:
+            if fd != -1:
+                os.close(fd)
 
         logger.debug(f"Wrote JSON to {path}")
         return path
@@ -103,7 +195,7 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    neutralize_csv_frame(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
