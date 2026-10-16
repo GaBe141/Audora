@@ -1,9 +1,11 @@
 """Tests for core caching (LocalCacheBackend, CacheManager, @cached decorator)."""
 
+import json
 import time
 
 from core.caching import (
     LocalCacheBackend,
+    RedisCacheBackend,
 )
 
 
@@ -118,3 +120,23 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestRedisPayloadSigning:
+    """Redis values are HMAC-signed JSON and never pickle."""
+
+    def test_round_trip_rejects_pickle_and_tampering(self):
+        backend = RedisCacheBackend.__new__(RedisCacheBackend)
+        backend._signing_key = b"test-key"
+        encoded = backend._serialize({"track": "safe", "score": 1})
+        assert json.loads(encoded.decode())["v"] == 2
+        assert b"pickle" not in encoded
+        assert backend._deserialize(encoded) == {"track": "safe", "score": 1}
+
+        pickled = (
+            b'{"v":1,"alg":"HMAC-SHA256","sig":"aa","payload":"gASVBQAAAAAAAACMCG5vdC1qc29ulC4="}'
+        )
+        assert backend._deserialize(pickled) is None
+        tampered = bytearray(encoded)
+        tampered[-2] = tampered[-2] ^ 1
+        assert backend._deserialize(bytes(tampered)) is None

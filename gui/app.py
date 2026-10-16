@@ -4,15 +4,18 @@ Orchestrates main.py (discovery, demos, setup, validate) via subprocess and show
 Includes live trend dashboard, history search, notification settings, and accuracy tracking.
 """
 
-import json
+import io
 import subprocess
 import sys
 from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
+import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+
+from core.utils import neutralize_csv_frame
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -396,6 +399,9 @@ def run_action(
     if triggered == "btn-discovery":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--mode", "single"])
     if triggered == "btn-demo":
+        allowed_demos = {"statistical", "trending", "multi_source", "platform", "all"}
+        if demo_value not in allowed_demos:
+            return "Error", "Rejected unrecognized demo command"
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--demo", demo_value])
     if triggered == "btn-setup":
         return _run_command([sys.executable, str(PROJECT_ROOT / "main.py"), "--setup"])
@@ -541,7 +547,7 @@ def search_history(_n, platform, min_score, days, artist_filter):
 
     # Optional artist filter (client-side simple substring)
     if artist_filter:
-        mask = df["artist"].str.contains(artist_filter, case=False, na=False)
+        mask = df["artist"].str.contains(artist_filter, case=False, na=False, regex=False)
         df = df[mask]
 
     # Round score
@@ -560,9 +566,7 @@ def search_history(_n, platform, min_score, days, artist_filter):
 def export_csv(_n, table_data):
     if not table_data:
         raise dash.exceptions.PreventUpdate
-    import io
-    import pandas as pd
-    df = pd.DataFrame(table_data)
+    df = neutralize_csv_frame(pd.DataFrame(table_data))
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return dcc.send_string(buf.getvalue(), "audora_trends.csv")
@@ -622,6 +626,7 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
             return "No URL"
         try:
             import asyncio
+
             from core.notification_service import (
                 EnhancedNotificationService,
                 NotificationChannel,
@@ -637,7 +642,9 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
                 priority=NotificationPriority.LOW,
                 channels=[channel],
             )
-            asyncio.run(svc.send_notification(msg))
+            result = asyncio.run(svc.send_notification(msg))
+            if not result.get("delivered"):
+                return "Fail: notification was rejected"
             return "OK"
         except Exception as e:
             return f"Fail: {e}"
