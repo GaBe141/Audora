@@ -9,9 +9,8 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
-import aiohttp
-
 from core.utils import write_json
+from integrations.safe_http import NoRedirectSession
 
 # Import our existing trending schema
 from integrations.trending_schema import TrendingSchema
@@ -129,7 +128,7 @@ class TikTokMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with NoRedirectSession() as session:
                 headers = {"Authorization": f"Bearer {self.api_key}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:
@@ -152,7 +151,7 @@ class TikTokMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with NoRedirectSession() as session:
                 headers = {"Authorization": f"Bearer {self.api_key}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:
@@ -173,7 +172,7 @@ class TikTokMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with NoRedirectSession() as session:
                 headers = {"Authorization": f"Bearer {self.api_key}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:
@@ -210,7 +209,7 @@ class YouTubeMusicAPI:
 
         try:
             async with (
-                aiohttp.ClientSession() as session,
+                NoRedirectSession() as session,
                 session.get(endpoint, params=params) as response,
             ):
                 if response.status == 200:
@@ -241,7 +240,7 @@ class YouTubeMusicAPI:
 
         try:
             async with (
-                aiohttp.ClientSession() as session,
+                NoRedirectSession() as session,
                 session.get(endpoint, params=params) as response,
             ):
                 if response.status == 200:
@@ -265,7 +264,7 @@ class YouTubeMusicAPI:
 
         try:
             async with (
-                aiohttp.ClientSession() as session,
+                NoRedirectSession() as session,
                 session.get(endpoint, params=params) as response,
             ):
                 if response.status == 200:
@@ -298,7 +297,7 @@ class TwitterMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with NoRedirectSession() as session:
                 headers = {"Authorization": f"Bearer {self.bearer_token}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:
@@ -318,7 +317,7 @@ class TwitterMusicAPI:
         params = {"id": location_id}  # 1 = Worldwide, 23424977 = US
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with NoRedirectSession() as session:
                 headers = {"Authorization": f"Bearer {self.bearer_token}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:
