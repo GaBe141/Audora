@@ -1,12 +1,19 @@
 """Shared utility functions for the Audora project."""
 
+import errno
 import json
 import logging
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_FORMULA_PREFIXES = ("=", "+", "-", "@")
+_LEADING_FORMULA_WHITESPACE = " \t\r\n"
 
 # Re-export for convenience
 try:
@@ -15,6 +22,92 @@ try:
     HAS_PANDAS = True
 except ImportError:
     HAS_PANDAS = False
+
+
+def _is_inside(path: Path, root: Path) -> bool:
+    """Return True when path is root or a path under root."""
+    return path == root or path.is_relative_to(root)
+
+
+def resolve_within_project(path: Path | str) -> Path:
+    """Resolve a path and reject targets outside the project or via symlinks.
+
+    Relative paths are anchored at the project root so a caller cannot escape by
+    changing the process working directory.
+    """
+    raw = Path(path)
+    candidate = raw if raw.is_absolute() else PROJECT_ROOT / raw
+    if candidate.is_symlink():
+        raise ValueError(f"Symlinks are not allowed: {path}")
+    resolved = candidate.resolve(strict=False)
+    root = PROJECT_ROOT.resolve()
+    if not _is_inside(resolved, root):
+        raise ValueError(f"Path escapes the project directory: {path}")
+    return resolved
+
+
+def confine_child_path(directory: Path | str, name: str) -> Path:
+    """Join a single file name under a project directory.
+
+    Absolute names, parent segments, separators, and symlinks are rejected.
+    """
+    if not isinstance(name, str) or name != Path(name).name or name in {"", ".", ".."}:
+        raise ValueError("Invalid data file name")
+    if any(separator in name for separator in ("/", "\\", "\x00")):
+        raise ValueError("Invalid data file name")
+
+    base = resolve_within_project(directory)
+    candidate = base / name
+    if candidate.is_symlink():
+        raise ValueError("Symlinked data files are not allowed")
+    resolved = candidate.resolve(strict=False)
+    if not _is_inside(resolved, base):
+        raise ValueError("Path escapes the data directory")
+    return resolved
+
+
+def is_allowed_storage_path(path: Path) -> bool:
+    """Allow project files and the system temp dir used by tests."""
+    resolved = path.resolve(strict=False)
+    roots = (PROJECT_ROOT.resolve(), Path(tempfile.gettempdir()).resolve())
+    return any(_is_inside(resolved, root) for root in roots)
+
+
+def open_nofollow(path: Path, mode: str):
+    """Open a file without following a symlink at the final path component."""
+    text_mode = mode.replace("b", "")
+    if any(flag in text_mode for flag in ("w", "a", "x")):
+        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
+        if "a" in text_mode:
+            flags |= os.O_APPEND
+        else:
+            flags |= os.O_TRUNC
+        fd = os.open(path, flags, 0o600)
+    else:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    if "b" in mode:
+        return os.fdopen(fd, mode)
+    return os.fdopen(fd, mode, encoding="utf-8")
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula cells so exported CSV cannot execute them."""
+    if not isinstance(value, str):
+        return value
+    stripped = value.lstrip(_LEADING_FORMULA_WHITESPACE)
+    if stripped.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def neutralize_csv_frame(df: Any) -> Any:
+    """Neutralize formula injection in every column, including pandas string dtypes."""
+    if not HAS_PANDAS:
+        raise ImportError("pandas is required for neutralize_csv_frame")
+    neutralized = df.copy()
+    for column in neutralized.columns:
+        neutralized[column] = neutralized[column].map(neutralize_csv_value)
+    return neutralized
 
 
 # JSON utilities
@@ -32,14 +125,18 @@ def read_json(path: Path | str, default: Any = None) -> Any:
     Raises:
         json.JSONDecodeError: If JSON is malformed and no default provided
     """
-    path = Path(path)
+    path = resolve_within_project(path)
     try:
-        with path.open("r", encoding="utf-8") as fh:
+        with open_nofollow(path, "r") as fh:
             return json.load(fh)
     except FileNotFoundError:
         if default is not None:
             logger.warning(f"JSON file not found: {path}, using default")
             return default
+        raise
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise ValueError(f"Symlinks are not allowed: {path}") from e
         raise
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse JSON from {path}: {e}")
@@ -71,13 +168,15 @@ def write_json(
     Raises:
         Exception: If writing fails
     """
-    path = Path(path)
+    path = resolve_within_project(path)
     try:
         if create_dirs:
             path.parent.mkdir(parents=True, exist_ok=True)
 
-        with path.open("w", encoding="utf-8") as fh:
+        with open_nofollow(path, "w") as fh:
             json.dump(obj, fh, indent=indent, ensure_ascii=ensure_ascii, default=str)
+        if os.name != "nt":
+            path.chmod(0o600)
 
         logger.debug(f"Wrote JSON to {path}")
         return path
@@ -98,12 +197,12 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = resolve_within_project(filepath)
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    neutralize_csv_frame(df).to_csv(filepath, index=False)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
@@ -198,14 +297,15 @@ def load_dataframe(
     if not HAS_PANDAS:
         raise ImportError("pandas is required for load_dataframe")
 
-    filepath = Path(filepath)
+    filepath = resolve_within_project(filepath)
 
-    if not filepath.exists():
+    if not filepath.exists() or filepath.is_symlink():
         logger.warning(f"CSV file not found: {filepath}")
         return pd.DataFrame() if default_empty else None
 
     try:
-        df = pd.read_csv(filepath)
+        with open_nofollow(filepath, "rb") as fh:
+            df = pd.read_csv(fh)
 
         # Validate required columns
         if required_columns:
@@ -346,10 +446,11 @@ def save_report(
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{timestamp_str}.json"
 
-    # Create full path
-    output_path = Path(output_dir)
+    # Create full path inside the project
+    output_path = resolve_within_project(output_dir)
+    safe_name = confine_child_path(output_path, Path(filename).name)
     output_path.mkdir(parents=True, exist_ok=True)
-    filepath = output_path / filename
+    filepath = safe_name
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:

@@ -3,10 +3,10 @@ Advanced visualization module for trending schema data.
 Creates interactive charts and dashboards for trending analysis.
 """
 
-import json
 import warnings
-from pathlib import Path
 from typing import Any, cast
+
+from core.utils import read_json, resolve_within_project
 
 # Avoid heavy imports at module load; import within functions when needed
 
@@ -532,14 +532,13 @@ def visualize_trending_report(report_file: str, output_dir: str = "data/trending
     """Create comprehensive visualizations from trending report."""
     print("🎨 Creating comprehensive trending visualizations...")
 
-    # Load report data
-    with open(report_file) as f:
-        report_data = json.load(f)
+    # Load report data from inside the project
+    report_data = read_json(report_file)
 
     trending_insights = report_data.get("trending_insights", {})
 
     # Create output directory
-    output_path = Path(output_dir)
+    output_path = resolve_within_project(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Initialize visualization engine
