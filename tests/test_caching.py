@@ -2,8 +2,12 @@
 
 import time
 
+import pytest
+
 from core.caching import (
     LocalCacheBackend,
+    build_signed_cache_envelope,
+    read_signed_cache_envelope,
 )
 
 
@@ -118,3 +122,18 @@ class TestCachedDecorator:
 
         assert fn() == "ok"
         assert fn() == "ok"
+
+
+class TestSignedJsonCache:
+    """Redis cache entries are HMAC-signed JSON and never pickle."""
+
+    def test_round_trip_and_reject_tampering(self):
+        key = b"test-signing-key"
+        raw = build_signed_cache_envelope({"score": 1, "name": "track"}, key)
+        assert b"pickle" not in raw
+        assert read_signed_cache_envelope(raw, key) == {"score": 1, "name": "track"}
+        assert read_signed_cache_envelope(raw, b"other-key") is None
+
+    def test_rejects_non_json_values(self):
+        with pytest.raises(TypeError):
+            build_signed_cache_envelope(object(), b"key")
