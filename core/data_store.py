@@ -5,7 +5,9 @@ Handles trending data, viral predictions, and cross-platform analysis.
 
 import json
 import logging
+import os
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -15,6 +17,46 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import neutralize_csv_frame
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _contained_path(path: str | Path, *, allow_absolute: bool) -> Path:
+    """Resolve a database path and reject escapes and symlinks.
+
+    Relative paths are resolved from the project root. Absolute paths are
+    accepted only for the constructor, and only when they stay under the
+    project root or the system temp directory (so tests can use tmp_path).
+    """
+    candidate = Path(path)
+    if candidate.is_absolute() and not allow_absolute:
+        raise ValueError("Configured database path must be relative to the project root")
+
+    raw = candidate if candidate.is_absolute() else _PROJECT_ROOT / candidate
+    if raw.is_symlink():
+        raise ValueError(f"Refusing to use a symlinked database path: {path}")
+
+    resolved = raw.resolve()
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    in_project = resolved == _PROJECT_ROOT or resolved.is_relative_to(_PROJECT_ROOT)
+    in_temp = resolved == temp_root or resolved.is_relative_to(temp_root)
+    if candidate.is_absolute():
+        if not (in_project or in_temp):
+            raise ValueError(
+                "Absolute database path must stay under the project root or the system temp directory"
+            )
+    elif not in_project:
+        raise ValueError("Database path escapes the project root")
+
+    if resolved.parent.is_symlink():
+        raise ValueError(f"Refusing to use a symlinked parent directory: {resolved.parent}")
+    return resolved
+
+
+def database_path_from_config(path: str) -> Path:
+    """Resolve a configured database path. Absolute config paths are rejected."""
+    return _contained_path(path, allow_absolute=False)
 
 
 @dataclass
@@ -61,6 +103,7 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+
     _ALLOWED_BULK_UPDATE_FIELDS = {
         "platform",
         "track_name",
@@ -75,9 +118,12 @@ class EnhancedMusicDataStore:
     }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
-        self.db_path = db_path
-        self.backup_dir = Path(backup_dir)
-        self.backup_dir.mkdir(exist_ok=True)
+        if db_path == ":memory:":
+            self.db_path = ":memory:"
+        else:
+            self.db_path = str(_contained_path(db_path, allow_absolute=True))
+        self.backup_dir = _contained_path(backup_dir, allow_absolute=True)
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logging.getLogger(__name__)
 
         # Initialize cache
@@ -103,7 +149,16 @@ class EnhancedMusicDataStore:
             self.logger.debug("Reused connection from pool")
             return conn
 
+        if self.db_path != ":memory:":
+            db_file = Path(self.db_path)
+            if db_file.is_symlink():
+                raise ValueError("Refusing to open a symlinked database file")
+            db_file.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        if self.db_path != ":memory:" and os.name != "nt":
+            db_file = Path(self.db_path)
+            if db_file.exists() and not db_file.is_symlink():
+                db_file.chmod(0o600)
         conn.row_factory = sqlite3.Row
         self.logger.debug("Created new database connection")
         return conn
@@ -787,7 +842,9 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        invalid_fields = [field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS]
+        invalid_fields = [
+            field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS
+        ]
         if invalid_fields:
             raise ValueError(
                 "Invalid update fields: "
@@ -921,8 +978,12 @@ class EnhancedMusicDataStore:
         backup_filename = f"music_trends_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
         backup_path = self.backup_dir / backup_filename
 
+        if backup_path.is_symlink():
+            raise ValueError("Refusing to write a database backup through a symlink")
         with self.get_connection() as source_conn, sqlite3.connect(backup_path) as backup_conn:
             source_conn.backup(backup_conn)
+        if os.name != "nt" and backup_path.exists() and not backup_path.is_symlink():
+            backup_path.chmod(0o600)
 
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
@@ -958,13 +1019,16 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            output_path = _contained_path(filepath, allow_absolute=True)
+            if output_path.is_symlink():
+                raise ValueError("Refusing to export through a symlink")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            neutralize_csv_frame(df).to_csv(output_path, index=False)
+            if os.name != "nt":
+                output_path.chmod(0o600)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {output_path}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(output_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
@@ -1167,10 +1231,7 @@ class EnhancedMusicDataStore:
         rmse = float((errors**2).mean() ** 0.5)
 
         acc_by_platform = (
-            evaluated_df.groupby("platform")["accuracy_score"]
-            .mean()
-            .round(3)
-            .to_dict()
+            evaluated_df.groupby("platform")["accuracy_score"].mean().round(3).to_dict()
         )
 
         return {
