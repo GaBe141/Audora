@@ -4,6 +4,8 @@ import asyncio
 import base64
 import inspect
 import json
+import sqlite3
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -17,9 +19,11 @@ from core.notification_service import (
     NotificationPriority,
 )
 from core.utils import (
+    dashboard_request_allowed,
     load_dataframe,
     neutralize_csv_frame,
     read_json,
+    redact_secrets,
     resolve_project_path,
     save_dataframe,
     write_json,
@@ -97,6 +101,7 @@ class TestRedirectAndSsrf:
             "https://[fd00::1]/hook",
             "https://example.com\\@127.0.0.1/hook",
             "https://evil.com\r\n.127.0.0.1/hook",
+            "https://①②⑦.0.0.1/hook",
         )
         for url in blocked:
             with pytest.raises(ValueError):
@@ -171,6 +176,12 @@ class TestPathAndCsvGuards:
         ]
         assert neutralized["score"].tolist() == [1, 2, 3, 4, 5, 6, 7, 8]
 
+    def test_csv_formula_headers_are_neutralized(self):
+        frame = pd.DataFrame({"=cmd": [1], "safe": ["=1+1"]})
+        neutralized = neutralize_csv_frame(frame)
+        assert list(neutralized.columns) == ["'=cmd", "safe"]
+        assert neutralized["safe"].tolist() == ["'=1+1"]
+
     def test_path_segment_and_chart_guards(self):
         assert safe_path_segment("popheads") == "popheads"
         with pytest.raises(ValueError):
@@ -213,7 +224,7 @@ class TestProjectPathConfinement:
                 save_dataframe(pd.DataFrame({"a": [1]}), bad)
 
         # Names inside the root still resolve, but generic IO must not touch them.
-        for credential in (".env", ".env.local", tmp_path / ".cache"):
+        for credential in (".env", ".env.local", ".ENV", ".ENV.enhanced", tmp_path / ".cache"):
             resolved = resolve_project_path(credential)
             assert resolved.parent == tmp_path
             with pytest.raises(ValueError, match="credential"):
@@ -240,6 +251,8 @@ class TestProjectPathConfinement:
             "trends.db-wal",
             "config/social_apis.json",
             "id_rsa",
+            "id_rsa.bak",
+            "config/notification_config.json.bak",
             "../secret.env",
         ):
             message = NotificationMessage(
@@ -266,3 +279,54 @@ class TestProjectPathConfinement:
         with pytest.raises(ValueError, match="escapes"):
             setup._write_private_file(linked / "social_apis.json", '{"api_key":"secret"}')
         assert not (outside / "social_apis.json").exists()
+
+
+class TestSecretRedactionAndDashboardHost:
+    def test_redacts_api_keys_and_webhook_urls(self):
+        leaked = (
+            "GET /2.0/?method=chart.gettoptracks&api_key=abc123secret&format=json "
+            "https://www.theaudiodb.com/api/v1/json/premium-key/search.php "
+            "https://hooks.slack.com/services/T00/B00/SECRETTOKEN "
+            "Authorization: Bearer super-token"
+        )
+        redacted = redact_secrets(leaked)
+        assert "abc123secret" not in redacted
+        assert "premium-key" not in redacted
+        assert "SECRETTOKEN" not in redacted
+        assert "super-token" not in redacted
+        assert "REDACTED" in redacted
+
+    def test_dashboard_rejects_rebind_and_cross_site_writes(self):
+        assert dashboard_request_allowed("127.0.0.1:8050", None, None, "GET")
+        assert dashboard_request_allowed(
+            "localhost:8050", "http://127.0.0.1:8050", "same-origin", "POST"
+        )
+        assert dashboard_request_allowed("[::1]:8050", None, "none", "GET")
+        assert not dashboard_request_allowed("evil.example:8050", None, "same-origin", "POST")
+        assert not dashboard_request_allowed(
+            "127.0.0.1:8050", "https://evil.example", "cross-site", "POST"
+        )
+        assert not dashboard_request_allowed("127.0.0.1:8050", None, "cross-site", "POST")
+        assert dashboard_request_allowed("127.0.0.1:8050", None, "cross-site", "GET")
+
+
+class TestDatabaseBackup:
+    def test_backup_stays_on_the_created_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("core.data_store.PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
+        from core.data_store import EnhancedMusicDataStore
+
+        store = EnhancedMusicDataStore(
+            str(tmp_path / "trends.db"), backup_dir=str(tmp_path / "backups")
+        )
+        backup = store.create_backup()
+        store.close_pool()
+        backup_path = Path(backup)
+        assert backup_path.is_file()
+        assert not backup_path.is_symlink()
+
+        with sqlite3.connect(backup) as conn:
+            names = {
+                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+        assert "trends" in names

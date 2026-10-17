@@ -6,6 +6,7 @@ from typing import Any
 import pandas as pd
 import requests
 
+from core.utils import redact_secrets
 from integrations.extended_platforms import safe_path_segment
 
 # Note: config import is optional for standalone execution
@@ -47,7 +48,7 @@ class AudioDBAPI:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"AudioDB API error: {e}")
+            print(f"AudioDB API error: {redact_secrets(e)}")
             return None
 
     def search_artist(self, artist_name: str) -> dict | None:

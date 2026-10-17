@@ -18,6 +18,7 @@ import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, ctx, dash_table, dcc, html
+from flask import abort, request
 
 from core.data_store import EnhancedMusicDataStore
 from core.notification_service import (
@@ -26,7 +27,7 @@ from core.notification_service import (
     NotificationMessage,
     NotificationPriority,
 )
-from core.utils import neutralize_csv_frame
+from core.utils import dashboard_request_allowed, neutralize_csv_frame, redact_secrets
 
 _ALLOWED_DEMOS = {"statistical", "trending", "multi_source", "platform", "all"}
 
@@ -36,6 +37,18 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     title="Audora",
 )
+
+
+@app.server.before_request
+def _reject_rebinding_and_cross_site_requests() -> None:
+    """Refuse DNS-rebound hosts and cross-site dashboard writes."""
+    if not dashboard_request_allowed(
+        request.host or "",
+        request.headers.get("Origin"),
+        request.headers.get("Sec-Fetch-Site"),
+        request.method,
+    ):
+        abort(403)
 
 # ---------------------------------------------------------------------------
 # Layout helpers
@@ -620,7 +633,7 @@ def save_settings(_n, slack_url, discord_url, webhook_url, smtp_host, smtp_port,
         svc.save_config()
         return "Saved"
     except Exception as e:
-        return f"Error: {e}"
+        return f"Error: {redact_secrets(e)}"
 
 
 def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_name: str):
@@ -648,7 +661,7 @@ def _test_channel_callback(channel_key: str, url_input_id: str, channel_enum_nam
             asyncio.run(svc.send_notification(msg))
             return "OK"
         except Exception as e:
-            return f"Fail: {e}"
+            return f"Fail: {redact_secrets(e)}"
 
 
 _test_channel_callback("slack", "input-slack-url", "SLACK")
@@ -678,7 +691,7 @@ def evaluate_accuracy(_n):
     except Exception as e:
         empty_fig = go.Figure()
         empty_fig.update_layout(paper_bgcolor="#1a1a1a", plot_bgcolor="#1a1a1a", font_color="#ccc")
-        return f"Error: {e}", "—", "—", "—", empty_fig, []
+        return f"Error: {redact_secrets(e)}", "—", "—", "—", empty_fig, []
 
     total = metrics.get("total_evaluated", 0)
     mean_acc = metrics.get("mean_accuracy", 0)
