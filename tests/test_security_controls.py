@@ -53,6 +53,10 @@ class TestRedirectAndSsrf:
             "http://127.0.0.1@evil.com/callback",
             "http://127.1/callback",
             "https://127.0.0.1/callback",
+            "http://127.0.0.1:8888/callback\r\nSet-Cookie",
+            "http://127.0.0.1#@evil.com",
+            "http://127.0.0.1:8888\\@evil.com/callback",
+            "http://127.0.0.1:8888/callback\x7f",
         ):
             with pytest.raises(ValueError):
                 validate_spotify_redirect_uri(uri)
@@ -71,10 +75,23 @@ class TestRedirectAndSsrf:
             "https://[64:ff9b::8.8.8.8]/hook",
             "https://192.88.99.1/hook",
             "https://[fec0::1]/hook",
+            "https://168.63.129.16/hook",
+            "https://[::10.0.0.1]/hook",
+            "https://[::127.0.0.1]/hook",
+            "https://[::169.254.169.254]/hook",
+            "https://[::ffff:0:10.0.0.1]/hook",
+            "https://[fd00::1]/hook",
+            "https://example.com\\@127.0.0.1/hook",
+            "https://evil.com\r\n.127.0.0.1/hook",
         )
         for url in blocked:
             with pytest.raises(ValueError):
                 svc._validate_webhook_url(url, allow_private=True)
+
+    def test_allows_public_ipv4_mapped_literal(self):
+        svc = EnhancedNotificationService()
+        url = "https://[::ffff:8.8.8.8]/hook"
+        assert svc._validate_webhook_url(url) == url
 
     def test_private_webhook_opt_in_still_allows_rfc1918(self):
         svc = EnhancedNotificationService()
@@ -82,6 +99,23 @@ class TestRedirectAndSsrf:
         assert svc._validate_webhook_url(url, allow_private=True) == url
         with pytest.raises(ValueError, match="private or restricted"):
             svc._validate_webhook_url(url, allow_private=False)
+
+    def test_email_header_and_attachment_names_reject_controls(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="control character"):
+            svc._safe_header("Artist\r\nBcc: attacker@evil.com", "subject")
+        with pytest.raises(ValueError, match="control character"):
+            svc._safe_header("Artist\x0b", "subject")
+        with pytest.raises(ValueError, match="unsafe characters"):
+            svc._safe_attachment_name("report\r\nBcc: x.csv")
+        assert svc._safe_attachment_name("trend.csv") == "trend.csv"
+
+    def test_smtp_ssl_verifies_certificates(self):
+        source = inspect.getsource(EnhancedNotificationService._send_email)
+        assert "SMTP_SSL(context=ssl.create_default_context(), timeout=30)" in source
+        host_at = source.index("server._host = hostname")
+        connect_at = source.index("server.connect(pinned_ip, port)")
+        assert host_at < connect_at
 
     def test_smtp_blocks_private_and_teredo_addresses(self):
         svc = EnhancedNotificationService()
