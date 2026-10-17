@@ -314,14 +314,17 @@ def _csv_formula_probe(value: str) -> str:
 
 
 def neutralize_csv_value(value: Any) -> Any:
-    """Prefix spreadsheet formula cells so exported CSV cannot execute them.
+    """Prefix spreadsheet formula and SYLK cells so exported CSV cannot execute them.
 
     Excel and LibreOffice skip leading spaces, tabs, newlines, nulls, and
     other invisible characters before deciding that a cell is a formula.
+    A workbook whose first bytes are ``ID`` is opened as SYLK instead, and
+    that parser can run commands, so the same prefix is quoted.
     """
     if not isinstance(value, str) or value == "":
         return value
-    if _csv_formula_probe(value).startswith(_CSV_FORMULA_STARTS):
+    probed = _csv_formula_probe(value)
+    if probed.startswith(_CSV_FORMULA_STARTS) or probed.startswith("ID"):
         return "'" + value
     return value
 
