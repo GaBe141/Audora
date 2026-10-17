@@ -360,6 +360,10 @@ class TestProjectPathConfinement:
             ".htpasswd",
             "config/notification_config.json.bak",
             "config/notification_config.json.",
+            "config/notification_config.json.backup",
+            ".id_rsa.swp",
+            "id_ed25519_sk",
+            ".envrc",
             "../secret.env",
         ):
             message = NotificationMessage(
@@ -438,13 +442,31 @@ class TestSecretRedactionAndDashboardHost:
         assert is_sensitive_filename("vault.kdbx")
         assert is_sensitive_filename("key.p8")
         assert is_sensitive_filename("prod.tfstate")
+        assert is_sensitive_filename(".id_rsa.swp")
+        assert is_sensitive_filename(".credentials.json.swo")
+        assert is_sensitive_filename("..env.swp")
+        assert is_sensitive_filename("#id_rsa#")
+        assert is_sensitive_filename(".#id_ed25519")
+        assert is_sensitive_filename("id_ed25519_sk")
+        assert is_sensitive_filename("id_ecdsa_sk")
+        assert is_sensitive_filename("id_rsa.2")
+        assert is_sensitive_filename("credentials.json.backup")
+        assert is_sensitive_filename("notification_config.json.backup")
+        assert is_sensitive_filename(".envrc")
+        assert is_sensitive_filename(".envrc.local")
+        assert is_sensitive_filename("authorized_keys2")
         assert not is_sensitive_filename("my_credentials.csv")
         assert not is_sensitive_filename("report.csv")
+        assert not is_sensitive_filename("id_safe")
         (tmp_path / "config").mkdir()
         write_json("config/notification_config.json", {"email": {"password": "secret"}})
         assert read_json("config/notification_config.json")["email"]["password"] == "secret"
         with pytest.raises(ValueError, match="credential"):
             read_json("config/notification_config.json.bak")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("config/notification_config.json.backup")
+        with pytest.raises(ValueError, match="credential"):
+            read_json(".id_rsa.swp")
         with pytest.raises(ValueError, match="credential"):
             load_dataframe("config/notification_config.json")
         with pytest.raises(ValueError, match="credential"):
