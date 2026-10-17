@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from core.utils import save_dataframe
+
 from .advanced_fetch import (
     fetch_artist_genres,
     fetch_playlist_audio_analysis,
@@ -70,8 +72,7 @@ def generate_surprise_visualizations():
             print(f"   ✅ Saved: {genre_path.name}")
 
             # Save genre data
-            genre_csv = DATA_DIR / "genre_evolution.csv"
-            genres_df.to_csv(genre_csv, index=False)
+            genre_csv = save_dataframe(genres_df, DATA_DIR / "genre_evolution.csv")
             print(f"   📁 Saved data: {genre_csv.name}")
 
         print("📱 4. Analyzing your playlist landscapes...")
@@ -83,14 +84,12 @@ def generate_surprise_visualizations():
             print(f"   ✅ Saved: {playlist_path.name}")
 
             # Save playlist data
-            playlist_csv = DATA_DIR / "playlist_analysis.csv"
-            playlists_df.to_csv(playlist_csv, index=False)
+            playlist_csv = save_dataframe(playlists_df, DATA_DIR / "playlist_analysis.csv")
             print(f"   📁 Saved data: {playlist_csv.name}")
 
         # Save top tracks with features
         if not top_tracks_df.empty:
-            tracks_csv = DATA_DIR / "top_tracks_with_features.csv"
-            top_tracks_df.to_csv(tracks_csv, index=False)
+            tracks_csv = save_dataframe(top_tracks_df, DATA_DIR / "top_tracks_with_features.csv")
             print(f"   📁 Saved data: {tracks_csv.name}")
 
     except Exception as e:
