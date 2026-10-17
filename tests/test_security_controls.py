@@ -19,7 +19,9 @@ from core.notification_service import (
     NotificationPriority,
 )
 from core.utils import (
+    JsonTokenCache,
     dashboard_request_allowed,
+    is_sensitive_filename,
     load_dataframe,
     neutralize_csv_frame,
     read_json,
@@ -252,7 +254,12 @@ class TestProjectPathConfinement:
             "config/social_apis.json",
             "id_rsa",
             "id_rsa.bak",
+            "id_rsa.",
+            "id_rsa::$DATA",
+            ".netrc",
+            "credentials.json",
             "config/notification_config.json.bak",
+            "config/notification_config.json.",
             "../secret.env",
         ):
             message = NotificationMessage(
@@ -285,21 +292,60 @@ class TestSecretRedactionAndDashboardHost:
     def test_redacts_api_keys_and_webhook_urls(self):
         leaked = (
             "GET /2.0/?method=chart.gettoptracks&api_key=abc123secret&format=json "
+            "client_secret=spotify-secret "
+            '{"client_secret": "json-secret", "password": "pw"} '
             "https://www.theaudiodb.com/api/v1/json/premium-key/search.php "
-            "https://hooks.slack.com/services/T00/B00/SECRETTOKEN "
+            "https://HOOKS.SLACK.COM/services/T00/B00/SECRETTOKEN "
+            "https://ptb.discord.com/api/webhooks/123/discord-token "
             "Authorization: Bearer super-token"
         )
         redacted = redact_secrets(leaked)
         assert "abc123secret" not in redacted
+        assert "spotify-secret" not in redacted
+        assert "json-secret" not in redacted
         assert "premium-key" not in redacted
         assert "SECRETTOKEN" not in redacted
+        assert "discord-token" not in redacted
         assert "super-token" not in redacted
         assert "REDACTED" in redacted
+
+    def test_disguised_secret_names_are_blocked(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
+        assert is_sensitive_filename("id_rsa.")
+        assert is_sensitive_filename("id_rsa.bak")
+        assert is_sensitive_filename("ID_RSA::$DATA")
+        assert is_sensitive_filename(".netrc")
+        assert is_sensitive_filename("notification_config.json ")
+        assert not is_sensitive_filename("report.csv")
+        (tmp_path / "config").mkdir()
+        write_json("config/notification_config.json", {"email": {"password": "secret"}})
+        assert read_json("config/notification_config.json")["email"]["password"] == "secret"
+        with pytest.raises(ValueError, match="credential"):
+            read_json("config/notification_config.json.bak")
+        with pytest.raises(ValueError, match="credential"):
+            load_dataframe("config/notification_config.json")
+        with pytest.raises(ValueError, match="credential"):
+            save_dataframe(pd.DataFrame({"a": [1]}), "config/social_apis.json")
+
+    def test_token_cache_does_not_follow_symlinks(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
+        cache = JsonTokenCache(tmp_path / ".cache")
+        cache.save_token_to_cache({"access_token": "secret", "refresh_token": "r"})
+        assert cache.get_cached_token() == {"access_token": "secret", "refresh_token": "r"}
+        assert oct((tmp_path / ".cache").stat().st_mode)[-3:] == "600"
+        outside = tmp_path.parent / "stolen-token"
+        outside.write_text("original", encoding="utf-8")
+        linked = tmp_path / ".cache"
+        linked.unlink()
+        linked.symlink_to(outside)
+        with pytest.raises(ValueError):
+            JsonTokenCache(linked).save_token_to_cache({"access_token": "secret"})
+        assert outside.read_text(encoding="utf-8") == "original"
 
     def test_dashboard_rejects_rebind_and_cross_site_writes(self):
         assert dashboard_request_allowed("127.0.0.1:8050", None, None, "GET")
         assert dashboard_request_allowed(
-            "localhost:8050", "http://127.0.0.1:8050", "same-origin", "POST"
+            "127.0.0.1:8050", "http://127.0.0.1:8050", "same-origin", "POST"
         )
         assert dashboard_request_allowed("[::1]:8050", None, "none", "GET")
         assert not dashboard_request_allowed("evil.example:8050", None, "same-origin", "POST")
@@ -307,6 +353,13 @@ class TestSecretRedactionAndDashboardHost:
             "127.0.0.1:8050", "https://evil.example", "cross-site", "POST"
         )
         assert not dashboard_request_allowed("127.0.0.1:8050", None, "cross-site", "POST")
+        assert not dashboard_request_allowed(
+            "127.0.0.1:8050", "http://127.0.0.1:9999", "same-site", "POST"
+        )
+        assert not dashboard_request_allowed(
+            "localhost:8050", "http://127.0.0.1:8050", "same-origin", "POST"
+        )
+        assert not dashboard_request_allowed("127.0.0.1:8050", None, "same-origin", "POST")
         assert dashboard_request_allowed("127.0.0.1:8050", None, "cross-site", "GET")
 
 
