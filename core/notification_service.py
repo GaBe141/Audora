@@ -27,6 +27,7 @@ import jinja2  # type: ignore[import-untyped]
 
 from core.utils import (
     confine_relative_path,
+    is_sensitive_filename,
     read_json,
     read_nofollow_bytes,
     redact_secrets,
@@ -75,61 +76,13 @@ def _contains_control_char(value: str) -> bool:
     return any(ord(char) < 32 or ord(char) == 127 for char in value)
 
 
-_SENSITIVE_ATTACHMENT_NAMES = {
-    ".env",
-    ".cache",
-    "notification_config.json",
-    "enhanced_api_config.json",
-    "social_apis.json",
-    "id_rsa",
-    "id_dsa",
-    "id_ecdsa",
-    "id_ed25519",
-}
-_SENSITIVE_ATTACHMENT_SUFFIXES = (
-    ".db",
-    ".sqlite",
-    ".sqlite3",
-    ".db-wal",
-    ".db-shm",
-    ".db-journal",
-    ".sqlite-wal",
-    ".sqlite-shm",
-    ".sqlite-journal",
-    ".pem",
-    ".key",
-    ".p12",
-    ".pfx",
-)
-
-
-_BACKUP_ATTACHMENT_SUFFIXES = (
-    ".bak",
-    ".old",
-    ".orig",
-    ".save",
-    ".swp",
-    ".swo",
-    ".tmp",
-    ".copy",
-    "~",
-)
-
-
 def _is_sensitive_attachment(path: Path) -> bool:
-    """Credential files and databases must not be attached to outbound mail."""
-    name = path.name.lower()
-    while True:
-        if name in _SENSITIVE_ATTACHMENT_NAMES or name.startswith(".env"):
-            return True
-        if name.endswith(_SENSITIVE_ATTACHMENT_SUFFIXES):
-            return True
-        for extra in _BACKUP_ATTACHMENT_SUFFIXES:
-            if name.endswith(extra) and len(name) > len(extra):
-                name = name[: -len(extra)]
-                break
-        else:
-            return False
+    """Credential files and databases must not be attached to outbound mail.
+
+    Windows ignores trailing dots and spaces and treats ``name:stream`` as
+    ``name``. Those aliases are still the secret file.
+    """
+    return is_sensitive_filename(path.name)
 
 
 class NotificationPriority(Enum):
@@ -757,6 +710,8 @@ System status: {{ system_status }}
             try:
                 if channel in self.channel_handlers:
                     result = await self.channel_handlers[channel](message)
+                    if isinstance(result, dict) and result.get("error"):
+                        result = {**result, "error": redact_secrets(result["error"])}
                     delivery_results[channel.value] = result
 
                     if result.get("success", False):
@@ -773,7 +728,10 @@ System status: {{ system_status }}
                     channel.value,
                     redact_secrets(e),
                 )
-                delivery_results[channel.value] = {"success": False, "error": str(e)}
+                delivery_results[channel.value] = {
+                    "success": False,
+                    "error": redact_secrets(e),
+                }
                 failed_channels.append(channel.value)
 
         # Record notification
@@ -926,7 +884,7 @@ System status: {{ system_status }}
 
         except Exception as e:
             self.logger.error("Failed to send email notification: %s", redact_secrets(e))
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": redact_secrets(e)}
 
     async def _send_slack(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification to Slack."""
@@ -992,12 +950,14 @@ System status: {{ system_status }}
             if status == 200:
                 self.logger.info("Slack notification sent successfully")
                 return {"success": True, "status_code": status}
-            self.logger.error(f"Slack notification failed: {status} - {error_text}")
-            return {"success": False, "error": f"HTTP {status}: {error_text}"}
+            self.logger.error(
+                "Slack notification failed: %s - %s", status, redact_secrets(error_text)
+            )
+            return {"success": False, "error": redact_secrets(f"HTTP {status}: {error_text}")}
 
         except Exception as e:
             self.logger.error("Failed to send Slack notification: %s", redact_secrets(e))
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": redact_secrets(e)}
 
     async def _send_discord(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification to Discord."""
@@ -1055,12 +1015,14 @@ System status: {{ system_status }}
             if status in [200, 204]:
                 self.logger.info("Discord notification sent successfully")
                 return {"success": True, "status_code": status}
-            self.logger.error(f"Discord notification failed: {status} - {error_text}")
-            return {"success": False, "error": f"HTTP {status}: {error_text}"}
+            self.logger.error(
+                "Discord notification failed: %s - %s", status, redact_secrets(error_text)
+            )
+            return {"success": False, "error": redact_secrets(f"HTTP {status}: {error_text}")}
 
         except Exception as e:
             self.logger.error("Failed to send Discord notification: %s", redact_secrets(e))
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": redact_secrets(e)}
 
     def _get_priority_color(self, priority: NotificationPriority) -> int:
         """Get Discord embed color based on priority."""
@@ -1115,12 +1077,14 @@ System status: {{ system_status }}
             if 200 <= status < 300:
                 self.logger.info(f"Webhook notification sent successfully: {status}")
                 return {"success": True, "status_code": status}
-            self.logger.error(f"Webhook notification failed: {status} - {error_text}")
-            return {"success": False, "error": f"HTTP {status}: {error_text}"}
+            self.logger.error(
+                "Webhook notification failed: %s - %s", status, redact_secrets(error_text)
+            )
+            return {"success": False, "error": redact_secrets(f"HTTP {status}: {error_text}")}
 
         except Exception as e:
             self.logger.error("Failed to send webhook notification: %s", redact_secrets(e))
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": redact_secrets(e)}
 
     async def _send_console(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification to console."""
@@ -1153,7 +1117,7 @@ System status: {{ system_status }}
 
         except Exception as e:
             self.logger.error(f"Failed to send console notification: {e}")
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": redact_secrets(e)}
 
     async def _send_sms(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via SMS."""
