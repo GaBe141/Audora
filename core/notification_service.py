@@ -29,6 +29,7 @@ from core.utils import (
     confine_relative_path,
     read_json,
     read_nofollow_bytes,
+    redact_secrets,
     write_json,
 )
 
@@ -102,12 +103,33 @@ _SENSITIVE_ATTACHMENT_SUFFIXES = (
 )
 
 
+_BACKUP_ATTACHMENT_SUFFIXES = (
+    ".bak",
+    ".old",
+    ".orig",
+    ".save",
+    ".swp",
+    ".swo",
+    ".tmp",
+    ".copy",
+    "~",
+)
+
+
 def _is_sensitive_attachment(path: Path) -> bool:
     """Credential files and databases must not be attached to outbound mail."""
     name = path.name.lower()
-    if name in _SENSITIVE_ATTACHMENT_NAMES or name.startswith(".env"):
-        return True
-    return name.endswith(_SENSITIVE_ATTACHMENT_SUFFIXES)
+    while True:
+        if name in _SENSITIVE_ATTACHMENT_NAMES or name.startswith(".env"):
+            return True
+        if name.endswith(_SENSITIVE_ATTACHMENT_SUFFIXES):
+            return True
+        for extra in _BACKUP_ATTACHMENT_SUFFIXES:
+            if name.endswith(extra) and len(name) > len(extra):
+                name = name[: -len(extra)]
+                break
+        else:
+            return False
 
 
 class NotificationPriority(Enum):
@@ -746,7 +768,11 @@ System status: {{ system_status }}
                     failed_channels.append(channel.value)
 
             except Exception as e:
-                self.logger.error(f"Failed to send notification via {channel.value}: {e}")
+                self.logger.error(
+                    "Failed to send notification via %s: %s",
+                    channel.value,
+                    redact_secrets(e),
+                )
                 delivery_results[channel.value] = {"success": False, "error": str(e)}
                 failed_channels.append(channel.value)
 
@@ -899,7 +925,7 @@ System status: {{ system_status }}
             return {"success": True, "recipients": len(email_config["recipients"])}
 
         except Exception as e:
-            self.logger.error(f"Failed to send email notification: {e}")
+            self.logger.error("Failed to send email notification: %s", redact_secrets(e))
             return {"success": False, "error": str(e)}
 
     async def _send_slack(self, message: NotificationMessage) -> dict[str, Any]:
@@ -970,7 +996,7 @@ System status: {{ system_status }}
             return {"success": False, "error": f"HTTP {status}: {error_text}"}
 
         except Exception as e:
-            self.logger.error(f"Failed to send Slack notification: {e}")
+            self.logger.error("Failed to send Slack notification: %s", redact_secrets(e))
             return {"success": False, "error": str(e)}
 
     async def _send_discord(self, message: NotificationMessage) -> dict[str, Any]:
@@ -1033,7 +1059,7 @@ System status: {{ system_status }}
             return {"success": False, "error": f"HTTP {status}: {error_text}"}
 
         except Exception as e:
-            self.logger.error(f"Failed to send Discord notification: {e}")
+            self.logger.error("Failed to send Discord notification: %s", redact_secrets(e))
             return {"success": False, "error": str(e)}
 
     def _get_priority_color(self, priority: NotificationPriority) -> int:
@@ -1093,7 +1119,7 @@ System status: {{ system_status }}
             return {"success": False, "error": f"HTTP {status}: {error_text}"}
 
         except Exception as e:
-            self.logger.error(f"Failed to send webhook notification: {e}")
+            self.logger.error("Failed to send webhook notification: %s", redact_secrets(e))
             return {"success": False, "error": str(e)}
 
     async def _send_console(self, message: NotificationMessage) -> dict[str, Any]:
