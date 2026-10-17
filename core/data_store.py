@@ -6,6 +6,7 @@ Handles trending data, viral predictions, and cross-platform analysis.
 import json
 import logging
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -15,6 +16,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import PROJECT_ROOT, confine_relative_path, neutralize_csv_frame
 
 
 @dataclass
@@ -49,6 +51,57 @@ class ViralPrediction:
     accuracy_score: float | None = None
 
 
+def _is_under(path: Path, root: Path) -> bool:
+    """Return True when path is the root or a descendant of it."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _ensure_under_project_or_temp(path: Path) -> None:
+    """Allow only the project root and the system temp directory."""
+    if _is_under(path, PROJECT_ROOT) or _is_under(path, Path(tempfile.gettempdir())):
+        return
+    raise ValueError("Path must stay inside the project directory or the system temp directory")
+
+
+def resolve_database_path(db_path: str, *, from_config: bool = False) -> str:
+    """Resolve a database path, preserving :memory: and rejecting symlinks."""
+    if db_path == ":memory:":
+        return ":memory:"
+
+    raw = Path(db_path)
+    if from_config and raw.is_absolute():
+        raise ValueError("Database path from configuration must be relative to the project root")
+    if not raw.is_absolute():
+        raw = PROJECT_ROOT / raw
+    if raw.is_symlink():
+        raise ValueError("Refusing to open a symlinked database file")
+
+    resolved = raw.resolve()
+    _ensure_under_project_or_temp(resolved)
+    return str(resolved)
+
+
+def database_path_from_config(db_path: str) -> str:
+    """Resolve a database path declared in configuration."""
+    return resolve_database_path(db_path, from_config=True)
+
+
+def resolve_backup_dir(backup_dir: str) -> Path:
+    """Resolve a backup directory under the project root or system temp dir."""
+    raw = Path(backup_dir)
+    if not raw.is_absolute():
+        raw = PROJECT_ROOT / raw
+    if raw.is_symlink():
+        raise ValueError("Refusing to use a symlinked backup directory")
+    resolved = raw.resolve()
+    _ensure_under_project_or_temp(resolved)
+    return resolved
+
+
 class EnhancedMusicDataStore:
     """
     Enhanced data persistence system for music discovery.
@@ -61,6 +114,7 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+
     _ALLOWED_BULK_UPDATE_FIELDS = {
         "platform",
         "track_name",
@@ -75,9 +129,9 @@ class EnhancedMusicDataStore:
     }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
-        self.db_path = db_path
-        self.backup_dir = Path(backup_dir)
-        self.backup_dir.mkdir(exist_ok=True)
+        self.db_path = resolve_database_path(db_path)
+        self.backup_dir = resolve_backup_dir(backup_dir)
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logging.getLogger(__name__)
 
         # Initialize cache
@@ -95,6 +149,12 @@ class EnhancedMusicDataStore:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=10000")
             conn.execute("PRAGMA temp_store=memory")
+
+        if self.db_path != ":memory:":
+            db_file = Path(self.db_path)
+            if db_file.is_symlink():
+                raise ValueError("Refusing to open a symlinked database file")
+            db_file.chmod(0o600)
 
     def _get_pooled_connection(self) -> sqlite3.Connection:
         """Get a connection from the pool or create a new one."""
@@ -787,7 +847,9 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        invalid_fields = [field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS]
+        invalid_fields = [
+            field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS
+        ]
         if invalid_fields:
             raise ValueError(
                 "Invalid update fields: "
@@ -958,13 +1020,15 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            target = confine_relative_path(filepath)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_symlink():
+                raise ValueError("Refusing to write a symlinked export file")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
+            neutralize_csv_frame(df).to_csv(target, index=False)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {target}")
 
-        return filepath
+        return str(target)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
@@ -1167,10 +1231,7 @@ class EnhancedMusicDataStore:
         rmse = float((errors**2).mean() ** 0.5)
 
         acc_by_platform = (
-            evaluated_df.groupby("platform")["accuracy_score"]
-            .mean()
-            .round(3)
-            .to_dict()
+            evaluated_df.groupby("platform")["accuracy_score"].mean().round(3).to_dict()
         )
 
         return {

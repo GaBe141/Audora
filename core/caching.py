@@ -10,7 +10,6 @@ import hmac
 import json
 import logging
 import os
-import pickle
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -140,6 +139,7 @@ class RedisCacheBackend(CacheBackend):
         db: int = 0,
         password: str | None = None,
         max_connections: int = 10,
+        key_prefix: str = "audora",
     ) -> None:
         """Initialize Redis cache.
 
@@ -162,6 +162,7 @@ class RedisCacheBackend(CacheBackend):
             decode_responses=False,  # Keep binary mode for signed payloads
         )
         self._client = redis.Redis(connection_pool=self._pool)
+        self._key_prefix = key_prefix
         self._signing_key = self._get_signing_key()
 
         # Test connection
@@ -178,7 +179,7 @@ class RedisCacheBackend(CacheBackend):
         if configured_key:
             return configured_key.encode("utf-8")
 
-        # Fallback to process-local random key to prevent unsigned pickle loading.
+        # Fallback to a process-local random key so unsigned cache entries are never trusted.
         # This keeps the cache safe by default, with only a reduced cross-process hit rate.
         logger.warning(
             "AUDORA_CACHE_SIGNING_KEY is not set; using process-local cache signing key. "
@@ -187,11 +188,11 @@ class RedisCacheBackend(CacheBackend):
         return os.urandom(32)
 
     def _serialize(self, value: Any) -> bytes:
-        """Serialize cache value with integrity protection."""
-        payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        """Serialize cache value as an HMAC-signed JSON envelope."""
+        payload = json.dumps(value, separators=(",", ":"), default=str).encode("utf-8")
         signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
         envelope = {
-            "v": 1,
+            "v": 2,
             "alg": "HMAC-SHA256",
             "sig": signature,
             "payload": base64.b64encode(payload).decode("ascii"),
@@ -199,12 +200,12 @@ class RedisCacheBackend(CacheBackend):
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
     def _deserialize(self, value: bytes) -> Any | None:
-        """Deserialize cache value only after signature verification."""
+        """Deserialize a JSON cache value only after signature verification."""
         try:
             envelope = json.loads(value.decode("utf-8"))
             if (
                 not isinstance(envelope, dict)
-                or envelope.get("v") != 1
+                or envelope.get("v") != 2
                 or envelope.get("alg") != "HMAC-SHA256"
                 or "sig" not in envelope
                 or "payload" not in envelope
@@ -213,17 +214,18 @@ class RedisCacheBackend(CacheBackend):
                 return None
 
             payload_b64 = envelope["payload"]
-            if not isinstance(payload_b64, str):
+            signature = envelope["sig"]
+            if not isinstance(payload_b64, str) or not isinstance(signature, str):
                 logger.warning("Rejected cache entry with non-string payload")
                 return None
 
             payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
             expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
+            if not hmac.compare_digest(signature, expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
 
-            return pickle.loads(payload)
+            return json.loads(payload.decode("utf-8"))
         except Exception as e:
             logger.error(f"Failed to deserialize cache entry: {e}")
             return None
@@ -258,10 +260,18 @@ class RedisCacheBackend(CacheBackend):
             logger.error(f"Redis delete error for key {key}: {e}")
 
     def clear(self) -> None:
-        """Clear all cached values."""
+        """Delete only this application's prefixed keys."""
+        self.clear_prefix(self._key_prefix)
+
+    def clear_prefix(self, key_prefix: str) -> None:
+        """Delete keys under the given prefix without flushing the Redis database."""
         try:
-            self._client.flushdb()
-            logger.debug("Cleared Redis cache")
+            pattern = f"{key_prefix}:*"
+            deleted = 0
+            for key in self._client.scan_iter(match=pattern, count=200):
+                self._client.delete(key)
+                deleted += 1
+            logger.debug(f"Cleared {deleted} Redis keys under prefix {key_prefix}")
         except Exception as e:
             logger.error(f"Redis clear error: {e}")
 
@@ -299,7 +309,7 @@ class CacheManager:
             # Try Redis first, fall back to local cache
             if REDIS_AVAILABLE:
                 try:
-                    self._backend = RedisCacheBackend()
+                    self._backend = RedisCacheBackend(key_prefix=key_prefix)
                     logger.info("Using Redis cache backend")
                 except Exception as e:
                     logger.warning(f"Redis initialization failed: {e}, using local cache")
@@ -337,7 +347,7 @@ class CacheManager:
 
         Args:
             key: Cache key
-            value: Value to cache (must be picklable)
+            value: Value to cache (must be JSON-serializable)
             ttl: Time to live in seconds (uses default_ttl if None)
         """
         full_key = self._make_key(key)
@@ -356,7 +366,11 @@ class CacheManager:
         logger.debug(f"Deleted from cache: {key}")
 
     def clear(self) -> None:
-        """Clear all cached values."""
+        """Clear cached values owned by this manager."""
+        clear_prefix = getattr(self._backend, "clear_prefix", None)
+        if callable(clear_prefix):
+            clear_prefix(self.key_prefix)
+            return
         self._backend.clear()
 
     def exists(self, key: str) -> bool:
@@ -432,12 +446,12 @@ class CacheManager:
         # Add positional args
         if args:
             args_str = json.dumps(args, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(args_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(args_str.encode()).hexdigest())
 
         # Add keyword args
         if kwargs:
             kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
-            key_parts.append(hashlib.md5(kwargs_str.encode()).hexdigest())
+            key_parts.append(hashlib.sha256(kwargs_str.encode()).hexdigest())
 
         return ":".join(key_parts)
 

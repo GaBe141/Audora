@@ -1,10 +1,14 @@
 """AudioDB API integration for rich artist profiles and comprehensive music metadata."""
 
+import re
 import time
 from typing import Any
 
 import pandas as pd
 import requests
+
+_SEGMENT_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 # Note: config import is optional for standalone execution
 
@@ -17,6 +21,7 @@ class AudioDBAPI:
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key
         self.session = requests.Session()
+        self.session.trust_env = False
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second
 
@@ -34,14 +39,21 @@ class AudioDBAPI:
         """Make a request to AudioDB API with rate limiting."""
         self._rate_limit()
 
-        # Use API key if available, otherwise use free key (123)
-        if self.api_key:
-            url = f"{BASE_URL}/{self.api_key}/{endpoint}"
-        else:
-            url = f"{BASE_URL}/123/{endpoint}"  # Free API key is 123
+        api_key = self.api_key or "123"
+        if (
+            _SEGMENT_RE.fullmatch(api_key) is None
+            or _SEGMENT_RE.fullmatch(endpoint) is None
+            or ".." in api_key
+            or ".." in endpoint
+        ):
+            return None
+
+        url = f"{BASE_URL}/{api_key}/{endpoint}"
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, timeout=10, allow_redirects=False)
+            if response.status_code in _REDIRECT_STATUSES:
+                return None
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
