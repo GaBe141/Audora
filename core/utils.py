@@ -102,6 +102,10 @@ _ENV_SHORT_SUFFIXES = (
     "test",
     "staging",
     "example",
+    "preview",
+    "dev",
+    "qa",
+    "ci",
 )
 # First three characters of sensitive extensions that do not fit in 8.3,
 # plus the FsRtlSafeExtensions form that rewrites the third character to "~".
@@ -247,12 +251,46 @@ def _windows_short_aliases(name: str) -> set[str]:
     return aliases
 
 
+def _dotenv_compound_extensions() -> frozenset[str]:
+    """8.3 extensions of ``.local`` and of backup or numbered copies of that name.
+
+    ``.env.production.local`` keeps the mode in the basis (``ENVPRO``) and puts
+    ``local`` in the extension (``LOC``). A backup such as
+    ``.env.production.local.bak`` moves the disguise into that extension.
+    """
+    tails = [".local"]
+    for extra in _DISGUISED_FILE_SUFFIXES:
+        if extra == "~":
+            continue
+        tails.append(f".local{extra}")
+        tails.append(extra)
+    tails.extend(f".local.{number}" for number in range(1, 10))
+    tails.extend(f".{number}" for number in range(1, 10))
+    found: set[str] = set()
+    for tail in tails:
+        _basis, extension, truncated, _early = _short_name_parts(f"name{tail}")
+        if not extension:
+            continue
+        found.add(extension.casefold())
+        if truncated:
+            found.add(f"{extension[:-1]}~".casefold())
+    return frozenset(found)
+
+
+_DOTENV_COMPOUND_EXTENSIONS = _dotenv_compound_extensions()
+
+
 def _sensitive_long_names() -> set[str]:
     """Long names whose generated 8.3 aliases must be treated as secret."""
     names = set(_SECRET_FILE_NAMES)
     for suffix in _ENV_SHORT_SUFFIXES:
         names.add(f".env.{suffix}")
         names.add(f".envrc.{suffix}")
+        # Next.js, Vite, and dotenv load ``.env.<mode>.local`` after ``.env.<mode>``.
+        # The extra segment lengthens the 8.3 basis past ``ENV``, so the env/envrc
+        # basis check does not see ``ENVPRO~1.LOC``.
+        names.add(f".env.{suffix}.local")
+        names.add(f".envrc.{suffix}.local")
     expanded = set(names)
     for name in names:
         for extra in _DISGUISED_FILE_SUFFIXES:
@@ -281,7 +319,8 @@ def _is_windows_short_secret(candidate: str) -> bool:
     """True when ``candidate`` is a Windows 8.3 alias of a secret or database.
 
     NTFS can store ``ENV~1`` for ``.env`` and ``CREDEN~1.JSO`` for
-    ``credentials.json``. Those aliases do not match the long-name denylist.
+    ``credentials.json``. ``.env.production.local`` is ``ENVPRO~1.LOC``: the
+    mode sits in the basis, so an ``ENV`` / ``ENVRC`` basis check misses it.
     Generation is often disabled on current volumes; when a short name exists,
     opening it still opens the long file.
     """
@@ -291,10 +330,16 @@ def _is_windows_short_secret(candidate: str) -> bool:
     if match is None:
         return False
     basis = match.group(1)
-    extension = match.group(3)
+    extension = match.group(3) or ""
     if extension in _TRUNCATED_SECRET_EXTENSIONS:
         return True
-    return basis in _ENV_SHORT_BASES
+    if basis in _ENV_SHORT_BASES:
+        return True
+    # Any ``.env.<mode>.local`` (and its backup or numbered copy) starts the
+    # basis with ENV and puts ``local`` or the disguise in the extension.
+    # ``environment.txt`` is ``ENVIRO~1.TXT`` and stays allowed. ``ENVPRO~1``
+    # with no extension is the short name of ``envprofile`` and stays allowed.
+    return basis.startswith("env") and extension in _DOTENV_COMPOUND_EXTENSIONS
 
 
 def _filename_forms(filename: str) -> list[str]:
@@ -381,9 +426,10 @@ def _candidate_is_secret(candidate: str) -> bool:
 def is_sensitive_filename(filename: str) -> bool:
     """True for secrets, databases, keys, and disguised copies of those files.
 
-    Disguises include Windows 8.3 short names such as ``ENV~1`` and
-    ``NOTIFI~1.JSO``. The canonical live config names stay readable through
-    the JSON helpers; their short names do not.
+    Disguises include Windows 8.3 short names such as ``ENV~1``,
+    ``ENVPRO~1.LOC`` for ``.env.production.local``, and ``NOTIFI~1.JSO``.
+    The canonical live config names stay readable through the JSON helpers;
+    their short names do not.
     """
     for form in _filename_forms(filename):
         if any(_candidate_is_secret(candidate) for candidate in _secret_name_candidates(form)):
