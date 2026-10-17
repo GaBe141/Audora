@@ -74,6 +74,16 @@ def _contains_control_char(value: str) -> bool:
     return any(ord(char) < 32 or ord(char) == 127 for char in value)
 
 
+def _is_sensitive_attachment(path: Path) -> bool:
+    """Credential files and databases must not be attached to outbound mail."""
+    name = path.name.lower()
+    if name in {".env", ".cache", "notification_config.json", "enhanced_api_config.json"}:
+        return True
+    if name.startswith(".env"):
+        return True
+    return name.endswith((".db", ".sqlite", ".sqlite3", ".pem", ".key"))
+
+
 class NotificationPriority(Enum):
     """Notification priority levels."""
 
@@ -813,6 +823,8 @@ System status: {{ system_status }}
             if message.attachments:
                 for attachment_path in message.attachments:
                     safe_path = confine_relative_path(attachment_path)
+                    if _is_sensitive_attachment(safe_path):
+                        raise ValueError("Refusing to attach a secret or database file")
                     payload = read_nofollow_bytes(safe_path)
                     attachment = MIMEBase("application", "octet-stream")
                     attachment.set_payload(payload)
