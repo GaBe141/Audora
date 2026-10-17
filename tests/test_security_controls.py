@@ -4,6 +4,7 @@ import asyncio
 import base64
 import inspect
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from core.utils import (
     save_matplotlib_figure,
     save_plotly_html,
     write_json,
+    write_private_text,
 )
 from integrations.extended_platforms import safe_path_segment
 from integrations.musicbrainz_integration import _require_mbid
@@ -314,6 +316,24 @@ class TestProjectPathConfinement:
         assert html_path.read_text(encoding="utf-8") == "<html>chart</html>"
         assert outside.read_bytes() == b"do-not-touch"
 
+    def test_refuses_hard_link_to_a_secret(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
+        outside = tmp_path.parent / "secret.env"
+        outside.write_text("SPOTIFY_CLIENT_SECRET=leaked\n", encoding="utf-8")
+        alias = tmp_path / "tracks.csv"
+        os.link(outside, alias)
+
+        for opener in (
+            lambda: load_dataframe(alias),
+            lambda: save_dataframe(pd.DataFrame({"a": ["x"]}), alias),
+            lambda: write_json(alias, {"x": 1}),
+            lambda: write_private_text(alias, "overwritten"),
+            lambda: open_project_writer(alias, binary=True).__enter__(),
+        ):
+            with pytest.raises(ValueError, match="hard-linked"):
+                opener()
+        assert outside.read_text(encoding="utf-8") == "SPOTIFY_CLIENT_SECRET=leaked\n"
+
     def test_email_refuses_secret_and_database_attachments(self, tmp_path, monkeypatch):
         monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
         (tmp_path / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
@@ -502,4 +522,26 @@ class TestDatabaseBackup:
         monkeypatch.setattr(Path, "is_symlink", lambda _self: False)
         with pytest.raises(ValueError, match="symlink"), store.get_connection():
             pass
+        assert outside.read_text(encoding="utf-8") == "SECRET-ORIGINAL"
+
+    def test_open_refuses_hard_linked_database(self, tmp_path):
+        from core.data_store import EnhancedMusicDataStore
+
+        outside = tmp_path.parent / "secret-db-target.txt"
+        outside.write_text("SECRET-ORIGINAL", encoding="utf-8")
+        db_path = tmp_path / "trends.db"
+        os.link(outside, db_path)
+        with pytest.raises(ValueError, match="hard-linked"):
+            EnhancedMusicDataStore(str(db_path), backup_dir=str(tmp_path / "backups"))
+        assert outside.read_text(encoding="utf-8") == "SECRET-ORIGINAL"
+
+    def test_log_handler_refuses_hard_link(self, tmp_path):
+        from core.logging_config import NofollowFileHandler
+
+        outside = tmp_path.parent / "secret-log.txt"
+        outside.write_text("SECRET-ORIGINAL", encoding="utf-8")
+        target = tmp_path / "app.log"
+        os.link(outside, target)
+        with pytest.raises(OSError, match="hard-linked"):
+            NofollowFileHandler(target)
         assert outside.read_text(encoding="utf-8") == "SECRET-ORIGINAL"
