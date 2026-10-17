@@ -1,12 +1,12 @@
 """Advanced visualization module for statistical analysis and forecasting results."""
 
-import json
 import warnings
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from core.utils import read_json, resolve_project_path
 
 warnings.filterwarnings("ignore")
 
@@ -450,12 +450,8 @@ def visualize_comprehensive_results(results_file: str, output_dir: str = "data/v
     """Create comprehensive visualizations from analysis results file."""
     print("🎨 Creating comprehensive visualizations...")
 
-    # Load results
-    with open(results_file) as f:
-        results = json.load(f)
-
-    # Create output directory
-    output_path = Path(output_dir)
+    results = read_json(results_file)
+    output_path = resolve_project_path(output_dir)
     output_path.mkdir(exist_ok=True)
 
     # Initialize visualization engine
