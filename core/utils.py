@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import stat
 import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -196,12 +197,43 @@ def _raise_if_symlink_error(exc: OSError) -> None:
         raise ValueError("Refusing to follow a symlink") from exc
 
 
+def open_unlinked_file(path: Path | str, flags: int, mode: int = 0o644) -> int:
+    """Open a regular file that is neither a symlink nor a hard link.
+
+    ``O_NOFOLLOW`` refuses a swapped-in symlink. A hard link is an ordinary
+    directory entry for an inode that also has another name, so the same flag
+    still opens it. ``O_TRUNC`` or ``O_APPEND`` would then change that other
+    file, including a credential linked into the project. Truncation runs only
+    after the opened inode has a single link.
+    """
+    file_path = Path(path)
+    truncating = bool(flags & os.O_TRUNC)
+    open_flags = _nofollow_flags(flags & ~os.O_TRUNC)
+    try:
+        fd = os.open(file_path, open_flags, mode)
+    except OSError as exc:
+        _raise_if_symlink_error(exc)
+        raise
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"Refusing to open a non-regular file: {file_path}")
+        if info.st_nlink > 1:
+            raise ValueError(f"Refusing to open a hard-linked file: {file_path}")
+        if truncating:
+            os.ftruncate(fd, 0)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
 def read_nofollow_text(path: Path | str) -> str:
-    """Read a text file without following a final-component symlink."""
+    """Read a text file without following a symlink or a hard link."""
     file_path = Path(path)
     if file_path.is_symlink():
         raise ValueError(f"Refusing to read a symlinked file: {file_path}")
-    fd = os.open(file_path, _nofollow_flags(os.O_RDONLY))
+    fd = open_unlinked_file(file_path, os.O_RDONLY)
     try:
         handle = os.fdopen(fd, "r", encoding="utf-8")
         fd = -1
@@ -213,11 +245,11 @@ def read_nofollow_text(path: Path | str) -> str:
 
 
 def read_nofollow_bytes(path: Path | str) -> bytes:
-    """Read a file without following a final-component symlink."""
+    """Read a file without following a symlink or a hard link."""
     file_path = Path(path)
     if file_path.is_symlink():
         raise ValueError(f"Refusing to read a symlinked file: {file_path}")
-    fd = os.open(file_path, _nofollow_flags(os.O_RDONLY))
+    fd = open_unlinked_file(file_path, os.O_RDONLY)
     try:
         handle = os.fdopen(fd, "rb")
         fd = -1
@@ -229,13 +261,13 @@ def read_nofollow_bytes(path: Path | str) -> bytes:
 
 
 def write_private_text(path: Path | str, content: str) -> Path:
-    """Write text with mode 600 without following a swapped-in symlink."""
+    """Write text with mode 600 without following a symlink or a hard link."""
     file_path = Path(path)
     if file_path.is_symlink():
         raise ValueError(f"Refusing to write through a symlink: {file_path}")
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    flags = _nofollow_flags(os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-    fd = os.open(file_path, flags, 0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = open_unlinked_file(file_path, flags, 0o600)
     try:
         if os.name != "nt":
             os.fchmod(fd, 0o600)
@@ -295,7 +327,7 @@ def ensure_private_file(path: Path | str) -> Path:
         return write_private_text(file_path, "")
     if os.name == "nt":
         return file_path
-    fd = os.open(file_path, _nofollow_flags(os.O_RDONLY))
+    fd = open_unlinked_file(file_path, os.O_RDONLY)
     try:
         os.fchmod(fd, 0o600)
     finally:
@@ -479,7 +511,7 @@ def read_json(path: Path | str, default: Any = None) -> Any:
         raise ValueError(f"Refusing to read a symlinked JSON file: {path}")
     fd = -1
     try:
-        fd = os.open(path, _nofollow_flags(os.O_RDONLY))
+        fd = open_unlinked_file(path, os.O_RDONLY)
         handle = os.fdopen(fd, "r", encoding="utf-8")
         fd = -1
         with handle:
@@ -537,9 +569,9 @@ def write_json(
         if create_dirs:
             path.parent.mkdir(parents=True, exist_ok=True)
 
-        flags = _nofollow_flags(os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
         mode = 0o600 if private else 0o644
-        fd = os.open(path, flags, mode)
+        fd = open_unlinked_file(path, flags, mode)
         if private and os.name != "nt":
             os.fchmod(fd, 0o600)
         handle = os.fdopen(fd, "w", encoding="utf-8")
@@ -583,7 +615,7 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
     frame = neutralize_csv_frame(df)
-    fd = os.open(filepath, _nofollow_flags(os.O_WRONLY | os.O_CREAT | os.O_TRUNC), 0o644)
+    fd = open_unlinked_file(filepath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     try:
         handle = os.fdopen(fd, "w", encoding="utf-8", newline="")
         fd = -1
@@ -602,7 +634,7 @@ def open_project_writer(path: Path | str, *, binary: bool = False) -> Iterator[i
 
     Matplotlib and Plotly open the destination path themselves, so a chart
     name such as ``data/popularity_vs_rank.png`` can be replaced with a
-    symlink and the next save overwrites whatever the link points at.
+    symlink or a hard link and the next save overwrites whatever that inode is.
     """
     file_path = resolve_project_path(path)
     if _is_credential_file(file_path):
@@ -610,10 +642,10 @@ def open_project_writer(path: Path | str, *, binary: bool = False) -> Iterator[i
     if file_path.is_symlink():
         raise ValueError(f"Refusing to write through a symlink: {file_path}")
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    flags = _nofollow_flags(os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     fd = -1
     try:
-        fd = os.open(file_path, flags, 0o644)
+        fd = open_unlinked_file(file_path, flags, 0o644)
         if os.name != "nt":
             os.fchmod(fd, 0o644)
         if binary:
@@ -763,6 +795,10 @@ def load_dataframe(
         logger.debug(f"Loaded DataFrame from {filepath} ({len(df)} rows)")
         return df
 
+    except ValueError:
+        # Symlink and hard-link refusals must surface. A missing or unreadable
+        # CSV still falls through to the empty-frame path below.
+        raise
     except Exception as e:
         logger.error(f"Failed to load CSV from {filepath}: {e}")
         return pd.DataFrame() if default_empty else None
