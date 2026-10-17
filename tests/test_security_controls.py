@@ -209,6 +209,12 @@ class TestPathAndCsvGuards:
         assert list(neutralized.columns) == ["'=cmd", "safe"]
         assert neutralized["safe"].tolist() == ["'=1+1"]
 
+    def test_csv_sylk_prefix_is_neutralized(self):
+        frame = pd.DataFrame({"ID": ["ID;P", " ID", "id_safe"]})
+        neutralized = neutralize_csv_frame(frame)
+        assert list(neutralized.columns) == ["'ID"]
+        assert neutralized["'ID"].tolist() == ["'ID;P", "' ID", "id_safe"]
+
     def test_path_segment_and_chart_guards(self):
         assert safe_path_segment("popheads") == "popheads"
         with pytest.raises(ValueError):
@@ -435,3 +441,20 @@ class TestDatabaseBackup:
                 row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
         assert "trends" in names
+
+    def test_reopen_does_not_follow_a_swapped_in_symlink(self, tmp_path, monkeypatch):
+        from core.data_store import EnhancedMusicDataStore
+
+        store = EnhancedMusicDataStore(
+            str(tmp_path / "trends.db"), backup_dir=str(tmp_path / "backups")
+        )
+        store.close_pool()
+        outside = tmp_path.parent / "secret.db"
+        outside.write_text("SECRET-ORIGINAL", encoding="utf-8")
+        db_path = Path(store.db_path)
+        db_path.unlink()
+        db_path.symlink_to(outside)
+        monkeypatch.setattr(Path, "is_symlink", lambda _self: False)
+        with pytest.raises(ValueError, match="symlink"), store.get_connection():
+            pass
+        assert outside.read_text(encoding="utf-8") == "SECRET-ORIGINAL"
