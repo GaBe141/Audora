@@ -6,10 +6,13 @@ Demonstrates statistical analysis, trending schema, and visualization capabiliti
 import sys
 from pathlib import Path
 
-import pandas as pd
-
 # Add src to path
 sys.path.append(str(Path(__file__).parent / "src"))
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from core.utils import load_dataframe  # noqa: E402
 
 
 def main():
@@ -47,7 +50,9 @@ def main():
 
             for file_path in available_files[:2]:  # Analyze first 2 files
                 print(f"   Analyzing: {Path(file_path).name}")
-                df = pd.read_csv(file_path)
+                df = load_dataframe(file_path, default_empty=False)
+                if df is None:
+                    continue
 
                 # Get numeric columns for analysis
                 numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
@@ -92,8 +97,10 @@ def main():
             forecasting_engine = StreamingForecastingEngine()
 
             # Use a numeric column for forecasting
-            sample_df = pd.read_csv(available_files[0])
-            numeric_columns = sample_df.select_dtypes(include=["number"]).columns
+            sample_df = load_dataframe(available_files[0], default_empty=False)
+            numeric_columns = (
+                sample_df.select_dtypes(include=["number"]).columns if sample_df is not None else []
+            )
 
             if len(numeric_columns) > 0:
                 target_column = numeric_columns[0]
