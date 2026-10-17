@@ -6,10 +6,58 @@ file and console output, improving observability and debugging capabilities.
 
 import json
 import logging
+import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+_LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+
+def safe_log_level(level: str | int) -> int:
+    """Map a configured level to a real logging level.
+
+    Config values are allowlisted so a file cannot select arbitrary logging objects.
+    """
+    if isinstance(level, int):
+        return level
+    return _LOG_LEVELS.get(str(level).upper(), logging.INFO)
+
+
+def safe_log_filename(name: str) -> str:
+    """Drop directory components from a log file name."""
+    base = Path(str(name)).name
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", base).strip("._")
+    return cleaned or "audora"
+
+
+class NofollowFileHandler(logging.FileHandler):
+    """File handler that refuses symlink targets and keeps logs mode 600."""
+
+    def _open(self) -> Any:
+        if Path(self.baseFilename).is_symlink():
+            raise OSError(f"Refusing to log through a symlink: {self.baseFilename}")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(self.baseFilename, flags, 0o600)
+        try:
+            if os.name != "nt":
+                os.fchmod(fd, 0o600)
+            handle = os.fdopen(fd, "a", encoding=self.encoding or "utf-8")
+            fd = -1
+            return handle
+        finally:
+            if fd >= 0:
+                os.close(fd)
 
 
 class JSONFormatter(logging.Formatter):
@@ -158,11 +206,14 @@ def setup_logging(
     """
     # Create log directory
     log_path = Path(log_dir)
+    if log_path.is_symlink():
+        raise ValueError("Refusing to write logs through a symlinked directory")
     log_path.mkdir(parents=True, exist_ok=True)
+    level = safe_log_level(log_level)
 
     # Get root logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
+    root_logger.setLevel(level)
 
     # Remove existing handlers to avoid duplicates
     root_logger.handlers = []
@@ -170,7 +221,7 @@ def setup_logging(
     # Console handler (human-readable with colors)
     if console_output:
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(log_level)
+        console_handler.setLevel(level)
 
         if sys.stdout.isatty():  # Use colors only in interactive terminals
             console_formatter = ColoredConsoleFormatter(
@@ -191,9 +242,9 @@ def setup_logging(
         timestamp = datetime.now().strftime("%Y%m%d")
 
         # Main log file (all levels)
-        main_log_file = log_path / f"{app_name}_{timestamp}.log"
-        main_handler = logging.FileHandler(main_log_file, encoding="utf-8")
-        main_handler.setLevel(log_level)
+        main_log_file = log_path / f"{safe_log_filename(app_name)}_{timestamp}.log"
+        main_handler = NofollowFileHandler(main_log_file, encoding="utf-8")
+        main_handler.setLevel(level)
 
         if json_logs:
             main_handler.setFormatter(JSONFormatter())
@@ -209,8 +260,8 @@ def setup_logging(
         root_logger.addHandler(main_handler)
 
         # Error log file (ERROR and CRITICAL only)
-        error_log_file = log_path / f"{app_name}_errors_{timestamp}.log"
-        error_handler = logging.FileHandler(error_log_file, encoding="utf-8")
+        error_log_file = log_path / f"{safe_log_filename(app_name)}_errors_{timestamp}.log"
+        error_handler = NofollowFileHandler(error_log_file, encoding="utf-8")
         error_handler.setLevel(logging.ERROR)
 
         if json_logs:
@@ -314,4 +365,7 @@ __all__ = [
     "JSONFormatter",
     "ColoredConsoleFormatter",
     "LogContext",
+    "NofollowFileHandler",
+    "safe_log_level",
+    "safe_log_filename",
 ]
