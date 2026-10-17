@@ -1,6 +1,7 @@
 """MusicBrainz API integration for comprehensive music metadata and artist relationships."""
 
 import time
+import uuid
 from typing import Any
 
 import pandas as pd
@@ -15,6 +16,7 @@ class MusicBrainzAPI:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         self.session.headers.update({"User-Agent": USER_AGENT})
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second to be respectful
@@ -34,7 +36,9 @@ class MusicBrainzAPI:
         params.update({"fmt": "json"})
 
         try:
-            response = self.session.get(f"{BASE_URL}{endpoint}", params=params)
+            response = self.session.get(
+                f"{BASE_URL}{endpoint}", params=params, allow_redirects=False, timeout=30
+            )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -56,11 +60,15 @@ class MusicBrainzAPI:
             "inc": "artist-rels+recording-rels+release-rels+work-rels+url-rels+tags+ratings+genres"
         }
 
-        return self._make_request(f"artist/{mbid}", params)
+        return self._make_request(f"artist/{_require_mbid(mbid)}", params)
 
     def get_artist_releases(self, mbid: str) -> list[dict]:
         """Get all releases for an artist."""
-        params = {"artist": mbid, "inc": "release-groups+media+recordings", "limit": 100}
+        params = {
+            "artist": _require_mbid(mbid),
+            "inc": "release-groups+media+recordings",
+            "limit": 100,
+        }
 
         result = self._make_request("release", params)
         if result and result.get("releases"):
@@ -172,6 +180,14 @@ class MusicBrainzAPI:
             )
 
         return pd.DataFrame(enriched_data)
+
+
+def _require_mbid(mbid: str) -> str:
+    """MusicBrainz detail lookups must be a UUID, not a path or query string."""
+    try:
+        return str(uuid.UUID(str(mbid)))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError("MusicBrainz id must be a UUID") from exc
 
 
 def get_musicbrainz_client() -> MusicBrainzAPI:
