@@ -11,6 +11,8 @@ from typing import Any
 
 import numpy as np
 
+from core.utils import confine_relative_path, write_json
+
 warnings.filterwarnings("ignore")
 
 
@@ -577,10 +579,7 @@ class TrendingSchema:
         emerging_trends = self.get_emerging_trends()
         snapshot["emerging_trends"] = [item.to_dict() for item in emerging_trends]
 
-        # Save to file using centralized utility
-        from core.utils import write_json
-
-        write_json(filepath, snapshot)
+        write_json(confine_relative_path(filepath), snapshot)
         return snapshot
 
 
