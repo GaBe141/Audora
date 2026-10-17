@@ -16,6 +16,7 @@ class SpotifyChartsAPI:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         # Use a realistic user agent
         self.session.headers.update(
             {
@@ -45,11 +46,12 @@ class SpotifyChartsAPI:
         if date is None:
             # Default to yesterday (charts are usually 1 day behind)
             date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        country_code, date = _safe_chart_target(country_code, date)
 
         url = f"{CHARTS_BASE_URL}/charts/view/regional-{country_code}-daily/{date}"
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, allow_redirects=False, timeout=30)
             response.raise_for_status()
 
             # Parse the HTML
@@ -137,11 +139,12 @@ class SpotifyChartsAPI:
 
         if date is None:
             date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        country_code, date = _safe_chart_target(country_code, date)
 
         url = f"{CHARTS_BASE_URL}/charts/view/viral-{country_code}-daily/{date}"
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, allow_redirects=False, timeout=30)
             response.raise_for_status()
 
             BeautifulSoup(response.content, "html.parser")
@@ -230,6 +233,20 @@ class SpotifyChartsAPI:
             return trend_analysis
 
         return pd.DataFrame()
+
+
+def _safe_chart_target(country_code: str, date: str) -> tuple[str, str]:
+    """Allow global or a two-letter country and a real YYYY-MM-DD date."""
+    country = str(country_code).strip().lower()
+    if country != "global" and not (len(country) == 2 and country.isalpha()):
+        raise ValueError("Invalid Spotify chart country")
+    try:
+        parsed = datetime.strptime(str(date), "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("Invalid Spotify chart date") from exc
+    if parsed.strftime("%Y-%m-%d") != str(date):
+        raise ValueError("Invalid Spotify chart date")
+    return country, str(date)
 
 
 def get_spotify_charts_client() -> SpotifyChartsAPI:

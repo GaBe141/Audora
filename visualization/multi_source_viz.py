@@ -1,13 +1,14 @@
 """Multi-source visualization generator for comprehensive music data analysis."""
 
 import warnings
-from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+
+from core.utils import resolve_project_path, save_matplotlib_figure
 
 warnings.filterwarnings("ignore")
 
@@ -22,7 +23,7 @@ class MultiSourceVisualizer:
     def __init__(self, all_data: dict[str, pd.DataFrame], insights: dict[str, Any]):
         self.all_data = all_data
         self.insights = insights
-        self.output_dir = Path("data")
+        self.output_dir = resolve_project_path("data")
         self.output_dir.mkdir(exist_ok=True)
 
     def create_mainstream_comparison(self):
@@ -84,7 +85,9 @@ class MultiSourceVisualizer:
         ax2.set_title("Overall Mainstream Score", fontsize=16, fontweight="bold")
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / "mainstream_analysis.png", dpi=300, bbox_inches="tight")
+        save_matplotlib_figure(
+            plt, self.output_dir / "mainstream_analysis.png", dpi=300, bbox_inches="tight"
+        )
         plt.close()
 
         print("✅ Created mainstream comparison visualization")
@@ -137,7 +140,9 @@ class MultiSourceVisualizer:
         ax2.set_title("Geographic Diversity Distribution", fontsize=16, fontweight="bold")
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / "geographic_diversity.png", dpi=300, bbox_inches="tight")
+        save_matplotlib_figure(
+            plt, self.output_dir / "geographic_diversity.png", dpi=300, bbox_inches="tight"
+        )
         plt.close()
 
         print("✅ Created geographic diversity visualization")
@@ -221,7 +226,9 @@ class MultiSourceVisualizer:
             )
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / "era_timeline.png", dpi=300, bbox_inches="tight")
+        save_matplotlib_figure(
+            plt, self.output_dir / "era_timeline.png", dpi=300, bbox_inches="tight"
+        )
         plt.close()
 
         print("✅ Created era timeline visualization")
@@ -290,7 +297,9 @@ class MultiSourceVisualizer:
             ax2.text(count + 0.1, i, f"{int(count)}", va="center", fontweight="bold")
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / "network_analysis.png", dpi=300, bbox_inches="tight")
+        save_matplotlib_figure(
+            plt, self.output_dir / "network_analysis.png", dpi=300, bbox_inches="tight"
+        )
         plt.close()
 
         print("✅ Created network analysis visualization")
@@ -369,7 +378,9 @@ class MultiSourceVisualizer:
         ax4.set_title("Data Distribution Across Sources", fontsize=14, fontweight="bold")
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / "data_coverage_summary.png", dpi=300, bbox_inches="tight")
+        save_matplotlib_figure(
+            plt, self.output_dir / "data_coverage_summary.png", dpi=300, bbox_inches="tight"
+        )
         plt.close()
 
         print("✅ Created data coverage summary")
@@ -476,7 +487,9 @@ class MultiSourceVisualizer:
                 )
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / "multi_source_dashboard.png", dpi=300, bbox_inches="tight")
+        save_matplotlib_figure(
+            plt, self.output_dir / "multi_source_dashboard.png", dpi=300, bbox_inches="tight"
+        )
         plt.close()
 
         print("✅ Created comprehensive dashboard")
