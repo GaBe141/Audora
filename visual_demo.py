@@ -46,6 +46,8 @@ sys.path.extend(
 from advanced_analytics import MusicTrendAnalytics  # noqa: E402
 from statistical_analysis import StreamingDataQualityAnalyzer  # noqa: E402
 
+from core.utils import load_dataframe, resolve_project_path, write_private_text  # noqa: E402
+
 # Set beautiful styling
 plt.style.use("dark_background")
 # sns.set_palette("husl")  # Commented out for faster loading
@@ -76,9 +78,9 @@ class AudoraVisualDemo:
         # Load actual user data
         data = {}
         try:
-            data["tracks"] = pd.read_csv(self.data_dir / "simple_top_tracks.csv")
-            data["artists"] = pd.read_csv(self.data_dir / "simple_top_artists.csv")
-            data["recent"] = pd.read_csv(self.data_dir / "recently_played.csv")
+            data["tracks"] = load_dataframe(self.data_dir / "simple_top_tracks.csv")
+            data["artists"] = load_dataframe(self.data_dir / "simple_top_artists.csv")
+            data["recent"] = load_dataframe(self.data_dir / "recently_played.csv")
             print(
                 f"✅ Loaded real data: {len(data['tracks'])} tracks, {len(data['artists'])} artists"
             )
@@ -700,9 +702,8 @@ Ready to revolutionize music discovery? Contact us for enterprise deployment!
         """
 
         # Save marketing materials
-        marketing_file = self.output_dir / "AUDORA_MARKETING_DEMO.txt"
-        with open(marketing_file, "w") as f:
-            f.write(marketing_text)
+        marketing_file = resolve_project_path(self.output_dir / "AUDORA_MARKETING_DEMO.txt")
+        write_private_text(marketing_file, marketing_text)
 
         print(f"✅ Marketing materials saved: {marketing_file}")
         print("\n🎯 DEMO STATISTICS:")
