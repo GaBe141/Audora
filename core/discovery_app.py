@@ -25,7 +25,7 @@ from core.notification_service import (
     NotificationPriority,
 )
 from core.resilience import EnhancedResilience
-from core.utils import confine_relative_path, read_json, write_json
+from core.utils import confine_relative_path, read_json, resolve_project_path, write_json
 from integrations.lastfm_integration import get_lastfm_client
 from integrations.social_discovery_engine import (
     SocialMusicDiscoveryEngine,
@@ -95,8 +95,9 @@ class EnhancedMusicDiscoveryApp:
         """Set up comprehensive logging."""
         log_config = self.configs.get("system", {}).get("logging", {})
 
-        # Create logs directory
-        logs_dir = Path("logs")
+        # Create logs directory inside the project. A symlinked logs directory
+        # would let the file handler write outside the project root.
+        logs_dir = resolve_project_path("logs")
         logs_dir.mkdir(exist_ok=True)
 
         # Configure logging
