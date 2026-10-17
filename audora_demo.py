@@ -14,7 +14,6 @@ Features:
     🎨 Data visualization and reporting
 """
 
-import json
 import sys
 import warnings
 from datetime import datetime, timedelta
@@ -38,6 +37,8 @@ sys.path.extend(
 # Import working modules
 from advanced_analytics import MusicTrendAnalytics  # noqa: E402
 from statistical_analysis import StreamingDataQualityAnalyzer  # noqa: E402
+
+from core.utils import load_dataframe, write_json  # noqa: E402
 
 
 class AudoraMusicDiscoveryDemo:
@@ -73,7 +74,10 @@ class AudoraMusicDiscoveryDemo:
             filepath = self.data_dir / filename
             if filepath.exists():
                 try:
-                    df = pd.read_csv(filepath)
+                    df = load_dataframe(filepath, default_empty=False)
+                    if df is None:
+                        print(f"⚠️  {filename:<25} Not found")
+                        continue
                     loaded_data[key] = df
                     print(f"✅ {filename:<25} {len(df):>4} records")
                 except Exception as e:
@@ -293,10 +297,7 @@ class AudoraMusicDiscoveryDemo:
             / "reports"
             / f"viral_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         )
-        report_path.parent.mkdir(exist_ok=True)
-
-        with open(report_path, "w") as f:
-            json.dump(report, f, indent=2, default=str)
+        write_json(report_path, report)
 
         print(f"✅ Report saved: {report_path}")
         print("📊 Summary:")
