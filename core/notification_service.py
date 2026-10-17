@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 import jinja2  # type: ignore[import-untyped]
+import yarl
 
 from core.utils import (
     confine_relative_path,
@@ -166,6 +167,19 @@ class _PinnedResolver:
 
     async def close(self) -> None:
         return None
+
+
+class _PinnedConnector(aiohttp.TCPConnector):
+    """Always use the pinned resolver, including when the host is an IP literal.
+
+    aiohttp treats numeric hosts as already resolved and connects to that
+    string directly. The pinned resolver must still approve the host so a
+    parser cannot swap in an address that validation did not screen.
+    """
+
+    async def _resolve_host(self, host: str, port: int, traces: Any = None) -> list[dict[str, Any]]:
+        del traces
+        return await self._resolver.resolve(host, port, family=self._family)
 
 
 class EnhancedNotificationService:
@@ -430,6 +444,32 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL contains unsafe characters")
         return cleaned
 
+    def _hosts_equivalent(self, left: str, right: str) -> bool:
+        """True when two parsers name the same host or the same IP."""
+        if left.rstrip(".").lower() == right.rstrip(".").lower():
+            return True
+        try:
+            left_ip = self._unwrap_ip(ipaddress.ip_address(left))
+            right_ip = self._unwrap_ip(ipaddress.ip_address(right))
+        except ValueError:
+            return False
+        return left_ip == right_ip
+
+    def _webhook_client_host(self, url: str, parsed_hostname: str) -> str:
+        """Return the host the HTTP client will request.
+
+        yarl normalizes some names into a different host than urlparse. The
+        address screen has to use that host, and a mismatch that is not the
+        same IP is refused.
+        """
+        try:
+            client_host = yarl.URL(url).host
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError("Webhook URL is not a valid client URL") from exc
+        if not client_host or not self._hosts_equivalent(parsed_hostname, client_host):
+            raise ValueError("Webhook URL host is ambiguous")
+        return client_host
+
     def _resolve_webhook(self, url: str, *, allow_private: bool = False) -> tuple[str, list[str]]:
         """Validate an outbound webhook URL and return the addresses it may use."""
         cleaned = self._reject_unsafe_url_text(url)
@@ -440,8 +480,10 @@ class EnhancedNotificationService:
             raise ValueError("Webhook URL must include a valid hostname")
 
         hostname = parsed.hostname
+        client_host = self._webhook_client_host(cleaned, hostname)
         self._reject_obfuscated_host(hostname)
-        addresses = self._resolve_ips(hostname, parsed.port or 443)
+        self._reject_obfuscated_host(client_host)
+        addresses = self._resolve_ips(client_host, parsed.port or 443)
         self._screen_addresses(addresses, allow_private=allow_private, smtp=False)
         return cleaned, addresses
 
@@ -506,8 +548,9 @@ class EnhancedNotificationService:
     ) -> tuple[int, str]:
         """POST to a validated URL without redirects, proxy env, or a second DNS lookup."""
         parsed = urlparse(url)
-        resolver = _PinnedResolver(parsed.hostname or "", addresses)
-        connector = aiohttp.TCPConnector(resolver=resolver)  # type: ignore[arg-type]
+        client_host = self._webhook_client_host(url, parsed.hostname or "")
+        resolver = _PinnedResolver(client_host, addresses)
+        connector = _PinnedConnector(resolver=resolver)  # type: ignore[arg-type]
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         async with (
             aiohttp.ClientSession(

@@ -7,6 +7,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+import aiohttp
 import pandas as pd
 import pytest
 
@@ -17,6 +18,8 @@ from core.notification_service import (
     NotificationChannel,
     NotificationMessage,
     NotificationPriority,
+    _PinnedConnector,
+    _PinnedResolver,
 )
 from core.utils import (
     JsonTokenCache,
@@ -120,6 +123,28 @@ class TestRedirectAndSsrf:
         assert svc._validate_webhook_url(url, allow_private=True) == url
         with pytest.raises(ValueError, match="private or restricted"):
             svc._validate_webhook_url(url, allow_private=False)
+
+    def test_webhook_rejects_client_host_mismatch(self):
+        svc = EnhancedNotificationService()
+        with pytest.raises(ValueError, match="ambiguous"):
+            svc._validate_webhook_url("https://ⓔxample.com/hook")
+
+    def test_pinned_connector_screens_ip_literals(self):
+        async def exercise() -> None:
+            stock = aiohttp.TCPConnector()
+            pinned = _PinnedConnector(resolver=_PinnedResolver("example.com", ["93.184.216.34"]))
+            try:
+                stock_result = await stock._resolve_host("127.0.0.1", 443)
+                assert stock_result[0]["host"] == "127.0.0.1"
+                with pytest.raises(OSError):
+                    await pinned._resolve_host("127.0.0.1", 443)
+                pinned_result = await pinned._resolve_host("example.com", 443)
+                assert pinned_result[0]["host"] == "93.184.216.34"
+            finally:
+                await stock.close()
+                await pinned.close()
+
+        asyncio.run(exercise())
 
     def test_email_header_and_attachment_names_reject_controls(self):
         svc = EnhancedNotificationService()
@@ -258,6 +283,10 @@ class TestProjectPathConfinement:
             "id_rsa::$DATA",
             ".netrc",
             "credentials.json",
+            "credentials",
+            ".pgpass",
+            "id_rsa.ppk",
+            ".htpasswd",
             "config/notification_config.json.bak",
             "config/notification_config.json.",
             "../secret.env",
@@ -286,6 +315,17 @@ class TestProjectPathConfinement:
         with pytest.raises(ValueError, match="escapes"):
             setup._write_private_file(linked / "social_apis.json", '{"api_key":"secret"}')
         assert not (outside / "social_apis.json").exists()
+
+    def test_discovery_logging_rejects_symlinked_logs_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
+        source = Path("core/discovery_app.py").read_text(encoding="utf-8")
+        assert 'logs_dir = resolve_project_path("logs")' in source
+        outside = tmp_path.parent / "leaked-logs"
+        outside.mkdir()
+        (tmp_path / "logs").symlink_to(outside, target_is_directory=True)
+        with pytest.raises(ValueError, match="symlink"):
+            resolve_project_path("logs")
+        assert list(outside.iterdir()) == []
 
 
 class TestSecretRedactionAndDashboardHost:
@@ -316,6 +356,18 @@ class TestSecretRedactionAndDashboardHost:
         assert is_sensitive_filename("ID_RSA::$DATA")
         assert is_sensitive_filename(".netrc")
         assert is_sensitive_filename("notification_config.json ")
+        assert is_sensitive_filename(".pgpass")
+        assert is_sensitive_filename("credentials")
+        assert is_sensitive_filename("credentials.bak")
+        assert is_sensitive_filename("id_rsa.ppk")
+        assert is_sensitive_filename(".htpasswd")
+        assert is_sensitive_filename(".my.cnf")
+        assert is_sensitive_filename(".boto")
+        assert is_sensitive_filename(".s3cfg")
+        assert is_sensitive_filename("vault.kdbx")
+        assert is_sensitive_filename("key.p8")
+        assert is_sensitive_filename("prod.tfstate")
+        assert not is_sensitive_filename("my_credentials.csv")
         assert not is_sensitive_filename("report.csv")
         (tmp_path / "config").mkdir()
         write_json("config/notification_config.json", {"email": {"password": "secret"}})
