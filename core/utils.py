@@ -90,6 +90,26 @@ _DISGUISED_FILE_SUFFIXES = (
     "~",
 )
 _NUMERIC_COPY_RE = re.compile(r"(.+)\.(\d+)$")
+# FAT illegal-character bitmap from RtlGenerate8dot3Name. Bit set means the
+# ASCII character cannot appear in an 8.3 name and is rewritten to "_".
+_FAT_ILLEGAL_BITS = (0xFFFFFFFF, 0xFC009C04, 0x38000000, 0x10000000)
+_ENV_SHORT_BASES = frozenset({"env", "envrc"})
+_ENV_SHORT_SUFFIXES = (
+    "local",
+    "development",
+    "production",
+    "prod",
+    "test",
+    "staging",
+    "example",
+)
+# First three characters of sensitive extensions that do not fit in 8.3,
+# plus the FsRtlSafeExtensions form that rewrites the third character to "~".
+_TRUNCATED_SECRET_EXTENSIONS = frozenset({"sql", "sq~", "kdb", "kd~", "tfs", "tf~", "db-", "db~"})
+_GENERATED_SHORT_NAME_RE = re.compile(
+    r"^([a-z0-9_$%'@`!(){}^#&\-]{1,6})~(\d{1,6})"
+    r"(?:\.([a-z0-9_$%'@`!(){}^#&\-]{0,2}~?|[a-z0-9_$%'@`!(){}^#&\-]{1,3}))?$"
+)
 
 # Re-export for convenience
 try:
@@ -98,6 +118,183 @@ try:
     HAS_PANDAS = True
 except ImportError:
     HAS_PANDAS = False
+
+
+def _is_fat_illegal(char: str) -> bool:
+    """True when an ASCII character is illegal in a Windows 8.3 name."""
+    code = ord(char)
+    if code >= 128:
+        return True
+    return bool(_FAT_ILLEGAL_BITS[code // 32] & (1 << (code % 32)))
+
+
+def _lfn_checksum(name: str) -> int:
+    """Windows long-name checksum used once several 8.3 aliases collide."""
+    chars = [ord(char) for char in name]
+    if not chars:
+        return 0
+    if len(chars) == 1:
+        return chars[0] & 0xFFFF
+    checksum = ((chars[0] << 8) + chars[1]) & 0xFFFF
+    index = 2
+    while index < len(chars):
+        checksum = (
+            (0x8000 if checksum & 1 else 0) + (checksum >> 1) + (chars[index] << 8)
+        ) & 0xFFFF
+        if index + 1 < len(chars):
+            checksum = (checksum + chars[index + 1]) & 0xFFFF
+        index += 2
+    return checksum
+
+
+def _checksum_digits(name: str) -> str:
+    """Four checksum nibbles, least significant nibble first, as Windows emits them."""
+    checksum = _lfn_checksum(name)
+    digits: list[str] = []
+    for _ in range(4):
+        nibble = checksum & 0xF
+        if nibble <= 9:
+            digits.append(chr(ord("0") + nibble))
+        else:
+            digits.append(chr(ord("A") + nibble - 10))
+        checksum >>= 4
+    return "".join(digits)
+
+
+def _next_short_char(name: str, index: int, *, skip_dots: bool) -> tuple[str, int]:
+    """Return the next 8.3 basis character and the index after it."""
+    while index < len(name):
+        char = name[index]
+        index += 1
+        if char <= " " or ord(char) >= 127 or (char == "." and skip_dots):
+            continue
+        if _is_fat_illegal(char):
+            char = "_"
+        elif "a" <= char <= "z":
+            char = chr(ord(char) - 32)
+        return char, index
+    return "", index
+
+
+def _short_name_parts(name: str) -> tuple[str, str, bool, bool]:
+    """Return basis, extension, whether the extension was truncated, and early checksum.
+
+    This follows the ASCII path of ``RtlGenerate8dot3Name``: skip a leading dot,
+    keep the last dot as the extension separator, and insert a checksum when the
+    basis is two characters or shorter.
+    """
+    index = 0
+    skip_dots = name.startswith(".")
+    last_dot_index: int | None = None
+    while True:
+        char, index = _next_short_char(name, index, skip_dots=skip_dots)
+        skip_dots = False
+        if not char:
+            break
+        if char == ".":
+            last_dot_index = index
+    if last_dot_index == len(name):
+        last_dot_index = None
+
+    basis_chars: list[str] = []
+    index = 0
+    while len(basis_chars) < 6:
+        char, next_index = _next_short_char(name, index, skip_dots=True)
+        if not char or (last_dot_index is not None and next_index >= last_dot_index):
+            break
+        basis_chars.append(char)
+        index = next_index
+
+    early_checksum = len(basis_chars) <= 2
+    if early_checksum:
+        basis_chars.extend(_checksum_digits(name))
+
+    extension_chars: list[str] = []
+    truncated = False
+    if last_dot_index is not None:
+        scan = last_dot_index
+        while len(extension_chars) < 3:
+            char, scan = _next_short_char(name, scan, skip_dots=True)
+            if not char:
+                break
+            extension_chars.append(char)
+        extra, _scan = _next_short_char(name, scan, skip_dots=True)
+        truncated = bool(extra)
+    return "".join(basis_chars), "".join(extension_chars), truncated, early_checksum
+
+
+def _tilde_aliases(basis: str, extension: str) -> set[str]:
+    """``~1`` through ``~9`` spellings of one 8.3 basis."""
+    if not basis:
+        return set()
+    suffix = f".{extension}" if extension else ""
+    return {f"{basis}~{number}{suffix}".casefold() for number in range(1, 10)}
+
+
+def _windows_short_aliases(name: str) -> set[str]:
+    """8.3 aliases Windows may store for ``name``, including safe-extension forms."""
+    basis, extension, truncated, early_checksum = _short_name_parts(name)
+    extensions = [extension]
+    if truncated and extension:
+        extensions.append(f"{extension[:-1]}~")
+    bases = [basis]
+    if basis and not early_checksum:
+        bases.append(basis[:2] + _checksum_digits(name))
+    aliases: set[str] = set()
+    for short_basis in bases:
+        for short_extension in extensions:
+            aliases.update(_tilde_aliases(short_basis, short_extension))
+    return aliases
+
+
+def _sensitive_long_names() -> set[str]:
+    """Long names whose generated 8.3 aliases must be treated as secret."""
+    names = set(_SECRET_FILE_NAMES)
+    for suffix in _ENV_SHORT_SUFFIXES:
+        names.add(f".env.{suffix}")
+        names.add(f".envrc.{suffix}")
+    expanded = set(names)
+    for name in names:
+        for extra in _DISGUISED_FILE_SUFFIXES:
+            expanded.add(f"{name}{extra}")
+        for number in range(1, 10):
+            expanded.add(f"{name}.{number}")
+        expanded.add(f".{name}")
+        expanded.add(f"#{name}#")
+        expanded.add(f".#{name}")
+        for swap in (".swp", ".swo", ".swn", ".swx"):
+            expanded.add(f".{name}{swap}")
+    return expanded
+
+
+def _short_secret_aliases() -> frozenset[str]:
+    aliases: set[str] = set()
+    for name in _sensitive_long_names():
+        aliases.update(_windows_short_aliases(name))
+    return frozenset(aliases)
+
+
+_SHORT_SECRET_ALIASES = _short_secret_aliases()
+
+
+def _is_windows_short_secret(candidate: str) -> bool:
+    """True when ``candidate`` is a Windows 8.3 alias of a secret or database.
+
+    NTFS can store ``ENV~1`` for ``.env`` and ``CREDEN~1.JSO`` for
+    ``credentials.json``. Those aliases do not match the long-name denylist.
+    Generation is often disabled on current volumes; when a short name exists,
+    opening it still opens the long file.
+    """
+    if candidate in _SHORT_SECRET_ALIASES:
+        return True
+    match = _GENERATED_SHORT_NAME_RE.fullmatch(candidate)
+    if match is None:
+        return False
+    basis = match.group(1)
+    extension = match.group(3)
+    if extension in _TRUNCATED_SECRET_EXTENSIONS:
+        return True
+    return basis in _ENV_SHORT_BASES
 
 
 def _filename_forms(filename: str) -> list[str]:
@@ -176,11 +373,18 @@ def _candidate_is_secret(candidate: str) -> bool:
         return True
     if candidate == ".envrc" or candidate.startswith(".envrc."):
         return True
-    return candidate.endswith(_SECRET_FILE_SUFFIXES)
+    if candidate.endswith(_SECRET_FILE_SUFFIXES):
+        return True
+    return _is_windows_short_secret(candidate)
 
 
 def is_sensitive_filename(filename: str) -> bool:
-    """True for secrets, databases, keys, and disguised copies of those files."""
+    """True for secrets, databases, keys, and disguised copies of those files.
+
+    Disguises include Windows 8.3 short names such as ``ENV~1`` and
+    ``NOTIFI~1.JSO``. The canonical live config names stay readable through
+    the JSON helpers; their short names do not.
+    """
     for form in _filename_forms(filename):
         if any(_candidate_is_secret(candidate) for candidate in _secret_name_candidates(form)):
             return True
@@ -191,8 +395,8 @@ def _is_credential_file(path: Path, *, allow_live_config: bool = False) -> bool:
     """True when generic file helpers must not touch this path.
 
     JSON helpers may still read the live notification and API config files.
-    A backup, trailing-dot, or alternate-data-stream alias of those files is
-    refused, and CSV helpers refuse the live files too.
+    A backup, trailing-dot, short-name, or alternate-data-stream alias of
+    those files is refused, and CSV helpers refuse the live files too.
     """
     if allow_live_config and _is_exact_live_config(path.name):
         return False
