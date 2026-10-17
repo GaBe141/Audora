@@ -14,7 +14,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.utils import write_private_text
+from core.logging_config import NofollowFileHandler
+from core.utils import resolve_project_path, write_private_text
 
 # Enhanced package list with new dependencies
 ENHANCED_PACKAGES = [
@@ -68,12 +69,14 @@ class EnhancedMusicDiscoverySetup:
 
     def _setup_logging(self) -> logging.Logger:
         """Set up logging for setup process."""
+        log_path = resolve_project_path("logs/setup.log")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s - %(levelname)s - %(message)s",
             handlers=[
                 logging.StreamHandler(sys.stdout),
-                logging.FileHandler("setup.log", mode="w"),
+                NofollowFileHandler(log_path),
             ],
         )
         return logging.getLogger(__name__)
@@ -184,7 +187,7 @@ class EnhancedMusicDiscoverySetup:
 
     def _write_private_file(self, path: Path, content: str) -> None:
         """Write a credential or template file without following a symlink."""
-        write_private_text(path, content)
+        write_private_text(resolve_project_path(path), content)
 
     def setup_configuration(self) -> bool:
         """Set up configuration files."""
