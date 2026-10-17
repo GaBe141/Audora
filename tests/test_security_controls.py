@@ -24,6 +24,7 @@ from core.notification_service import (
 )
 from core.utils import (
     JsonTokenCache,
+    _windows_short_aliases,
     dashboard_request_allowed,
     is_sensitive_filename,
     load_dataframe,
@@ -370,6 +371,8 @@ class TestProjectPathConfinement:
             "NOTIFI~1.JSO",
             "ID_RSA~1",
             "TRENDS~1.SQL",
+            "ENVPRO~1.LOC",
+            ".env.production.local",
         ):
             message = NotificationMessage(
                 title="Report",
@@ -480,6 +483,30 @@ class TestSecretRedactionAndDashboardHost:
         assert is_sensitive_filename("PROD~1.TFS")
         assert is_sensitive_filename("TRENDS~1.DB-")
         assert is_sensitive_filename("MY0DB9~1.CNF")
+        assert is_sensitive_filename(".env.production.local")
+        assert is_sensitive_filename(".env.development.local")
+        assert is_sensitive_filename(".env.preview.local")
+        assert is_sensitive_filename("ENVPRO~1.LOC")
+        assert is_sensitive_filename("envpro~1.lo~")
+        assert is_sensitive_filename("ENVDEV~1.LOC")
+        assert is_sensitive_filename("ENVPRE~1.LOC")
+        assert is_sensitive_filename("ENVPRO~1.LOC::$DATA")
+        assert is_sensitive_filename(".env.production.local.bak")
+        for long_name in (
+            ".env.production.local",
+            ".env.development.local",
+            ".env.test.local",
+            ".env.preview.local",
+            ".env.production.local.bak",
+        ):
+            for alias in _windows_short_aliases(long_name):
+                assert is_sensitive_filename(alias), alias
+        canary_aliases = _windows_short_aliases(".env.canary.local")
+        assert any(alias.startswith("envcan~") for alias in canary_aliases)
+        for alias in canary_aliases:
+            if alias.startswith("envcan~"):
+                assert is_sensitive_filename(alias), alias
+        assert is_sensitive_filename("ENVCAN~1.BAK")
         assert not is_sensitive_filename("my_credentials.csv")
         assert not is_sensitive_filename("MY_CRE~1.CSV")
         assert not is_sensitive_filename("report.csv")
@@ -487,6 +514,12 @@ class TestSecretRedactionAndDashboardHost:
         assert not is_sensitive_filename("NOTES~1.TXT")
         assert not is_sensitive_filename("id_safe")
         assert not is_sensitive_filename("ID_SAF~1")
+        assert not is_sensitive_filename("ENVIRO~1.TXT")
+        assert not is_sensitive_filename("ENVELO~1.CSV")
+        assert not is_sensitive_filename("ENVPRO~1")
+        assert not is_sensitive_filename("environment.txt")
+        assert not is_sensitive_filename("envelope.csv")
+        assert not is_sensitive_filename("envelope.local")
         (tmp_path / "config").mkdir()
         write_json("config/notification_config.json", {"email": {"password": "secret"}})
         assert read_json("config/notification_config.json")["email"]["password"] == "secret"
@@ -500,6 +533,10 @@ class TestSecretRedactionAndDashboardHost:
             read_json("NOTIFI~1.JSO")
         with pytest.raises(ValueError, match="credential"):
             read_json("ENV~1")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("ENVPRO~1.LOC")
+        with pytest.raises(ValueError, match="credential"):
+            load_dataframe("ENVDEV~1.LOC")
         with pytest.raises(ValueError, match="credential"):
             load_dataframe("TRENDS~1.SQL")
         with pytest.raises(ValueError, match="credential"):
