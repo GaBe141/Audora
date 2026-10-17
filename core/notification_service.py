@@ -39,6 +39,7 @@ _NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")
 _6TO4 = ipaddress.ip_network("2002::/16")
 _SITE_LOCAL = ipaddress.ip_network("fec0::/10")
 _TEREDO = ipaddress.ip_network("2001::/32")
+_IPV4_COMPAT = ipaddress.ip_network("::/96")
 _EC2_METADATA_V6 = ipaddress.ip_address("fd00:ec2::254")
 
 
@@ -74,8 +75,22 @@ def _unwrap_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address):
 
 
 def _is_always_blocked(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Block metadata, relay, and non-routable ranges even when private targets are opted in."""
-    if addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified:
+    """Block metadata, relay, reserved, and non-routable ranges even when private targets are opted in.
+
+    Python reports deprecated IPv4-compatible addresses (::10.0.0.1, ::127.0.0.1,
+    ::169.254.169.254) and other reserved forms such as ::ffff:0:10.0.0.1 as global.
+    Those addresses still name restricted targets, so they are never public.
+    """
+    addr = _unwrap_ip(addr)
+    if isinstance(addr, ipaddress.IPv6Address) and _in_network(addr, _IPV4_COMPAT):
+        return True
+    if (
+        addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_unspecified
+        or addr.is_reserved
+    ):
         return True
     if addr.version == 4:
         return _in_network(addr, _CGNAT) or _in_network(addr, _6TO4_ANYCAST)
@@ -401,7 +416,7 @@ class EnhancedNotificationService:
     ) -> tuple[str, str, int, list[str]]:
         """Validate a webhook URL and return the hostname plus pinned addresses."""
         cleaned = url.strip()
-        if any(ord(char) < 32 or ord(char) == 127 for char in cleaned):
+        if any(ord(char) < 32 or ord(char) == 127 or char == "\\" for char in cleaned):
             raise ValueError("Webhook URL contains invalid characters")
         parsed = urlparse(cleaned)
         if parsed.scheme != "https":

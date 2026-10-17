@@ -47,6 +47,26 @@ class TestWebhookUrlValidation:
             with pytest.raises(ValueError, match="private or restricted"):
                 svc._validate_webhook_url(url, allow_private=True)
 
+    def test_blocks_compatible_and_reserved_globals_even_when_private_is_allowed(self):
+        svc = EnhancedNotificationService()
+        blocked = [
+            "https://[::10.0.0.1]/hook",
+            "https://[::127.0.0.1]/hook",
+            "https://[::169.254.169.254]/hook",
+            "https://[::ffff:0:10.0.0.1]/hook",
+            "https://[5f00::1]/hook",
+            "https://240.0.0.1/hook",
+            "https://example.com\\@127.0.0.1/hook",
+        ]
+        for url in blocked:
+            with pytest.raises(ValueError, match="private or restricted|invalid characters"):
+                svc._validate_webhook_url(url, allow_private=True)
+
+    def test_allows_ipv4_mapped_public_address(self):
+        svc = EnhancedNotificationService()
+        url = "https://[::ffff:8.8.8.8]/hook"
+        assert svc._validate_webhook_url(url) == url
+
     def test_allows_mapped_rfc1918_only_with_private_opt_in(self):
         svc = EnhancedNotificationService()
         url = "https://[::ffff:10.0.0.1]/webhook"
@@ -57,7 +77,7 @@ class TestWebhookUrlValidation:
     def test_smtp_blocks_private_and_metadata_with_smtp_wording(self, monkeypatch):
         monkeypatch.delenv("AUDORA_ALLOW_PRIVATE_SMTP", raising=False)
         svc = EnhancedNotificationService()
-        for host in ("10.0.0.1", "2001::1", "100.100.100.200"):
+        for host in ("10.0.0.1", "2001::1", "100.100.100.200", "::10.0.0.1", "::127.0.0.1"):
             with pytest.raises(ValueError, match="SMTP server") as caught:
                 svc._validate_smtp_host(host)
             assert "Webhook URL" not in str(caught.value)
