@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -153,12 +154,27 @@ def ensure_private_file(path: Path | str) -> Path:
     return file_path
 
 
+def _csv_formula_probe(value: str) -> str:
+    """Drop leading characters that spreadsheets ignore before a formula."""
+    index = 0
+    while index < len(value):
+        category = unicodedata.category(value[index])
+        if category[0] == "Z" or category in {"Cc", "Cf"}:
+            index += 1
+            continue
+        break
+    return value[index:]
+
+
 def neutralize_csv_value(value: Any) -> Any:
-    """Prefix spreadsheet formula cells so exported CSV cannot execute them."""
+    """Prefix spreadsheet formula cells so exported CSV cannot execute them.
+
+    Excel and LibreOffice skip leading spaces, tabs, newlines, nulls, and
+    other invisible characters before deciding that a cell is a formula.
+    """
     if not isinstance(value, str) or value == "":
         return value
-    probe = value.lstrip(" \t\r")
-    if probe.startswith(_CSV_FORMULA_STARTS):
+    if _csv_formula_probe(value).startswith(_CSV_FORMULA_STARTS):
         return "'" + value
     return value
 
