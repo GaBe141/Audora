@@ -19,7 +19,7 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
-from core.utils import PROJECT_ROOT, confine_relative_path, save_dataframe
+from core.utils import PROJECT_ROOT, confine_relative_path, open_unlinked_file, save_dataframe
 
 
 def database_path_from_config(path: str) -> str:
@@ -64,10 +64,7 @@ def _lock_down_file(path: Path) -> None:
         return
     if path.is_symlink():
         raise ValueError(f"Refusing to change permissions through a symlink: {path}")
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags)
+    fd = open_unlinked_file(path, os.O_RDONLY)
     try:
         os.fchmod(fd, 0o600)
     finally:
@@ -201,8 +198,10 @@ class EnhancedMusicDataStore:
         """Open SQLite without following a symlink swapped in for the database.
 
         A path check then ``sqlite3.connect(path)`` still follows a symlink
-        planted between the two calls. Opening ``O_NOFOLLOW`` and connecting
-        to that descriptor keeps the connection on the inode we just screened.
+        planted between the two calls, and ``O_NOFOLLOW`` still opens a hard
+        link to another file. Opening the inode only when it has a single
+        link keeps the connection off a credential planted under the database
+        name.
         """
         if self.db_path == ":memory:":
             conn = sqlite3.connect(":memory:", check_same_thread=False)
@@ -213,11 +212,9 @@ class EnhancedMusicDataStore:
         db_file = Path(self.db_path)
         db_file.parent.mkdir(parents=True, exist_ok=True)
         flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
         fd = -1
         try:
-            fd = os.open(db_file, flags, 0o600)
+            fd = open_unlinked_file(db_file, flags, 0o600)
             if os.name != "nt":
                 os.fchmod(fd, 0o600)
             if Path("/proc/self/fd").is_dir():
@@ -1052,9 +1049,7 @@ class EnhancedMusicDataStore:
         if backup_path.exists() or backup_path.is_symlink():
             raise ValueError("Refusing to overwrite an existing backup path")
         flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(backup_path, flags, 0o600)
+        fd = open_unlinked_file(backup_path, flags, 0o600)
         try:
             if os.name != "nt":
                 os.fchmod(fd, 0o600)
