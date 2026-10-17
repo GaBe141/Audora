@@ -1,5 +1,6 @@
 """Tests for critical cache, SSRF, redirect, and CSV protections."""
 
+import asyncio
 import base64
 import inspect
 import json
@@ -9,8 +10,20 @@ import pytest
 
 from core.caching import RedisCacheBackend
 from core.config import validate_spotify_redirect_uri
-from core.notification_service import EnhancedNotificationService
-from core.utils import neutralize_csv_frame
+from core.notification_service import (
+    EnhancedNotificationService,
+    NotificationChannel,
+    NotificationMessage,
+    NotificationPriority,
+)
+from core.utils import (
+    load_dataframe,
+    neutralize_csv_frame,
+    read_json,
+    resolve_project_path,
+    save_dataframe,
+    write_json,
+)
 from integrations.extended_platforms import safe_path_segment
 from integrations.musicbrainz_integration import _require_mbid
 from integrations.spotify_charts_integration import _safe_chart_target
@@ -145,3 +158,66 @@ class TestPathAndCsvGuards:
             _safe_chart_target("global/../admin", "2026-10-16")
         with pytest.raises(ValueError):
             _safe_chart_target("global", "2026-13-40")
+
+
+class TestProjectPathConfinement:
+    def test_rejects_escape_credential_and_symlink(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
+        outside = tmp_path.parent / "secret.env"
+        outside.write_text("SPOTIFY_CLIENT_SECRET=leaked\n", encoding="utf-8")
+        inside = tmp_path / "tracks.csv"
+        inside.write_text("name,score\nSong,1\n", encoding="utf-8")
+        link = tmp_path / "linked.csv"
+        link.symlink_to(outside)
+        (tmp_path / ".env").write_text("SPOTIFY_CLIENT_SECRET=local\n", encoding="utf-8")
+
+        frame = load_dataframe(inside)
+        assert frame["name"].tolist() == ["Song"]
+        write_json(tmp_path / "report.json", {"ok": True})
+        assert read_json("report.json") == {"ok": True}
+
+        for bad in ("../secret.env", outside, link):
+            with pytest.raises(ValueError):
+                resolve_project_path(bad)
+            with pytest.raises(ValueError):
+                load_dataframe(bad)
+            with pytest.raises(ValueError):
+                read_json(bad)
+            with pytest.raises(ValueError):
+                write_json(bad, {"x": 1})
+            with pytest.raises(ValueError):
+                save_dataframe(pd.DataFrame({"a": [1]}), bad)
+
+        # Names inside the root still resolve, but generic IO must not touch them.
+        for credential in (".env", ".env.local", tmp_path / ".cache"):
+            resolved = resolve_project_path(credential)
+            assert resolved.parent == tmp_path
+            with pytest.raises(ValueError, match="credential"):
+                load_dataframe(credential)
+            with pytest.raises(ValueError, match="credential"):
+                read_json(credential)
+            with pytest.raises(ValueError, match="credential"):
+                write_json(credential, {"x": 1})
+            with pytest.raises(ValueError, match="credential"):
+                save_dataframe(pd.DataFrame({"a": [1]}), credential)
+
+    def test_email_refuses_secret_and_database_attachments(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
+        (tmp_path / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+        (tmp_path / "trends.db").write_bytes(b"sqlite")
+        svc = EnhancedNotificationService()
+        svc.config["email"]["smtp_server"] = "smtp.example.com"
+        svc.config["email"]["recipients"] = ["listener@example.com"]
+        svc.config["email"]["from_address"] = "audora@example.com"
+
+        for attachment in (".env", "trends.db", "../secret.env"):
+            message = NotificationMessage(
+                title="Report",
+                content="body",
+                priority=NotificationPriority.LOW,
+                channels=[NotificationChannel.EMAIL],
+                attachments=[attachment],
+            )
+            result = asyncio.run(svc._send_email(message))
+            assert result["success"] is False
+            assert "secret" in result["error"].lower() or "escapes" in result["error"].lower()
