@@ -10,6 +10,7 @@ from typing import Any
 
 import aiohttp
 
+from core.utils import redact_secrets
 from integrations.social_discovery_engine import (
     Platform,
     SocialMusicMetrics,
@@ -64,7 +65,7 @@ class RedditMusicAPI:
                     print(f"Reddit auth failed: {response.status}")
                     return False
         except Exception as e:
-            print(f"Reddit auth error: {e}")
+            print(f"Reddit auth error: {redact_secrets(e)}")
             return False
 
     async def get_music_subreddit_posts(
@@ -90,7 +91,7 @@ class RedditMusicAPI:
                     print(f"Reddit API error: {response.status}")
                     return []
         except Exception as e:
-            print(f"Reddit API exception: {e}")
+            print(f"Reddit API exception: {redact_secrets(e)}")
             return []
 
     async def search_music_discussions(
@@ -134,7 +135,7 @@ class RedditMusicAPI:
                             post["subreddit_source"] = subreddit
                         all_results.extend(posts)
             except Exception as e:
-                print(f"Reddit search error for {subreddit}: {e}")
+                print(f"Reddit search error for {subreddit}: {redact_secrets(e)}")
                 continue
 
         return all_results
@@ -237,7 +238,7 @@ class TumblrMusicAPI:
                     print(f"Tumblr API error: {response.status}")
                     return []
         except Exception as e:
-            print(f"Tumblr API exception: {e}")
+            print(f"Tumblr API exception: {redact_secrets(e)}")
             return []
 
     async def get_music_blog_posts(self, blog_name: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -261,7 +262,7 @@ class TumblrMusicAPI:
                 else:
                     return []
         except Exception as e:
-            print(f"Tumblr blog error: {e}")
+            print(f"Tumblr blog error: {redact_secrets(e)}")
             return []
 
     async def discover_music_aesthetics(self) -> list[dict[str, Any]]:
@@ -331,7 +332,7 @@ class SoundCloudAPI:
                     print(f"SoundCloud API error: {response.status}")
                     return []
         except Exception as e:
-            print(f"SoundCloud API exception: {e}")
+            print(f"SoundCloud API exception: {redact_secrets(e)}")
             return []
 
     async def search_emerging_artists(
@@ -361,7 +362,7 @@ class SoundCloudAPI:
                 else:
                     return []
         except Exception as e:
-            print(f"SoundCloud search error: {e}")
+            print(f"SoundCloud search error: {redact_secrets(e)}")
             return []
 
 
@@ -391,7 +392,7 @@ class DiscordMusicBot:
                 else:
                     return {}
         except Exception as e:
-            print(f"Discord API error: {e}")
+            print(f"Discord API error: {redact_secrets(e)}")
             return {}
 
 
