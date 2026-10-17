@@ -6,13 +6,14 @@ from pathlib import Path
 import pandas as pd
 
 # Add core to path for utilities
-sys.path.append(str(Path(__file__).parent.parent / "core"))
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.audiodb_integration import get_audiodb_client
-
-# Import the working modules
 from src.fetch import fetch_top_artists, fetch_top_tracks
 from src.musicbrainz_integration import get_musicbrainz_client
+
+from core.utils import save_dataframe
 
 
 def simple_multi_source_demo():
@@ -32,8 +33,8 @@ def simple_multi_source_demo():
         print(f"✅ Got {len(top_artists)} top artists and {len(top_tracks)} top tracks")
 
         # Save Spotify data
-        top_artists.to_csv(data_dir / "simple_top_artists.csv", index=False)
-        top_tracks.to_csv(data_dir / "simple_top_tracks.csv", index=False)
+        save_dataframe(top_artists, data_dir / "simple_top_artists.csv")
+        save_dataframe(top_tracks, data_dir / "simple_top_tracks.csv")
 
     except Exception as e:
         print(f"❌ Spotify error: {e}")
@@ -78,7 +79,7 @@ def simple_multi_source_demo():
                 )
 
         enriched_df = pd.DataFrame(enriched_artists)
-        enriched_df.to_csv(data_dir / "musicbrainz_enriched.csv", index=False)
+        save_dataframe(enriched_df, data_dir / "musicbrainz_enriched.csv")
 
         print(f"✅ Enriched {len(enriched_df)} artists with MusicBrainz data")
 
@@ -125,7 +126,7 @@ def simple_multi_source_demo():
                 )
 
         audiodb_df = pd.DataFrame(audiodb_enriched)
-        audiodb_df.to_csv(data_dir / "audiodb_enriched.csv", index=False)
+        save_dataframe(audiodb_df, data_dir / "audiodb_enriched.csv")
 
         print(f"✅ Enriched {len(audiodb_df)} artists with AudioDB data")
 
