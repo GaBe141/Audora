@@ -2,11 +2,15 @@
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_CSV_FORMULA_LEAD = frozenset("=+-@\t\r")
 
 # Re-export for convenience
 try:
@@ -15,6 +19,124 @@ try:
     HAS_PANDAS = True
 except ImportError:
     HAS_PANDAS = False
+
+
+def project_root() -> Path:
+    """Return the repository root that contains this module."""
+    return PROJECT_ROOT
+
+
+def assert_no_symlink_components(path: Path) -> None:
+    """Reject a path whose component inside the project root is a symlink."""
+    root = PROJECT_ROOT.resolve()
+    absolute = path if path.is_absolute() else root / path
+    current = absolute
+    while current != root and current.parent != current:
+        try:
+            current.relative_to(root)
+        except ValueError:
+            break
+        if current.is_symlink():
+            raise OSError(f"Refusing symlink path component: {current}")
+        current = current.parent
+
+
+def _open_nofollow(path: Path, flags: int, mode: int | None = None) -> int:
+    """Open a file descriptor without following a final-path symlink."""
+    if path.is_symlink():
+        raise OSError(f"Refusing to open symlink: {path}")
+    assert_no_symlink_components(path)
+    open_flags = flags
+    if hasattr(os, "O_NOFOLLOW"):
+        open_flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        open_flags |= os.O_CLOEXEC
+    if mode is None:
+        return os.open(path, open_flags)
+    return os.open(path, open_flags, mode)
+
+
+def read_nofollow_text(path: Path | str) -> str:
+    """Read text from a file, refusing symlinks along the project path."""
+    file_path = Path(path)
+    fd = _open_nofollow(file_path, os.O_RDONLY)
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            return handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def write_private_text(path: Path | str, content: str) -> None:
+    """Write text to a mode-600 file without following a symlink."""
+    file_path = Path(path)
+    if file_path.is_symlink():
+        raise OSError(f"Refusing to write through symlink: {file_path}")
+    fd = _open_nofollow(file_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        try:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        finally:
+            handle.close()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def ensure_private_file(path: Path | str) -> None:
+    """Create a regular mode-600 file, refusing an existing symlink."""
+    file_path = Path(path)
+    if file_path.is_symlink():
+        raise OSError(f"Refusing to use symlinked file: {file_path}")
+    fd = _open_nofollow(file_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+
+
+def confine_relative_path(path: str | Path) -> Path:
+    """Resolve a relative path and keep every component inside the project root."""
+    raw = Path(path)
+    if raw.is_absolute():
+        raise ValueError("Path must be relative to the project root")
+    candidate = PROJECT_ROOT / raw
+    assert_no_symlink_components(candidate)
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(PROJECT_ROOT.resolve())
+    except ValueError as exc:
+        raise ValueError("Path escapes the project root") from exc
+    if resolved.is_symlink():
+        raise ValueError("Refusing to use a symlink path")
+    return resolved
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula characters so exported cells stay inert."""
+    if not isinstance(value, str) or value == "":
+        return value
+    stripped = value.lstrip(" \t")
+    if value[0] in _CSV_FORMULA_LEAD or (stripped[:1] in {"=", "+", "-", "@"}):
+        return "'" + value
+    return value
+
+
+def neutralize_csv_frame(df: Any) -> Any:
+    """Neutralize formula prefixes in every column of a DataFrame."""
+    if not HAS_PANDAS:
+        raise ImportError("pandas is required for neutralize_csv_frame")
+    neutralized = df.copy()
+    for column in neutralized.columns:
+        neutralized[column] = neutralized[column].map(neutralize_csv_value)
+    return neutralized
 
 
 # JSON utilities
@@ -34,8 +156,9 @@ def read_json(path: Path | str, default: Any = None) -> Any:
     """
     path = Path(path)
     try:
-        with path.open("r", encoding="utf-8") as fh:
-            return json.load(fh)
+        if path.is_symlink():
+            raise OSError(f"Refusing to read symlink: {path}")
+        return json.loads(read_nofollow_text(path))
     except FileNotFoundError:
         if default is not None:
             logger.warning(f"JSON file not found: {path}, using default")
@@ -73,12 +196,13 @@ def write_json(
     """
     path = Path(path)
     try:
+        if path.is_symlink():
+            raise OSError(f"Refusing to write symlink: {path}")
         if create_dirs:
             path.parent.mkdir(parents=True, exist_ok=True)
 
-        with path.open("w", encoding="utf-8") as fh:
-            json.dump(obj, fh, indent=indent, ensure_ascii=ensure_ascii, default=str)
-
+        payload = json.dumps(obj, indent=indent, ensure_ascii=ensure_ascii, default=str)
+        write_private_text(path, payload)
         logger.debug(f"Wrote JSON to {path}")
         return path
     except Exception as e:
@@ -99,11 +223,24 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
         Path object of the written file
     """
     filepath = Path(filepath)
+    if filepath.is_symlink():
+        raise OSError(f"Refusing to write through symlink: {filepath}")
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    payload = neutralize_csv_frame(df).to_csv(index=False)
+    fd = _open_nofollow(filepath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8", newline="")
+        fd = -1
+        try:
+            handle.write(payload)
+        finally:
+            handle.close()
+    finally:
+        if fd >= 0:
+            os.close(fd)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
