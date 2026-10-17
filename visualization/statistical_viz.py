@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from core.utils import read_json, resolve_project_path
+from core.utils import read_json, resolve_project_path, save_matplotlib_figure, save_plotly_html
 
 warnings.filterwarnings("ignore")
 
@@ -167,7 +167,7 @@ class StatisticalVisualizationEngine:
         plt.tight_layout()
 
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+            save_matplotlib_figure(plt, save_path, dpi=300, bbox_inches="tight")
             print(f"📊 Data quality report saved to {save_path}")
 
         plt.show()
@@ -264,7 +264,7 @@ class StatisticalVisualizationEngine:
         plt.tight_layout()
 
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+            save_matplotlib_figure(plt, save_path, dpi=300, bbox_inches="tight")
             print(f"📈 Forecasting results saved to {save_path}")
 
         plt.show()
@@ -328,7 +328,7 @@ class StatisticalVisualizationEngine:
         plt.tight_layout()
 
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+            save_matplotlib_figure(plt, save_path, dpi=300, bbox_inches="tight")
             print(f"📊 Performance comparison saved to {save_path}")
 
         plt.show()
@@ -398,7 +398,7 @@ class StatisticalVisualizationEngine:
         fig.update_layout(title_text="Statistical Analysis Dashboard", showlegend=True, height=1200)
 
         if save_path:
-            fig.write_html(save_path)
+            save_plotly_html(fig, save_path)
             print(f"📊 Interactive dashboard saved to {save_path}")
 
         fig.show()
