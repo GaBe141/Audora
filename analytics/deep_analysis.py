@@ -7,6 +7,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from core.utils import save_dataframe
+
 from .auth import get_client
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -315,8 +317,7 @@ def create_deep_analysis_report() -> dict:
     maturity_analysis = calculate_musical_maturity_score(df)
 
     # Save detailed dataset
-    detailed_csv = DATA_DIR / "deep_music_analysis.csv"
-    df.to_csv(detailed_csv, index=False)
+    detailed_csv = save_dataframe(df, DATA_DIR / "deep_music_analysis.csv")
 
     report = {
         "dataset": df,
