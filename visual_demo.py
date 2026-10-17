@@ -26,7 +26,6 @@ import pandas as pd
 
 # import seaborn as sns  # Commented out for faster loading
 import plotly.graph_objects as go  # type: ignore[import-untyped]
-import plotly.offline as pyo  # type: ignore[import-untyped]
 
 # import plotly.express as px  # Commented out - not used
 from plotly.subplots import make_subplots  # type: ignore[import-untyped]
@@ -45,6 +44,13 @@ sys.path.extend(
 
 from advanced_analytics import MusicTrendAnalytics  # noqa: E402
 from statistical_analysis import StreamingDataQualityAnalyzer  # noqa: E402
+
+from core.utils import (  # noqa: E402
+    load_dataframe,
+    resolve_project_path,
+    save_plotly_html,
+    write_private_text,
+)
 
 # Set beautiful styling
 plt.style.use("dark_background")
@@ -76,9 +82,9 @@ class AudoraVisualDemo:
         # Load actual user data
         data = {}
         try:
-            data["tracks"] = pd.read_csv(self.data_dir / "simple_top_tracks.csv")
-            data["artists"] = pd.read_csv(self.data_dir / "simple_top_artists.csv")
-            data["recent"] = pd.read_csv(self.data_dir / "recently_played.csv")
+            data["tracks"] = load_dataframe(self.data_dir / "simple_top_tracks.csv")
+            data["artists"] = load_dataframe(self.data_dir / "simple_top_artists.csv")
+            data["recent"] = load_dataframe(self.data_dir / "recently_played.csv")
             print(
                 f"✅ Loaded real data: {len(data['tracks'])} tracks, {len(data['artists'])} artists"
             )
@@ -328,7 +334,7 @@ class AudoraVisualDemo:
 
         # Save and show
         output_file = self.output_dir / "viral_prediction_dashboard.html"
-        pyo.plot(fig, filename=str(output_file), auto_open=False)
+        save_plotly_html(fig, output_file)
         print(f"✅ Dashboard saved: {output_file}")
 
         return fig
@@ -379,7 +385,7 @@ class AudoraVisualDemo:
         fig.update_traces(marker_line_width=2, selector=dict(type="bar"))
 
         output_file = self.output_dir / "trending_visualization.html"
-        pyo.plot(fig, filename=str(output_file), auto_open=False)
+        save_plotly_html(fig, output_file)
         print(f"✅ Trending visualization saved: {output_file}")
 
         return fig
@@ -427,7 +433,7 @@ class AudoraVisualDemo:
         )
 
         output_file = self.output_dir / "global_trends_heatmap.html"
-        pyo.plot(fig, filename=str(output_file), auto_open=False)
+        save_plotly_html(fig, output_file)
         print(f"✅ Global heatmap saved: {output_file}")
 
         return fig
@@ -470,7 +476,7 @@ class AudoraVisualDemo:
         )
 
         output_file = self.output_dir / "correlation_matrix.html"
-        pyo.plot(fig, filename=str(output_file), auto_open=False)
+        save_plotly_html(fig, output_file)
         print(f"✅ Correlation matrix saved: {output_file}")
 
         return fig
@@ -634,7 +640,7 @@ class AudoraVisualDemo:
         )
 
         output_file = self.output_dir / "audora_complete_demo.html"
-        pyo.plot(fig, filename=str(output_file), auto_open=False)
+        save_plotly_html(fig, output_file)
         print(f"✅ Complete demo saved: {output_file}")
 
         return fig
@@ -700,9 +706,8 @@ Ready to revolutionize music discovery? Contact us for enterprise deployment!
         """
 
         # Save marketing materials
-        marketing_file = self.output_dir / "AUDORA_MARKETING_DEMO.txt"
-        with open(marketing_file, "w") as f:
-            f.write(marketing_text)
+        marketing_file = resolve_project_path(self.output_dir / "AUDORA_MARKETING_DEMO.txt")
+        write_private_text(marketing_file, marketing_text)
 
         print(f"✅ Marketing materials saved: {marketing_file}")
         print("\n🎯 DEMO STATISTICS:")

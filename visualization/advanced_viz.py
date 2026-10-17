@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from core.utils import save_matplotlib_figure
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
@@ -47,7 +49,7 @@ def plot_audio_dna_radar(df: pd.DataFrame, title: str = "Your Audio DNA") -> Pat
     plt.title(title, size=16, pad=20)
 
     out_path = DATA_DIR / "audio_dna_radar.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
 
@@ -100,7 +102,7 @@ def plot_mood_evolution(df: pd.DataFrame, title: str = "Mood Evolution Over Time
 
     plt.tight_layout()
     out_path = DATA_DIR / "mood_evolution.png"
-    plt.savefig(out_path, dpi=150)
+    save_matplotlib_figure(plt, out_path, dpi=150)
     plt.close()
     return out_path
 
@@ -145,7 +147,7 @@ def plot_genre_evolution(df: pd.DataFrame, title: str = "Genre Evolution Across 
 
     plt.tight_layout()
     out_path = DATA_DIR / "genre_evolution.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
 
@@ -206,7 +208,7 @@ def plot_playlist_characteristics(
     plt.tight_layout()
 
     out_path = DATA_DIR / "playlist_landscapes.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
 
@@ -241,6 +243,6 @@ def plot_tempo_energy_dance_3d(df: pd.DataFrame, title: str = "Your Music in 3D 
 
     plt.tight_layout()
     out_path = DATA_DIR / "music_3d_space.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
