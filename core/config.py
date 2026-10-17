@@ -3,10 +3,14 @@
 import os
 import sys
 import warnings
+from io import StringIO
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+
+from .utils import read_nofollow_text, write_private_text
 
 
 class SecureConfig:
@@ -25,25 +29,46 @@ class SecureConfig:
 
     def _load_environment(self):
         """Load environment variables securely."""
-        if not self.env_file.exists():
+        env_path = Path(self.env_file)
+        if env_path.is_symlink():
             warnings.warn(
-                f"Environment file not found: {self.env_file}\n"
-                "Create a .env file with your API credentials.",
+                f"Refusing to load symlinked environment file: {env_path}",
                 UserWarning,
+                stacklevel=2,
             )
             return
 
-        # Load with explicit encoding and override
-        load_dotenv(dotenv_path=str(self.env_file), override=True, encoding="utf-8")
+        if not env_path.exists():
+            warnings.warn(
+                f"Environment file not found: {env_path}\n"
+                "Create a .env file with your API credentials.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return
+
+        try:
+            contents = read_nofollow_text(env_path)
+        except OSError as exc:
+            warnings.warn(
+                f"Refusing to load environment file {env_path}: {exc}",
+                UserWarning,
+                stacklevel=2,
+            )
+            return
+
+        # Existing process environment wins over file contents.
+        load_dotenv(stream=StringIO(contents), override=False)
 
         # Validate file permissions (Unix-like systems)
         if hasattr(os, "stat") and not sys.platform.startswith("win"):
-            file_mode = oct(self.env_file.stat().st_mode)[-3:]
+            file_mode = oct(env_path.stat().st_mode)[-3:]
             if file_mode != "600":
                 warnings.warn(
                     f"Environment file permissions are too open: {file_mode}\n"
-                    f"Consider running: chmod 600 {self.env_file}",
+                    f"Consider running: chmod 600 {env_path}",
                     UserWarning,
+                    stacklevel=2,
                 )
 
     def get_spotify_config(self) -> dict[str, str]:
@@ -57,14 +82,33 @@ class SecureConfig:
             ),
         }
 
-        # Validate redirect URI format
-        if not config["redirect_uri"].startswith(("http://localhost", "http://127.0.0.1")):
-            raise ValueError(
-                f"Invalid redirect URI: {config['redirect_uri']}\n"
-                "For development, use http://localhost or http://127.0.0.1"
-            )
-
+        self._validate_redirect_uri(config["redirect_uri"])
         return config
+
+    def _validate_redirect_uri(self, redirect_uri: str) -> None:
+        """Allow only exact loopback HTTP redirects.
+
+        A prefix check accepts ``http://localhost.evil.com`` and
+        ``http://127.0.0.1@evil.com``, which would send the OAuth code off-box.
+        """
+        message = (
+            f"Invalid redirect URI: {redirect_uri}\n"
+            "For development, use http://localhost or http://127.0.0.1"
+        )
+        if not isinstance(redirect_uri, str):
+            raise ValueError(message)
+        raw = redirect_uri.strip()
+        if not raw or any(char in raw for char in "\r\n\t\\ "):
+            raise ValueError(message)
+        parsed = urlparse(raw)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if (
+            parsed.scheme.lower() != "http"
+            or parsed.username
+            or parsed.password
+            or host not in {"localhost", "127.0.0.1"}
+        ):
+            raise ValueError(message)
 
     def get_lastfm_config(self) -> dict[str, str] | None:
         """Get Last.fm API configuration with validation."""
@@ -80,6 +124,7 @@ class SecureConfig:
                 "Last.fm API key format appears invalid. "
                 "Should be 32 character hexadecimal string.",
                 UserWarning,
+                stacklevel=2,
             )
 
         return {"api_key": api_key, "shared_secret": shared_secret or ""}
@@ -202,11 +247,7 @@ AUDIODB_API_KEY=123
             print(f"❌ No .env file found at: {self.env_file}")
             print("\n📝 Creating template .env file...")
 
-            self.env_file.write_text(self.create_env_template(), encoding="utf-8")
-
-            # Set restrictive permissions on Unix-like systems
-            if hasattr(os, "chmod") and not sys.platform.startswith("win"):
-                os.chmod(self.env_file, 0o600)
+            write_private_text(self.env_file, self.create_env_template())
 
             print(f"✅ Created template: {self.env_file}")
             print("\n🔑 Next steps:")

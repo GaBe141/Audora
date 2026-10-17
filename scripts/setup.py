@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from core.utils import write_private_text
+
 # Enhanced package list with new dependencies
 ENHANCED_PACKAGES = [
     # Core dependencies
@@ -191,14 +193,18 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
-                    json.dump(config_data, f, indent=2)
+                self._write_private_file(config_path, json.dumps(config_data, indent=2))
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
                 return False
 
         return True
+
+    def _write_private_file(self, path: Path, content: str) -> None:
+        """Write credential or config text without following a symlink."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_private_text(path, content)
 
     def _create_enhanced_api_config(self) -> dict[str, Any]:
         """Create enhanced API configuration."""
@@ -473,8 +479,7 @@ System Status: {{ system_status }}
         for template_name, template_content in templates.items():
             template_path = self.templates_dir / template_name
             try:
-                with open(template_path, "w") as f:
-                    f.write(template_content.strip())
+                self._write_private_file(template_path, template_content.strip() + "\n")
                 self.logger.info(f"  Created template: {template_name}")
             except Exception as e:
                 self.logger.error(f"  Failed to create template {template_name}: {e}")
@@ -522,8 +527,7 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
-                f.write(env_template.strip())
+            self._write_private_file(env_path, env_template.strip() + "\n")
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True
