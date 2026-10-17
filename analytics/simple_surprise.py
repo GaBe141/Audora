@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from core.utils import save_dataframe
+from core.utils import save_dataframe, save_matplotlib_figure
 
 from .fetch import fetch_recently_played, fetch_top_artists, fetch_top_tracks
 
@@ -44,7 +44,7 @@ def plot_artist_popularity_vs_rank(time_ranges=["short_term", "medium_term", "lo
     plt.tight_layout()
 
     out_path = DATA_DIR / "popularity_vs_rank.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
 
@@ -86,7 +86,7 @@ def plot_listening_clock() -> Path:
 
     plt.tight_layout()
     out_path = DATA_DIR / "listening_clock.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
 
@@ -160,7 +160,7 @@ def plot_top_artist_genres() -> Path:
 
     plt.tight_layout()
     out_path = DATA_DIR / "genre_analysis.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
 
     # Save genre data
@@ -213,7 +213,7 @@ def plot_track_length_distribution() -> Path:
     plt.tight_layout()
 
     out_path = DATA_DIR / "track_length_analysis.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
 
@@ -268,7 +268,7 @@ def plot_discovery_timeline() -> Path:
     plt.tight_layout()
 
     out_path = DATA_DIR / "discovery_timeline.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
 
