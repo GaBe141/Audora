@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from core.utils import save_dataframe
+
 from .fetch import fetch_recently_played, fetch_top_artists, fetch_top_tracks
 
 warnings.filterwarnings("ignore")
@@ -162,8 +164,7 @@ def plot_top_artist_genres() -> Path:
     plt.close()
 
     # Save genre data
-    genre_csv = DATA_DIR / "genre_data.csv"
-    genre_df.to_csv(genre_csv, index=False)
+    save_dataframe(genre_df, DATA_DIR / "genre_data.csv")
 
     return out_path
 
