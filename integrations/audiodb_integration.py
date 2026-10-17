@@ -11,12 +11,22 @@ import requests
 BASE_URL = "https://www.theaudiodb.com/api/v1/json"
 
 
+def _path_segment(value: str) -> str:
+    """Require one URL path segment with no separators or traversal."""
+    if not isinstance(value, str) or value in {"", ".", ".."}:
+        raise ValueError("Invalid AudioDB path segment")
+    if any(char in value for char in "/\\?#%") or any(ord(char) < 32 for char in value):
+        raise ValueError("Invalid AudioDB path segment")
+    return value
+
+
 class AudioDBAPI:
     """AudioDB API client for artist biographies, discographies, and metadata."""
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key
         self.session = requests.Session()
+        self.session.trust_env = False
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second
 
@@ -34,14 +44,13 @@ class AudioDBAPI:
         """Make a request to AudioDB API with rate limiting."""
         self._rate_limit()
 
-        # Use API key if available, otherwise use free key (123)
-        if self.api_key:
-            url = f"{BASE_URL}/{self.api_key}/{endpoint}"
-        else:
-            url = f"{BASE_URL}/123/{endpoint}"  # Free API key is 123
+        # Keys and endpoints must be a single path segment so they cannot retarget the request.
+        api_key = _path_segment(self.api_key or "123")
+        safe_endpoint = _path_segment(endpoint)
+        url = f"{BASE_URL}/{api_key}/{safe_endpoint}"
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, timeout=30, allow_redirects=False)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:

@@ -5,7 +5,9 @@ Handles trending data, viral predictions, and cross-platform analysis.
 
 import json
 import logging
+import os
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -15,6 +17,108 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import PROJECT_ROOT, neutralize_csv_frame, save_dataframe
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _allowed_database_roots(*, allow_temp: bool) -> list[Path]:
+    roots = [PROJECT_ROOT.resolve()]
+    if allow_temp:
+        roots.append(Path(tempfile.gettempdir()).resolve())
+    return roots
+
+
+def _resolve_database_location(path: str, *, allow_temp: bool) -> Path:
+    """Resolve a database file inside the project, or temp when tests pass an absolute path."""
+    raw = Path(path)
+    if raw.is_symlink():
+        raise ValueError("Refusing to open a symlinked database path")
+    if raw.is_absolute():
+        candidate = raw
+    else:
+        candidate = PROJECT_ROOT / raw
+        if candidate.is_symlink():
+            raise ValueError("Refusing to open a symlinked database path")
+    resolved = candidate.resolve()
+    if resolved.is_symlink():
+        raise ValueError("Refusing to open a symlinked database path")
+    if not any(
+        _is_within(resolved, root) for root in _allowed_database_roots(allow_temp=allow_temp)
+    ):
+        raise ValueError("Database path is outside allowed directories")
+    return resolved
+
+
+def database_path_from_config(path: str) -> str:
+    """Resolve a config database path. Absolute config paths are rejected."""
+    if path == ":memory:":
+        return ":memory:"
+    if Path(path).is_absolute():
+        raise ValueError("Database path from config must be relative to the project root")
+    return str(_resolve_database_location(path, allow_temp=False))
+
+
+def _resolve_backup_dir(backup_dir: str) -> Path:
+    raw = Path(backup_dir)
+    if raw.is_symlink():
+        raise ValueError("Refusing symlinked backup directory")
+    if raw.is_absolute():
+        resolved = raw.resolve()
+    else:
+        candidate = PROJECT_ROOT / raw
+        if candidate.is_symlink():
+            raise ValueError("Refusing symlinked backup directory")
+        resolved = candidate.resolve()
+    if not any(_is_within(resolved, root) for root in _allowed_database_roots(allow_temp=True)):
+        raise ValueError("Backup directory is outside allowed directories")
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+def _harden_database_file(path: Path) -> None:
+    """Force mode 600 on a database file and its WAL sidecars without following symlinks."""
+    if path.is_symlink():
+        raise ValueError("Refusing to open a symlinked database path")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    for suffix in ("-wal", "-shm"):
+        side = Path(f"{path}{suffix}")
+        if side.is_symlink():
+            raise ValueError("Refusing symlinked database sidecar")
+        if not side.exists():
+            continue
+        side_fd = os.open(side, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fchmod(side_fd, 0o600)
+        finally:
+            os.close(side_fd)
+
+
+def _resolve_export_path(filepath: str) -> Path:
+    raw = Path(filepath)
+    if raw.is_symlink():
+        raise ValueError("Refusing to export through a symlink")
+    if raw.is_absolute():
+        resolved = raw.resolve()
+    else:
+        candidate = PROJECT_ROOT / raw
+        if candidate.is_symlink():
+            raise ValueError("Refusing to export through a symlink")
+        resolved = candidate.resolve()
+    if not any(_is_within(resolved, root) for root in _allowed_database_roots(allow_temp=True)):
+        raise ValueError("Export path is outside allowed directories")
+    return resolved
 
 
 @dataclass
@@ -61,6 +165,7 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+
     _ALLOWED_BULK_UPDATE_FIELDS = {
         "platform",
         "track_name",
@@ -75,9 +180,12 @@ class EnhancedMusicDataStore:
     }
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
-        self.db_path = db_path
-        self.backup_dir = Path(backup_dir)
-        self.backup_dir.mkdir(exist_ok=True)
+        if db_path == ":memory:":
+            self.db_path = ":memory:"
+        else:
+            self.db_path = str(_resolve_database_location(db_path, allow_temp=True))
+            _harden_database_file(Path(self.db_path))
+        self.backup_dir = _resolve_backup_dir(backup_dir)
         self.logger = logging.getLogger(__name__)
 
         # Initialize cache
@@ -95,6 +203,8 @@ class EnhancedMusicDataStore:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=10000")
             conn.execute("PRAGMA temp_store=memory")
+        if self.db_path != ":memory:":
+            _harden_database_file(Path(self.db_path))
 
     def _get_pooled_connection(self) -> sqlite3.Connection:
         """Get a connection from the pool or create a new one."""
@@ -787,7 +897,9 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        invalid_fields = [field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS]
+        invalid_fields = [
+            field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS
+        ]
         if invalid_fields:
             raise ValueError(
                 "Invalid update fields: "
@@ -920,9 +1032,15 @@ class EnhancedMusicDataStore:
         """Create a backup of the database."""
         backup_filename = f"music_trends_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
         backup_path = self.backup_dir / backup_filename
+        if backup_path.exists() or backup_path.is_symlink():
+            raise ValueError("Backup path already exists")
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(backup_path, flags, 0o600)
+        os.close(fd)
 
         with self.get_connection() as source_conn, sqlite3.connect(backup_path) as backup_conn:
             source_conn.backup(backup_conn)
+        _harden_database_file(backup_path)
 
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
@@ -958,13 +1076,11 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            export_path = _resolve_export_path(filepath)
+            save_dataframe(neutralize_csv_frame(df), export_path)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {export_path}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(export_path)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
@@ -1167,10 +1283,7 @@ class EnhancedMusicDataStore:
         rmse = float((errors**2).mean() ** 0.5)
 
         acc_by_platform = (
-            evaluated_df.groupby("platform")["accuracy_score"]
-            .mean()
-            .round(3)
-            .to_dict()
+            evaluated_df.groupby("platform")["accuracy_score"].mean().round(3).to_dict()
         )
 
         return {
