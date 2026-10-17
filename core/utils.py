@@ -1,6 +1,7 @@
 """Shared utility functions for the Audora project."""
 
 import errno
+import io
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 _CSV_FORMULA_STARTS = ("=", "+", "-", "@")
+_CREDENTIAL_FILE_NAMES = {".env", ".cache"}
 
 # Re-export for convenience
 try:
@@ -21,6 +23,33 @@ try:
     HAS_PANDAS = True
 except ImportError:
     HAS_PANDAS = False
+
+
+def _is_credential_file(path: Path) -> bool:
+    """True for dotenv files and the Spotify token cache."""
+    name = path.name
+    return name in _CREDENTIAL_FILE_NAMES or name.startswith(".env.")
+
+
+def resolve_project_path(path: Path | str, *, base: Path | None = None) -> Path:
+    """Resolve a path and keep it inside the project root.
+
+    Relative paths cannot escape the root. Absolute paths are accepted only
+    when they already resolve inside the root. A symlinked final component is
+    refused so a data file cannot be pointed at a credential file.
+    """
+    root = (base if base is not None else PROJECT_ROOT).resolve()
+    raw = Path(path)
+    if not raw.is_absolute():
+        return confine_relative_path(raw, base=root)
+    if raw.is_symlink():
+        raise ValueError(f"Refusing to use a symlinked path: {raw}")
+    resolved = raw.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Path escapes the project root") from exc
+    return resolved
 
 
 def confine_relative_path(path: Path | str, *, base: Path | None = None) -> Path:
@@ -157,7 +186,9 @@ def read_json(path: Path | str, default: Any = None) -> Any:
     Raises:
         json.JSONDecodeError: If JSON is malformed and no default provided
     """
-    path = Path(path)
+    path = resolve_project_path(path)
+    if _is_credential_file(path):
+        raise ValueError(f"Refusing to read a credential file: {path.name}")
     if path.is_symlink():
         raise ValueError(f"Refusing to read a symlinked JSON file: {path}")
     fd = -1
@@ -210,7 +241,9 @@ def write_json(
     Raises:
         Exception: If writing fails
     """
-    path = Path(path)
+    path = resolve_project_path(path)
+    if _is_credential_file(path):
+        raise ValueError(f"Refusing to write a credential file: {path.name}")
     if path.is_symlink():
         raise ValueError(f"Refusing to write a symlinked JSON file: {path}")
     fd = -1
@@ -254,7 +287,9 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = resolve_project_path(filepath)
+    if _is_credential_file(filepath):
+        raise ValueError(f"Refusing to write a credential file: {filepath.name}")
     if filepath.is_symlink():
         raise ValueError(f"Refusing to write CSV through a symlink: {filepath}")
 
@@ -365,14 +400,16 @@ def load_dataframe(
     if not HAS_PANDAS:
         raise ImportError("pandas is required for load_dataframe")
 
-    filepath = Path(filepath)
+    filepath = resolve_project_path(filepath)
+    if _is_credential_file(filepath):
+        raise ValueError(f"Refusing to read a credential file: {filepath.name}")
 
     if not filepath.exists():
         logger.warning(f"CSV file not found: {filepath}")
         return pd.DataFrame() if default_empty else None
 
     try:
-        df = pd.read_csv(filepath)
+        df = pd.read_csv(io.StringIO(read_nofollow_text(filepath)))
 
         # Validate required columns
         if required_columns:
