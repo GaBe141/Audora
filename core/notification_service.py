@@ -74,14 +74,40 @@ def _contains_control_char(value: str) -> bool:
     return any(ord(char) < 32 or ord(char) == 127 for char in value)
 
 
+_SENSITIVE_ATTACHMENT_NAMES = {
+    ".env",
+    ".cache",
+    "notification_config.json",
+    "enhanced_api_config.json",
+    "social_apis.json",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+}
+_SENSITIVE_ATTACHMENT_SUFFIXES = (
+    ".db",
+    ".sqlite",
+    ".sqlite3",
+    ".db-wal",
+    ".db-shm",
+    ".db-journal",
+    ".sqlite-wal",
+    ".sqlite-shm",
+    ".sqlite-journal",
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+)
+
+
 def _is_sensitive_attachment(path: Path) -> bool:
     """Credential files and databases must not be attached to outbound mail."""
     name = path.name.lower()
-    if name in {".env", ".cache", "notification_config.json", "enhanced_api_config.json"}:
+    if name in _SENSITIVE_ATTACHMENT_NAMES or name.startswith(".env"):
         return True
-    if name.startswith(".env"):
-        return True
-    return name.endswith((".db", ".sqlite", ".sqlite3", ".pem", ".key"))
+    return name.endswith(_SENSITIVE_ATTACHMENT_SUFFIXES)
 
 
 class NotificationPriority(Enum):
@@ -452,7 +478,11 @@ class EnhancedNotificationService:
     def _validate_smtp_host(self, host: str, port: int) -> tuple[str, str]:
         """Return the hostname used for TLS and the single IP the socket may use."""
         hostname = host.strip().rstrip(".")
-        if not hostname or any(char in hostname for char in " \t\r\n/\\@"):
+        if (
+            not hostname
+            or _contains_control_char(hostname)
+            or any(char in hostname for char in " /\\@")
+        ):
             raise ValueError("Invalid SMTP host")
         self._reject_obfuscated_host(hostname)
         addresses = self._resolve_ips(hostname, port)
