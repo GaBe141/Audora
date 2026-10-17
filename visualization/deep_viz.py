@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+from core.utils import save_matplotlib_figure
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
@@ -60,7 +62,7 @@ def plot_musical_maturity_radar(
     plt.tight_layout()
 
     out_path = DATA_DIR / "musical_maturity_radar.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
 
@@ -116,7 +118,7 @@ def plot_generational_evolution(
 
     plt.tight_layout()
     out_path = DATA_DIR / "era_evolution.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
 
@@ -170,7 +172,7 @@ def plot_seasonal_mood_matrix(
 
     plt.tight_layout()
     out_path = DATA_DIR / "seasonal_mood_matrix.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
 
@@ -223,7 +225,7 @@ def plot_decade_preference_timeline(
 
     plt.tight_layout()
     out_path = DATA_DIR / "decade_timeline.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
 
@@ -300,7 +302,7 @@ def plot_energy_circadian_rhythm(
 
     plt.tight_layout()
     out_path = DATA_DIR / "energy_circadian.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
 
@@ -387,6 +389,6 @@ def create_musical_age_analysis_chart(
     plt.tight_layout()
 
     out_path = DATA_DIR / "musical_age_analysis.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path

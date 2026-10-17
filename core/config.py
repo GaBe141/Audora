@@ -234,6 +234,13 @@ AUDIODB_API_KEY=123
             print("4. Run this script again to validate")
 
 
+def _canonical_redirect_port(port_text: str) -> bool:
+    """True for a decimal port in 1..65535 with no leading zeros."""
+    if not port_text.isdigit() or (len(port_text) > 1 and port_text.startswith("0")):
+        return False
+    return 1 <= int(port_text) <= 65535
+
+
 def validate_spotify_redirect_uri(redirect_uri: str) -> str:
     """Allow only exact loopback HTTP redirect URIs.
 
@@ -241,6 +248,9 @@ def validate_spotify_redirect_uri(redirect_uri: str) -> str:
     such as 127.0.0.1@evil.com. Control characters and backslashes are
     rejected on the raw string because urlparse drops CR/LF and treats
     ``http://127.0.0.1:8888\\@evil.com`` as a different host.
+    Extra trailing dots, empty userinfo, percent-encoded authorities, and
+    non-canonical ports are rejected because browsers keep those forms while
+    urlparse collapses them onto the loopback allowlist.
     """
     if not isinstance(redirect_uri, str):
         raise ValueError("Invalid redirect URI: value must be a string")
@@ -251,17 +261,47 @@ def validate_spotify_redirect_uri(redirect_uri: str) -> str:
             "Redirect URIs cannot contain control characters or backslashes"
         )
     parsed = urlparse(cleaned)
-    if parsed.scheme != "http" or parsed.username or parsed.password or parsed.fragment:
+    authority = parsed.netloc
+    if (
+        parsed.scheme != "http"
+        or parsed.username is not None
+        or parsed.password is not None
+        or bool(parsed.fragment)
+        or "@" in authority
+        or "#" in cleaned
+        or "%" in authority
+    ):
         raise ValueError(
             f"Invalid redirect URI: {redirect_uri}\n"
             "For development, use http://localhost or http://127.0.0.1"
         )
-    hostname = (parsed.hostname or "").rstrip(".").lower()
+    try:
+        hostname = parsed.hostname or ""
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid redirect URI: {redirect_uri}\n"
+            "For development, use http://localhost or http://127.0.0.1"
+        ) from exc
+    # One trailing dot is the FQDN form. Stripping every dot would accept
+    # 127.0.0.1.., which browsers keep as an empty DNS label.
+    if hostname.endswith(".."):
+        raise ValueError(
+            f"Invalid redirect URI: {redirect_uri}\n"
+            "For development, use http://localhost or http://127.0.0.1"
+        )
+    hostname = hostname.rstrip(".").lower()
     if hostname not in {"localhost", "127.0.0.1"}:
         raise ValueError(
             f"Invalid redirect URI: {redirect_uri}\n"
             "For development, use http://localhost or http://127.0.0.1"
         )
+    if ":" in authority:
+        _host, separator, port_text = authority.rpartition(":")
+        if not separator or not _host or not _canonical_redirect_port(port_text):
+            raise ValueError(
+                f"Invalid redirect URI: {redirect_uri}\n"
+                "For development, use http://localhost or http://127.0.0.1"
+            )
     return cleaned
 
 
