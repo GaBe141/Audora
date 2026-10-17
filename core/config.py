@@ -3,10 +3,14 @@
 import os
 import sys
 import warnings
+from io import StringIO
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+
+from core.utils import read_nofollow_text, write_private_text
 
 
 class SecureConfig:
@@ -30,11 +34,30 @@ class SecureConfig:
                 f"Environment file not found: {self.env_file}\n"
                 "Create a .env file with your API credentials.",
                 UserWarning,
+                stacklevel=2,
             )
             return
 
-        # Load with explicit encoding and override
-        load_dotenv(dotenv_path=str(self.env_file), override=True, encoding="utf-8")
+        if Path(self.env_file).is_symlink():
+            warnings.warn(
+                f"Refusing to load symlinked environment file: {self.env_file}",
+                UserWarning,
+                stacklevel=2,
+            )
+            return
+
+        try:
+            env_text = read_nofollow_text(self.env_file)
+        except OSError as exc:
+            warnings.warn(
+                f"Refusing to load environment file {self.env_file}: {exc}",
+                UserWarning,
+                stacklevel=2,
+            )
+            return
+
+        # Do not let a project .env override variables already set in the environment.
+        load_dotenv(stream=StringIO(env_text), override=False)
 
         # Validate file permissions (Unix-like systems)
         if hasattr(os, "stat") and not sys.platform.startswith("win"):
@@ -44,6 +67,7 @@ class SecureConfig:
                     f"Environment file permissions are too open: {file_mode}\n"
                     f"Consider running: chmod 600 {self.env_file}",
                     UserWarning,
+                    stacklevel=2,
                 )
 
     def get_spotify_config(self) -> dict[str, str]:
@@ -57,12 +81,7 @@ class SecureConfig:
             ),
         }
 
-        # Validate redirect URI format
-        if not config["redirect_uri"].startswith(("http://localhost", "http://127.0.0.1")):
-            raise ValueError(
-                f"Invalid redirect URI: {config['redirect_uri']}\n"
-                "For development, use http://localhost or http://127.0.0.1"
-            )
+        self._validate_redirect_uri(config["redirect_uri"])
 
         return config
 
@@ -80,6 +99,7 @@ class SecureConfig:
                 "Last.fm API key format appears invalid. "
                 "Should be 32 character hexadecimal string.",
                 UserWarning,
+                stacklevel=2,
             )
 
         return {"api_key": api_key, "shared_secret": shared_secret or ""}
@@ -114,6 +134,37 @@ class SecureConfig:
     def _is_valid_lastfm_key(self, key: str) -> bool:
         """Validate Last.fm API key format."""
         return len(key) == 32 and all(c in "0123456789abcdef" for c in key.lower())
+
+    @staticmethod
+    def _validate_redirect_uri(redirect_uri: str) -> None:
+        """Allow only loopback HTTP callbacks with an exact hostname.
+
+        Prefix checks accept http://localhost.evil.com and userinfo tricks such as
+        http://127.0.0.1@evil.com. Decimal, octal, hex, and short loopback forms are rejected.
+        """
+        if any(ord(char) < 32 or ord(char) == 127 or char == "\\" for char in redirect_uri):
+            raise ValueError(
+                f"Invalid redirect URI: {redirect_uri}\n"
+                "For development, use http://localhost or http://127.0.0.1"
+            )
+        parsed = urlparse(redirect_uri.strip())
+        if (
+            parsed.scheme != "http"
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+            or not parsed.hostname
+        ):
+            raise ValueError(
+                f"Invalid redirect URI: {redirect_uri}\n"
+                "For development, use http://localhost or http://127.0.0.1"
+            )
+        hostname = parsed.hostname.rstrip(".").lower()
+        if hostname not in {"localhost", "127.0.0.1"}:
+            raise ValueError(
+                f"Invalid redirect URI: {redirect_uri}\n"
+                "For development, use http://localhost or http://127.0.0.1"
+            )
 
     def validate_all_configs(self) -> dict[str, dict[str, Any]]:
         """Validate all configurations and return status."""
@@ -202,11 +253,7 @@ AUDIODB_API_KEY=123
             print(f"❌ No .env file found at: {self.env_file}")
             print("\n📝 Creating template .env file...")
 
-            self.env_file.write_text(self.create_env_template(), encoding="utf-8")
-
-            # Set restrictive permissions on Unix-like systems
-            if hasattr(os, "chmod") and not sys.platform.startswith("win"):
-                os.chmod(self.env_file, 0o600)
+            write_private_text(self.env_file, self.create_env_template())
 
             print(f"✅ Created template: {self.env_file}")
             print("\n🔑 Next steps:")

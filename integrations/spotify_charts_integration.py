@@ -11,11 +11,27 @@ from bs4 import BeautifulSoup
 CHARTS_BASE_URL = "https://charts.spotify.com"
 
 
+def _chart_target(country_code: str, date: str | None) -> tuple[str, str]:
+    """Allow global or a two-letter country and a real YYYY-MM-DD date."""
+    country = (country_code or "").strip().lower()
+    if country != "global" and not (len(country) == 2 and country.isalpha()):
+        raise ValueError("Invalid Spotify chart country")
+    if date is None:
+        normalized = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    else:
+        try:
+            normalized = datetime.strptime(date, "%Y-%m-%d").strftime("%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("Invalid Spotify chart date") from exc
+    return country, normalized
+
+
 class SpotifyChartsAPI:
     """Spotify Charts scraper for real streaming data."""
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.trust_env = False
         # Use a realistic user agent
         self.session.headers.update(
             {
@@ -41,15 +57,12 @@ class SpotifyChartsAPI:
             date: Date in YYYY-MM-DD format, defaults to latest
         """
         self._rate_limit()
-
-        if date is None:
-            # Default to yesterday (charts are usually 1 day behind)
-            date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        country_code, date = _chart_target(country_code, date)
 
         url = f"{CHARTS_BASE_URL}/charts/view/regional-{country_code}-daily/{date}"
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=30, allow_redirects=False)
             response.raise_for_status()
 
             # Parse the HTML
@@ -134,14 +147,12 @@ class SpotifyChartsAPI:
     def get_viral_50_daily(self, country_code: str = "global", date: str = None) -> pd.DataFrame:
         """Get viral 50 tracks for a specific date and country."""
         self._rate_limit()
-
-        if date is None:
-            date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        country_code, date = _chart_target(country_code, date)
 
         url = f"{CHARTS_BASE_URL}/charts/view/viral-{country_code}-daily/{date}"
 
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=30, allow_redirects=False)
             response.raise_for_status()
 
             BeautifulSoup(response.content, "html.parser")
