@@ -3,6 +3,7 @@ Enhanced data persistence layer for music discovery data.
 Handles trending data, viral predictions, and cross-platform analysis.
 """
 
+import errno
 import json
 import logging
 import os
@@ -130,6 +131,7 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    _DATABASE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
         self.db_path = resolve_constructor_database_path(db_path)
@@ -170,9 +172,7 @@ class EnhancedMusicDataStore:
             self.logger.debug("Reused connection from pool")
             return conn
 
-        self._reject_database_symlink()
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
+        conn = self._open_database_connection()
         self.logger.debug("Created new database connection")
         return conn
 
@@ -185,31 +185,58 @@ class EnhancedMusicDataStore:
             conn.close()
             self.logger.debug("Closed excess connection")
 
-    def _reject_database_symlink(self) -> None:
+    def _database_files(self) -> list[Path]:
+        """Main database path plus rollback and WAL sidecars."""
         if self.db_path == ":memory:":
-            return
+            return []
+        base = Path(self.db_path)
+        return [base, *[Path(f"{base}{suffix}") for suffix in self._DATABASE_SIDECAR_SUFFIXES]]
+
+    def _reject_database_symlinks(self) -> None:
+        for candidate in self._database_files():
+            if candidate.is_symlink():
+                raise ValueError("Refusing to open a symlinked database")
+
+    def _open_database_connection(self) -> sqlite3.Connection:
+        """Open SQLite without following a symlink swapped in for the database.
+
+        A path check then ``sqlite3.connect(path)`` still follows a symlink
+        planted between the two calls. Opening ``O_NOFOLLOW`` and connecting
+        to that descriptor keeps the connection on the inode we just screened.
+        """
+        if self.db_path == ":memory:":
+            conn = sqlite3.connect(":memory:", check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        self._reject_database_symlinks()
         db_file = Path(self.db_path)
-        if db_file.is_symlink():
-            raise ValueError("Refusing to open a symlinked database")
-        if db_file.exists():
-            return
         db_file.parent.mkdir(parents=True, exist_ok=True)
         flags = os.O_RDWR | os.O_CREAT
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
-        fd = os.open(db_file, flags, 0o600)
+        fd = -1
         try:
+            fd = os.open(db_file, flags, 0o600)
             if os.name != "nt":
                 os.fchmod(fd, 0o600)
+            if Path("/proc/self/fd").is_dir():
+                uri = f"file:///proc/self/fd/{fd}?mode=rw"
+                conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+            else:
+                conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ValueError("Refusing to open a symlinked database") from exc
+            raise
         finally:
-            os.close(fd)
+            if fd >= 0:
+                os.close(fd)
+        conn.row_factory = sqlite3.Row
+        return conn
 
     def _lock_down_database_files(self) -> None:
-        if self.db_path == ":memory:":
-            return
-        base = Path(self.db_path)
-        for suffix in ("", "-wal", "-shm"):
-            candidate = Path(f"{base}{suffix}") if suffix else base
+        for candidate in self._database_files():
             _lock_down_file(candidate)
 
     def close_pool(self) -> None:
