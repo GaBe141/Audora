@@ -3,10 +3,10 @@ Advanced visualization module for trending schema data.
 Creates interactive charts and dashboards for trending analysis.
 """
 
-import json
 import warnings
-from pathlib import Path
 from typing import Any, cast
+
+from core.utils import read_json, resolve_project_path, save_matplotlib_figure, save_plotly_html
 
 # Avoid heavy imports at module load; import within functions when needed
 
@@ -201,7 +201,7 @@ class TrendingVisualizationEngine:
         plt.tight_layout()
 
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+            save_matplotlib_figure(plt, save_path, dpi=300, bbox_inches="tight")
             print(f"📊 Trending timeline saved to {save_path}")
 
         plt.show()
@@ -385,7 +385,7 @@ class TrendingVisualizationEngine:
         fig.update_xaxes(title_text="Momentum", row=2, col=2)
 
         if save_path:
-            fig.write_html(save_path)
+            save_plotly_html(fig, save_path)
             print(f"📊 Interactive dashboard saved to {save_path}")
 
         fig.show()
@@ -431,7 +431,7 @@ class TrendingVisualizationEngine:
         plt.tight_layout()
 
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+            save_matplotlib_figure(plt, save_path, dpi=300, bbox_inches="tight")
             print(f"📊 Trending heatmap saved to {save_path}")
 
         plt.show()
@@ -521,7 +521,7 @@ class TrendingVisualizationEngine:
         plt.tight_layout()
 
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+            save_matplotlib_figure(plt, save_path, dpi=300, bbox_inches="tight")
             print(f"📊 Trend predictions saved to {save_path}")
 
         plt.show()
@@ -532,14 +532,10 @@ def visualize_trending_report(report_file: str, output_dir: str = "data/trending
     """Create comprehensive visualizations from trending report."""
     print("🎨 Creating comprehensive trending visualizations...")
 
-    # Load report data
-    with open(report_file) as f:
-        report_data = json.load(f)
-
+    report_data = read_json(report_file)
     trending_insights = report_data.get("trending_insights", {})
 
-    # Create output directory
-    output_path = Path(output_dir)
+    output_path = resolve_project_path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Initialize visualization engine
