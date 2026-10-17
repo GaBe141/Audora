@@ -5,10 +5,12 @@ import io
 import json
 import logging
 import os
+import re
 import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +29,13 @@ except ImportError:
 
 
 def _is_credential_file(path: Path) -> bool:
-    """True for dotenv files and the Spotify token cache."""
-    name = path.name
+    """True for dotenv files and the Spotify token cache.
+
+    Comparison is case-insensitive and ignores a trailing dot so ``.ENV`` and
+    ``.env.`` cannot be read through the generic CSV or JSON helpers on
+    case-insensitive filesystems.
+    """
+    name = path.name.casefold().strip().rstrip(".")
     return name in _CREDENTIAL_FILE_NAMES or name.startswith(".env.")
 
 
@@ -180,11 +187,97 @@ def neutralize_csv_value(value: Any) -> Any:
 
 
 def neutralize_csv_frame(df: Any) -> Any:
-    """Neutralize formula-looking cells in every column of a DataFrame."""
+    """Neutralize formula-looking cells and column headers in a DataFrame.
+
+    ``DataFrame.to_csv`` writes column names into the header row. A header of
+    ``=cmd`` is still a formula when every data cell has been prefixed.
+    """
     neutralized = df.copy()
+    renames: dict[str, str] = {}
+    for column in neutralized.columns:
+        if isinstance(column, str):
+            safe_name = neutralize_csv_value(column)
+            if isinstance(safe_name, str) and safe_name != column:
+                renames[column] = safe_name
+    if renames:
+        neutralized = neutralized.rename(columns=renames)
     for column in neutralized.columns:
         neutralized[column] = neutralized[column].map(neutralize_csv_value)
     return neutralized
+
+
+_SECRET_QUERY_RE = re.compile(
+    r"(?i)\b(api_key|apikey|api_secret|access_token|refresh_token|token|password|passwd|"
+    r"secret|sig|signature|key)=([^&\s\"']+)"
+)
+_URL_USERINFO_RE = re.compile(r"(?i)(https?://)([^/\s:@]+):([^/\s@]+)@")
+_BEARER_RE = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9\-._~+/]+=*")
+_WEBHOOK_SECRET_RE = re.compile(
+    r"https://(?:hooks\.slack\.com/services/\S+|discord(?:app)?\.com/api/webhooks/\S+)"
+)
+_AUDIODB_KEY_RE = re.compile(r"(?i)(/api/v1/json/)([^/\s\"']+)")
+
+
+def redact_secrets(value: Any) -> str:
+    """Remove API keys, webhook URLs, and URL passwords from an error string."""
+    text = str(value)
+    text = _URL_USERINFO_RE.sub(r"\1REDACTED:REDACTED@", text)
+    text = _SECRET_QUERY_RE.sub(r"\1=REDACTED", text)
+    text = _BEARER_RE.sub(r"\1REDACTED", text)
+    text = _WEBHOOK_SECRET_RE.sub("https://webhook.invalid/REDACTED", text)
+    text = _AUDIODB_KEY_RE.sub(r"\1REDACTED", text)
+    return text
+
+
+def is_loopback_http_host(host_header: str) -> bool:
+    """True when a Host or Origin netloc is localhost or a loopback address."""
+    if not isinstance(host_header, str):
+        return False
+    host = host_header.strip().lower()
+    if (
+        not host
+        or any(ord(char) < 32 or ord(char) == 127 for char in host)
+        or any(char in host for char in "\\@ ")
+    ):
+        return False
+    if host.startswith("["):
+        end = host.find("]")
+        if end == -1:
+            return False
+        hostname = host[1:end]
+        rest = host[end + 1 :]
+        if rest and not re.fullmatch(r":[0-9]{1,5}", rest):
+            return False
+        if rest and not 0 < int(rest[1:]) <= 65535:
+            return False
+        return hostname == "::1"
+    if host.count(":") > 1:
+        return False
+    hostname, separator, port = host.partition(":")
+    if separator and (not port.isdigit() or not 0 < int(port) <= 65535):
+        return False
+    return hostname.rstrip(".") in {"localhost", "127.0.0.1"}
+
+
+def dashboard_request_allowed(
+    host: str,
+    origin: str | None,
+    sec_fetch_site: str | None,
+    method: str = "GET",
+) -> bool:
+    """Allow the local dashboard and reject DNS rebinding and cross-site writes.
+
+    A rebound name arrives with the attacker's Host header. A browser CSRF
+    request to 127.0.0.1 arrives with the attacker's Origin.
+    """
+    if not is_loopback_http_host(host):
+        return False
+    if origin:
+        parsed = urlparse(origin.strip())
+        if parsed.scheme not in {"http", "https"} or not is_loopback_http_host(parsed.netloc):
+            return False
+    site = (sec_fetch_site or "").strip().lower()
+    return method.upper() in {"GET", "HEAD", "OPTIONS"} or site != "cross-site"
 
 
 # JSON utilities
