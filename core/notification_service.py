@@ -36,14 +36,16 @@ _ALWAYS_BLOCKED_V4 = (
     ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("100.64.0.0/10"),
     ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("168.63.129.16/32"),
     ipaddress.ip_network("169.254.0.0/16"),
     ipaddress.ip_network("192.88.99.0/24"),
     ipaddress.ip_network("224.0.0.0/4"),
     ipaddress.ip_network("240.0.0.0/4"),
 )
 _ALWAYS_BLOCKED_V6 = (
-    ipaddress.ip_network("::/128"),
+    ipaddress.ip_network("::/96"),
     ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("::ffff:0:0:0/96"),
     ipaddress.ip_network("64:ff9b::/96"),
     ipaddress.ip_network("64:ff9b:1::/48"),
     ipaddress.ip_network("2001::/32"),
@@ -65,6 +67,11 @@ _FORBIDDEN_WEBHOOK_HEADERS = {
     "connection",
     "upgrade",
 }
+
+
+def _contains_control_char(value: str) -> bool:
+    """True when a string contains ASCII controls or DEL."""
+    return any(ord(char) < 32 or ord(char) == 127 for char in value)
 
 
 class NotificationPriority(Enum):
@@ -335,6 +342,7 @@ class EnhancedNotificationService:
             or parsed.is_link_local
             or parsed.is_multicast
             or parsed.is_unspecified
+            or parsed.is_reserved
         )
 
     def _is_rfc1918(self, ip: str) -> bool:
@@ -393,28 +401,28 @@ class EnhancedNotificationService:
 
     def _screen_addresses(self, addresses: list[str], *, allow_private: bool, smtp: bool) -> None:
         for ip in addresses:
+            target = "SMTP server" if smtp else "Webhook URL"
             if self._is_always_blocked_ip(ip):
-                target = "SMTP server" if smtp else "Webhook URL"
                 raise ValueError(f"{target} resolves to a private or restricted network address")
             if not self._is_restricted_ip(ip):
                 continue
-            if smtp:
-                if allow_private and self._is_rfc1918(ip):
-                    continue
-                raise ValueError("SMTP server resolves to a private or restricted network address")
-            if allow_private and (
-                self._is_rfc1918(ip) or self._unwrap_ip(ipaddress.ip_address(ip)).is_private
-            ):
-                if self._is_always_blocked_ip(ip):
-                    raise ValueError(
-                        "Webhook URL resolves to a private or restricted network address"
-                    )
+            if allow_private and self._is_rfc1918(ip):
                 continue
-            raise ValueError("Webhook URL resolves to a private or restricted network address")
+            raise ValueError(f"{target} resolves to a private or restricted network address")
+
+    def _reject_unsafe_url_text(self, url: str) -> str:
+        """Reject parser-differential characters before urlparse or DNS."""
+        if not isinstance(url, str):
+            raise ValueError("Webhook URL must be a string")
+        cleaned = url.strip()
+        if "\\" in cleaned or _contains_control_char(cleaned):
+            raise ValueError("Webhook URL contains unsafe characters")
+        return cleaned
 
     def _resolve_webhook(self, url: str, *, allow_private: bool = False) -> tuple[str, list[str]]:
         """Validate an outbound webhook URL and return the addresses it may use."""
-        parsed = urlparse(url.strip())
+        cleaned = self._reject_unsafe_url_text(url)
+        parsed = urlparse(cleaned)
         if parsed.scheme != "https":
             raise ValueError("Webhook URL must use HTTPS")
         if parsed.username or parsed.password or not parsed.hostname:
@@ -424,7 +432,7 @@ class EnhancedNotificationService:
         self._reject_obfuscated_host(hostname)
         addresses = self._resolve_ips(hostname, parsed.port or 443)
         self._screen_addresses(addresses, allow_private=allow_private, smtp=False)
-        return url, addresses
+        return cleaned, addresses
 
     def _validate_webhook_url(self, url: str, *, allow_private: bool = False) -> str:
         """Validate outbound webhook URL to reduce SSRF risk."""
@@ -442,9 +450,21 @@ class EnhancedNotificationService:
         return hostname, addresses[0]
 
     def _safe_header(self, value: str, label: str) -> str:
-        if not isinstance(value, str) or any(char in value for char in "\r\n"):
-            raise ValueError(f"Email {label} contains a line break")
+        if not isinstance(value, str) or _contains_control_char(value):
+            raise ValueError(f"Email {label} contains a control character")
         return value
+
+    def _safe_attachment_name(self, filename: str) -> str:
+        """Reject header-injection characters in an attachment filename."""
+        name = Path(filename).name
+        if (
+            not name
+            or name in {".", ".."}
+            or _contains_control_char(name)
+            or any(char in name for char in '\\/"')
+        ):
+            raise ValueError("Attachment filename contains unsafe characters")
+        return name
 
     def _safe_webhook_headers(self, headers: Any) -> dict[str, str]:
         if not isinstance(headers, dict):
@@ -453,8 +473,8 @@ class EnhancedNotificationService:
         for key, value in headers.items():
             if not isinstance(key, str) or not isinstance(value, str | int | float):
                 raise ValueError("Webhook headers must be strings")
-            if any(char in key or char in str(value) for char in "\r\n"):
-                raise ValueError("Webhook headers contain line breaks")
+            if _contains_control_char(key) or _contains_control_char(str(value)):
+                raise ValueError("Webhook headers contain control characters")
             if key.lower() in _FORBIDDEN_WEBHOOK_HEADERS:
                 continue
             safe[key] = str(value)
@@ -797,10 +817,11 @@ System status: {{ system_status }}
                     attachment = MIMEBase("application", "octet-stream")
                     attachment.set_payload(payload)
                     encoders.encode_base64(attachment)
-                    filename = Path(safe_path.name).name.replace('"', "")
+                    filename = self._safe_attachment_name(safe_path.name)
                     attachment.add_header(
                         "Content-Disposition",
-                        f'attachment; filename="{filename}"',
+                        "attachment",
+                        filename=filename,
                     )
                     msg.attach(attachment)
 
@@ -813,9 +834,12 @@ System status: {{ system_status }}
 
             server: smtplib.SMTP
             if use_tls and port == 465:
-                server = smtplib.SMTP_SSL(timeout=30)
+                # Python 3.12 SMTP_SSL() without a context uses CERT_NONE.
+                server = smtplib.SMTP_SSL(context=ssl.create_default_context(), timeout=30)
             else:
                 server = smtplib.SMTP(timeout=30)
+            # connect() does not set _host. The certificate name must stay the
+            # validated hostname while the socket connects to the pinned IP.
             server._host = hostname  # type: ignore[attr-defined]
             server.connect(pinned_ip, port)
             if use_tls and port != 465:
