@@ -9,6 +9,7 @@ import requests
 
 from core.config import get_config
 from core.exceptions import APIConnectionError, APIResponseError
+from core.utils import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -64,15 +65,17 @@ class LastFmAPI:
         except APIResponseError:
             raise
         except requests.exceptions.RequestException as e:
-            logger.error("Last.fm request failed for %s: %s", method, e)
+            safe_error = redact_secrets(e)
+            logger.error("Last.fm request failed for %s: %s", method, safe_error)
             raise APIConnectionError(
-                message=f"Last.fm request failed: {e}",
+                message=f"Last.fm request failed: {safe_error}",
                 details={"method": method},
             ) from e
         except json.JSONDecodeError as e:
-            logger.error("Last.fm returned invalid JSON for %s: %s", method, e)
+            safe_error = redact_secrets(e)
+            logger.error("Last.fm returned invalid JSON for %s: %s", method, safe_error)
             raise APIResponseError(
-                message=f"Last.fm returned invalid JSON: {e}",
+                message=f"Last.fm returned invalid JSON: {safe_error}",
                 details={"method": method},
             ) from e
 
