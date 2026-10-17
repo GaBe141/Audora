@@ -3,12 +3,15 @@ Integration module for trending schema with Spotify streaming data.
 Connects real-time streaming data to trending analysis framework.
 """
 
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, TypedDict
 
 import numpy as np
 import pandas as pd
+
+from core.utils import confine_relative_path
 
 from .trending_schema import TrendCategory, TrendDirection, TrendingSchema
 
@@ -444,7 +447,7 @@ class SpotifyTrendingIntegration:
         """Create comprehensive trending analysis report."""
         print("\n📋 Creating trending analysis report...")
 
-        output_path = Path(output_dir)
+        output_path = confine_relative_path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
         # Generate insights
@@ -452,7 +455,7 @@ class SpotifyTrendingIntegration:
 
         # Export trending snapshot
         snapshot = self.trending_schema.export_trending_snapshot(
-            str(output_path / "trending_snapshot.json")
+            str(Path(output_dir) / "trending_snapshot.json")
         )
 
         # Create comprehensive report
@@ -474,7 +477,7 @@ class SpotifyTrendingIntegration:
             report,
             filename="spotify_trending_report.json",
             prefix="spotify_trending",
-            output_dir=str(output_path),
+            output_dir=output_dir,
             add_timestamp=False,
         )
 
@@ -489,7 +492,19 @@ class SpotifyTrendingIntegration:
 
     def _create_text_summary(self, insights: dict[str, Any], output_file: Path):
         """Create human-readable trending summary."""
-        with output_file.open("w", encoding="utf-8") as f:
+        if output_file.is_symlink():
+            raise ValueError("Refusing to write summary through a symlink")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(output_file, flags, 0o644)
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+            fd = -1
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        with handle as f:
             f.write("SPOTIFY TRENDING ANALYSIS REPORT\n")
             f.write("=" * 40 + "\n\n")
 
@@ -531,9 +546,7 @@ class SpotifyTrendingIntegration:
                     direction_emoji = (
                         "📈"
                         if "rising" in item["direction"]
-                        else "🚀"
-                        if "viral" in item["direction"]
-                        else "📊"
+                        else "🚀" if "viral" in item["direction"] else "📊"
                     )
                     f.write(f"  {direction_emoji} {item['name']}\n")
                     f.write(
