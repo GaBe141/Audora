@@ -27,10 +27,13 @@ _SECRET_FILE_NAMES = {
     ".git-credentials",
     ".npmrc",
     ".pypirc",
+    ".envrc",
     "id_rsa",
     "id_dsa",
     "id_ecdsa",
+    "id_ecdsa_sk",
     "id_ed25519",
+    "id_ed25519_sk",
     "credentials.json",
     "credentials",
     ".pgpass",
@@ -39,6 +42,7 @@ _SECRET_FILE_NAMES = {
     ".boto",
     ".s3cfg",
     "authorized_keys",
+    "authorized_keys2",
     "notification_config.json",
     "enhanced_api_config.json",
     "social_apis.json",
@@ -68,16 +72,24 @@ _SECRET_FILE_SUFFIXES = (
     ".tfstate",
 )
 _DISGUISED_FILE_SUFFIXES = (
-    ".bak",
-    ".old",
+    ".backup",
+    ".disabled",
     ".orig",
     ".save",
-    ".swp",
-    ".swo",
-    ".tmp",
     ".copy",
+    ".bkp",
+    ".bck",
+    ".bak",
+    ".old",
+    ".swn",
+    ".swo",
+    ".swp",
+    ".swx",
+    ".tmp",
+    ".new",
     "~",
 )
+_NUMERIC_COPY_RE = re.compile(r"(.+)\.(\d+)$")
 
 # Re-export for convenience
 try:
@@ -91,9 +103,10 @@ except ImportError:
 def _filename_forms(filename: str) -> list[str]:
     """Spellings that still name the same file on Windows and case-insensitive disks.
 
-    Trailing dots and spaces, NTFS alternate data streams, and backup suffixes
-    are removed one layer at a time. ``id_rsa.bak.`` and ``id_rsa::$DATA`` both
-    reduce to ``id_rsa``.
+    Trailing dots and spaces, NTFS alternate data streams, editor backups, and
+    numbered copies are removed one layer at a time. ``id_rsa.bak.`` and
+    ``id_rsa::$DATA`` both reduce to ``id_rsa``. ``credentials.json.backup``
+    and ``id_rsa.2`` reduce to the secret base name.
     """
     name = filename.casefold().strip()
     forms: list[str] = []
@@ -109,13 +122,45 @@ def _filename_forms(filename: str) -> list[str]:
         if separator and stream:
             name = stream
             continue
+        peeled = False
         for extra in _DISGUISED_FILE_SUFFIXES:
             if name.endswith(extra) and len(name) > len(extra):
                 name = name[: -len(extra)]
+                peeled = True
                 break
-        else:
-            break
+        if peeled:
+            continue
+        numeric = _NUMERIC_COPY_RE.fullmatch(name)
+        if numeric:
+            name = numeric.group(1)
+            continue
+        break
     return forms
+
+
+def _secret_name_candidates(form: str) -> list[str]:
+    """Names to test, including editor prefixes that hide a secret basename.
+
+    Vim writes the swap for ``id_rsa`` as ``.id_rsa.swp`` and the swap for
+    ``.env`` as ``..env.swp``. Emacs uses ``#id_rsa#`` and ``.#id_rsa``.
+    Stripping those prefixes must still recognize the secret.
+    """
+    candidates: list[str] = []
+    pending = [form]
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if not current or current in seen:
+            continue
+        seen.add(current)
+        candidates.append(current)
+        if current.startswith(".") and len(current) > 1:
+            pending.append(current[1:])
+        if current.startswith("#") and current.endswith("#") and len(current) > 2:
+            pending.append(current[1:-1])
+        elif current.startswith("#") and len(current) > 1:
+            pending.append(current[1:])
+    return candidates
 
 
 def _is_exact_live_config(filename: str) -> bool:
@@ -123,12 +168,21 @@ def _is_exact_live_config(filename: str) -> bool:
     return filename.casefold().strip() in _LIVE_CONFIG_NAMES
 
 
+def _candidate_is_secret(candidate: str) -> bool:
+    """True when one normalized spelling is a secret, key, or database name."""
+    if candidate in _SECRET_FILE_NAMES:
+        return True
+    if candidate == ".env" or candidate.startswith(".env."):
+        return True
+    if candidate == ".envrc" or candidate.startswith(".envrc."):
+        return True
+    return candidate.endswith(_SECRET_FILE_SUFFIXES)
+
+
 def is_sensitive_filename(filename: str) -> bool:
     """True for secrets, databases, keys, and disguised copies of those files."""
     for form in _filename_forms(filename):
-        if form in _SECRET_FILE_NAMES or form == ".env" or form.startswith(".env."):
-            return True
-        if form.endswith(_SECRET_FILE_SUFFIXES):
+        if any(_candidate_is_secret(candidate) for candidate in _secret_name_candidates(form)):
             return True
     return False
 
