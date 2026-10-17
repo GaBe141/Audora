@@ -27,6 +27,7 @@ from core.utils import (
 from integrations.extended_platforms import safe_path_segment
 from integrations.musicbrainz_integration import _require_mbid
 from integrations.spotify_charts_integration import _safe_chart_target
+from scripts.setup import EnhancedMusicDiscoverySetup
 
 
 def _redis_backend() -> RedisCacheBackend:
@@ -136,16 +137,39 @@ class TestRedirectAndSsrf:
             svc._validate_smtp_host("10.0.0.1", 587)
         with pytest.raises(ValueError, match="private or restricted"):
             svc._validate_smtp_host("2001::1", 587)
+        with pytest.raises(ValueError, match="Invalid SMTP host"):
+            svc._validate_smtp_host("smtp.example.com\x00.127.0.0.1", 587)
 
 
 class TestPathAndCsvGuards:
     def test_csv_formula_neutralization(self):
         frame = pd.DataFrame(
-            {"formula": ["=1+1", " =1+1", "\t@cmd", "safe"], "score": [1, 2, 3, 4]}
+            {
+                "formula": [
+                    "=1+1",
+                    " =1+1",
+                    "\t@cmd",
+                    "\n=1+1",
+                    "\u00a0+1",
+                    "\x00-1",
+                    "\ufeff@SUM(A1)",
+                    "safe",
+                ],
+                "score": [1, 2, 3, 4, 5, 6, 7, 8],
+            }
         )
         neutralized = neutralize_csv_frame(frame)
-        assert neutralized["formula"].tolist() == ["'=1+1", "' =1+1", "'\t@cmd", "safe"]
-        assert neutralized["score"].tolist() == [1, 2, 3, 4]
+        assert neutralized["formula"].tolist() == [
+            "'=1+1",
+            "' =1+1",
+            "'\t@cmd",
+            "'\n=1+1",
+            "'\u00a0+1",
+            "'\x00-1",
+            "'\ufeff@SUM(A1)",
+            "safe",
+        ]
+        assert neutralized["score"].tolist() == [1, 2, 3, 4, 5, 6, 7, 8]
 
     def test_path_segment_and_chart_guards(self):
         assert safe_path_segment("popheads") == "popheads"
@@ -210,7 +234,14 @@ class TestProjectPathConfinement:
         svc.config["email"]["recipients"] = ["listener@example.com"]
         svc.config["email"]["from_address"] = "audora@example.com"
 
-        for attachment in (".env", "trends.db", "../secret.env"):
+        for attachment in (
+            ".env",
+            "trends.db",
+            "trends.db-wal",
+            "config/social_apis.json",
+            "id_rsa",
+            "../secret.env",
+        ):
             message = NotificationMessage(
                 title="Report",
                 content="body",
@@ -221,3 +252,17 @@ class TestProjectPathConfinement:
             result = asyncio.run(svc._send_email(message))
             assert result["success"] is False
             assert "secret" in result["error"].lower() or "escapes" in result["error"].lower()
+
+    def test_setup_write_rejects_symlinked_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
+        outside = tmp_path.parent / "leaked-config"
+        outside.mkdir()
+        linked = tmp_path / "linked-config"
+        linked.symlink_to(outside, target_is_directory=True)
+        source = inspect.getsource(EnhancedMusicDiscoverySetup._setup_logging)
+        assert "NofollowFileHandler" in source
+        assert 'FileHandler("setup.log"' not in source
+        setup = EnhancedMusicDiscoverySetup.__new__(EnhancedMusicDiscoverySetup)
+        with pytest.raises(ValueError, match="escapes"):
+            setup._write_private_file(linked / "social_apis.json", '{"api_key":"secret"}')
+        assert not (outside / "social_apis.json").exists()
