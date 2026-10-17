@@ -9,6 +9,7 @@ from .lastfm_viz import (
     plot_listening_influence_analysis,
     plot_personal_vs_global_artists,
 )
+from .utils import save_dataframe
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -129,19 +130,20 @@ def run_lastfm_integration():
 
     # Save global trends
     if "global_top_artists" in global_trends:
-        global_csv = DATA_DIR / "lastfm_global_artists.csv"
-        global_trends["global_top_artists"].to_csv(global_csv, index=False)
+        global_csv = save_dataframe(
+            global_trends["global_top_artists"], DATA_DIR / "lastfm_global_artists.csv"
+        )
         print(f"   • {global_csv.name}")
 
     if "global_top_tracks" in global_trends:
-        tracks_csv = DATA_DIR / "lastfm_global_tracks.csv"
-        global_trends["global_top_tracks"].to_csv(tracks_csv, index=False)
+        tracks_csv = save_dataframe(
+            global_trends["global_top_tracks"], DATA_DIR / "lastfm_global_tracks.csv"
+        )
         print(f"   • {tracks_csv.name}")
 
     # Save enriched data
     if not spotify_enriched.empty:
-        enriched_csv = DATA_DIR / "spotify_lastfm_enriched.csv"
-        spotify_enriched.to_csv(enriched_csv, index=False)
+        enriched_csv = save_dataframe(spotify_enriched, DATA_DIR / "spotify_lastfm_enriched.csv")
         print(f"   • {enriched_csv.name}")
 
     print()
