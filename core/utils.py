@@ -2,11 +2,15 @@
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_FORMULA_LEAD = ("=", "+", "-", "@")
 
 # Re-export for convenience
 try:
@@ -15,6 +19,103 @@ try:
     HAS_PANDAS = True
 except ImportError:
     HAS_PANDAS = False
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """Return True when path stays inside root after resolution."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def confine_relative_path(path: Path | str, *, base: Path | None = None) -> Path:
+    """Resolve a relative path and require it to stay inside base."""
+    root = (base or PROJECT_ROOT).resolve()
+    raw = Path(path)
+    if raw.is_absolute():
+        raise ValueError("Absolute paths are not allowed")
+    candidate = root / raw
+    if candidate.is_symlink():
+        raise ValueError(f"Refusing to follow symlink: {candidate}")
+    resolved = candidate.resolve()
+    if not _is_within(resolved, root):
+        raise ValueError("Path escapes the allowed directory")
+    return resolved
+
+
+def read_nofollow_text(path: Path | str, encoding: str = "utf-8") -> str:
+    """Read a text file without following a final-path symlink."""
+    file_path = Path(path)
+    if file_path.is_symlink():
+        raise OSError(f"Refusing to follow symlink: {file_path}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(file_path, flags)
+    try:
+        file_obj = os.fdopen(fd, "r", encoding=encoding)
+        fd = -1
+        with file_obj:
+            return file_obj.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def write_private_text(path: Path | str, content: str, *, create_dirs: bool = True) -> Path:
+    """Write text with mode 600 and without following a final-path symlink."""
+    file_path = Path(path)
+    if file_path.is_symlink():
+        raise ValueError(f"Refusing to write through symlink: {file_path}")
+    if create_dirs:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(file_path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        file_obj = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        with file_obj:
+            file_obj.write(content)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    return file_path
+
+
+def ensure_private_file(path: Path | str) -> Path:
+    """Create or tighten a secret file so it is mode 600 and not a symlink."""
+    file_path = Path(path)
+    if file_path.is_symlink():
+        raise ValueError(f"Refusing to use symlink: {file_path}")
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(file_path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    return file_path
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula cells so exported CSV cannot execute them."""
+    if not isinstance(value, str) or value == "":
+        return value
+    stripped = value.lstrip(" \t\r\n")
+    if stripped.startswith(_FORMULA_LEAD):
+        return "'" + value
+    return value
+
+
+def neutralize_csv_frame(df: Any) -> Any:
+    """Neutralize formula injection in every column of a DataFrame."""
+    if not HAS_PANDAS:
+        raise ImportError("pandas is required for neutralize_csv_frame")
+    neutralized = df.copy()
+    for column in neutralized.columns:
+        neutralized[column] = neutralized[column].map(neutralize_csv_value)
+    return neutralized
 
 
 # JSON utilities
@@ -34,13 +135,14 @@ def read_json(path: Path | str, default: Any = None) -> Any:
     """
     path = Path(path)
     try:
-        with path.open("r", encoding="utf-8") as fh:
-            return json.load(fh)
+        text = read_nofollow_text(path)
     except FileNotFoundError:
         if default is not None:
             logger.warning(f"JSON file not found: {path}, using default")
             return default
         raise
+    try:
+        return json.loads(text)
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse JSON from {path}: {e}")
         if default is not None:
@@ -73,12 +175,8 @@ def write_json(
     """
     path = Path(path)
     try:
-        if create_dirs:
-            path.parent.mkdir(parents=True, exist_ok=True)
-
-        with path.open("w", encoding="utf-8") as fh:
-            json.dump(obj, fh, indent=indent, ensure_ascii=ensure_ascii, default=str)
-
+        payload = json.dumps(obj, indent=indent, ensure_ascii=ensure_ascii, default=str)
+        write_private_text(path, payload, create_dirs=create_dirs)
         logger.debug(f"Wrote JSON to {path}")
         return path
     except Exception as e:
@@ -99,11 +197,12 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
         Path object of the written file
     """
     filepath = Path(filepath)
+    if filepath.is_symlink():
+        raise ValueError(f"Refusing to write through symlink: {filepath}")
 
-    if create_dirs:
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-
-    df.to_csv(filepath, index=False)
+    frame = neutralize_csv_frame(df)
+    payload_buffer = frame.to_csv(index=False)
+    write_private_text(filepath, payload_buffer, create_dirs=create_dirs)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
@@ -346,10 +445,8 @@ def save_report(
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{timestamp_str}.json"
 
-    # Create full path
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    filepath = output_path / filename
+    # Create full path inside the project root
+    filepath = confine_relative_path(Path(output_dir) / filename)
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:
