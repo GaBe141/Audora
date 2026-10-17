@@ -238,10 +238,20 @@ def validate_spotify_redirect_uri(redirect_uri: str) -> str:
     """Allow only exact loopback HTTP redirect URIs.
 
     A prefix check accepts hosts such as localhost.evil.com and userinfo
-    such as 127.0.0.1@evil.com. The hostname is compared after URL parsing.
+    such as 127.0.0.1@evil.com. Control characters and backslashes are
+    rejected on the raw string because urlparse drops CR/LF and treats
+    ``http://127.0.0.1:8888\\@evil.com`` as a different host.
     """
-    parsed = urlparse(redirect_uri.strip())
-    if parsed.scheme != "http" or parsed.username or parsed.password:
+    if not isinstance(redirect_uri, str):
+        raise ValueError("Invalid redirect URI: value must be a string")
+    cleaned = redirect_uri.strip()
+    if "\\" in cleaned or any(ord(char) < 32 or ord(char) == 127 for char in cleaned):
+        raise ValueError(
+            f"Invalid redirect URI: {redirect_uri}\n"
+            "Redirect URIs cannot contain control characters or backslashes"
+        )
+    parsed = urlparse(cleaned)
+    if parsed.scheme != "http" or parsed.username or parsed.password or parsed.fragment:
         raise ValueError(
             f"Invalid redirect URI: {redirect_uri}\n"
             "For development, use http://localhost or http://127.0.0.1"
@@ -252,7 +262,7 @@ def validate_spotify_redirect_uri(redirect_uri: str) -> str:
             f"Invalid redirect URI: {redirect_uri}\n"
             "For development, use http://localhost or http://127.0.0.1"
         )
-    return redirect_uri
+    return cleaned
 
 
 # Global config instance
