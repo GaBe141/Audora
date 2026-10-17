@@ -7,6 +7,8 @@ import logging
 import os
 import re
 import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -592,6 +594,62 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
             os.close(fd)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
+
+
+@contextmanager
+def open_project_writer(path: Path | str, *, binary: bool = False) -> Iterator[io.IOBase]:
+    """Open a project file for overwrite without following a swapped-in symlink.
+
+    Matplotlib and Plotly open the destination path themselves, so a chart
+    name such as ``data/popularity_vs_rank.png`` can be replaced with a
+    symlink and the next save overwrites whatever the link points at.
+    """
+    file_path = resolve_project_path(path)
+    if _is_credential_file(file_path):
+        raise ValueError(f"Refusing to write a credential file: {file_path.name}")
+    if file_path.is_symlink():
+        raise ValueError(f"Refusing to write through a symlink: {file_path}")
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    flags = _nofollow_flags(os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    fd = -1
+    try:
+        fd = os.open(file_path, flags, 0o644)
+        if os.name != "nt":
+            os.fchmod(fd, 0o644)
+        if binary:
+            handle: io.IOBase = os.fdopen(fd, "wb")
+        else:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+    except OSError as exc:
+        if fd >= 0:
+            os.close(fd)
+        _raise_if_symlink_error(exc)
+        raise
+    try:
+        yield handle
+    finally:
+        handle.close()
+
+
+def save_matplotlib_figure(figure: Any, path: Path | str, **kwargs: Any) -> Path:
+    """Save a matplotlib figure inside the project without following a symlink."""
+    file_path = resolve_project_path(path)
+    kwargs.setdefault("format", file_path.suffix.lstrip(".") or "png")
+    with open_project_writer(file_path, binary=True) as handle:
+        figure.savefig(handle, **kwargs)
+    return file_path
+
+
+def save_plotly_html(figure: Any, path: Path | str) -> Path:
+    """Save a Plotly figure as HTML inside the project without following a symlink."""
+    file_path = resolve_project_path(path)
+    html = figure.to_html()
+    if not isinstance(html, str):
+        raise ValueError("Plotly HTML output must be text")
+    with open_project_writer(file_path) as handle:
+        handle.write(html)
+    return file_path
 
 
 def get_timestamp_filename(prefix: str = "", suffix: str = "") -> str:
