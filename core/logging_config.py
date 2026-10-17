@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.utils import open_unlinked_file
+
 _LOG_LEVELS = {
     "DEBUG": logging.DEBUG,
     "INFO": logging.INFO,
@@ -40,15 +42,16 @@ def safe_log_filename(name: str) -> str:
 
 
 class NofollowFileHandler(logging.FileHandler):
-    """File handler that refuses symlink targets and keeps logs mode 600."""
+    """File handler that refuses symlink and hard-link targets and keeps logs mode 600."""
 
     def _open(self) -> Any:
         if Path(self.baseFilename).is_symlink():
             raise OSError(f"Refusing to log through a symlink: {self.baseFilename}")
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(self.baseFilename, flags, 0o600)
+        try:
+            fd = open_unlinked_file(self.baseFilename, flags, 0o600)
+        except ValueError as exc:
+            raise OSError(str(exc)) from exc
         try:
             if os.name != "nt":
                 os.fchmod(fd, 0o600)
