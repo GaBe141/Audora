@@ -6,10 +6,56 @@ file and console output, improving observability and debugging capabilities.
 
 import json
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+_LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+
+def safe_log_level(level: str) -> int:
+    """Map a log level name to a logging constant without attribute lookup."""
+    if not isinstance(level, str):
+        raise ValueError("Log level must be a string")
+    resolved = _LOG_LEVELS.get(level.strip().upper())
+    if resolved is None:
+        raise ValueError(f"Unsupported log level: {level}")
+    return resolved
+
+
+def safe_log_filename(name: str) -> str:
+    """Allow a single log file name and reject path separators."""
+    if not isinstance(name, str) or name in {"", ".", ".."}:
+        raise ValueError("Invalid log filename")
+    if Path(name).name != name or any(ord(char) < 32 or char in {"/", "\\"} for char in name):
+        raise ValueError("Invalid log filename")
+    return name
+
+
+class NofollowFileHandler(logging.FileHandler):
+    """File handler that refuses to follow a symlinked log file."""
+
+    def _open(self):
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        if "w" in self.mode:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(self.baseFilename, flags, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            file_obj = os.fdopen(fd, self.mode, encoding=self.encoding, errors=self.errors)
+            fd = -1
+            return file_obj
+        finally:
+            if fd >= 0:
+                os.close(fd)
 
 
 class JSONFormatter(logging.Formatter):
@@ -159,10 +205,12 @@ def setup_logging(
     # Create log directory
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
+    resolved_level = safe_log_level(log_level)
+    safe_app_name = safe_log_filename(app_name)
 
     # Get root logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
+    root_logger.setLevel(resolved_level)
 
     # Remove existing handlers to avoid duplicates
     root_logger.handlers = []
@@ -170,7 +218,7 @@ def setup_logging(
     # Console handler (human-readable with colors)
     if console_output:
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(log_level)
+        console_handler.setLevel(resolved_level)
 
         if sys.stdout.isatty():  # Use colors only in interactive terminals
             console_formatter = ColoredConsoleFormatter(
@@ -191,9 +239,9 @@ def setup_logging(
         timestamp = datetime.now().strftime("%Y%m%d")
 
         # Main log file (all levels)
-        main_log_file = log_path / f"{app_name}_{timestamp}.log"
-        main_handler = logging.FileHandler(main_log_file, encoding="utf-8")
-        main_handler.setLevel(log_level)
+        main_log_file = log_path / safe_log_filename(f"{safe_app_name}_{timestamp}.log")
+        main_handler = NofollowFileHandler(main_log_file, encoding="utf-8")
+        main_handler.setLevel(resolved_level)
 
         if json_logs:
             main_handler.setFormatter(JSONFormatter())
@@ -209,8 +257,8 @@ def setup_logging(
         root_logger.addHandler(main_handler)
 
         # Error log file (ERROR and CRITICAL only)
-        error_log_file = log_path / f"{app_name}_errors_{timestamp}.log"
-        error_handler = logging.FileHandler(error_log_file, encoding="utf-8")
+        error_log_file = log_path / safe_log_filename(f"{safe_app_name}_errors_{timestamp}.log")
+        error_handler = NofollowFileHandler(error_log_file, encoding="utf-8")
         error_handler.setLevel(logging.ERROR)
 
         if json_logs:
@@ -314,4 +362,7 @@ __all__ = [
     "JSONFormatter",
     "ColoredConsoleFormatter",
     "LogContext",
+    "NofollowFileHandler",
+    "safe_log_level",
+    "safe_log_filename",
 ]

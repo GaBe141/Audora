@@ -5,7 +5,6 @@ This is the main application file that brings together all enhanced components.
 """
 
 import asyncio
-import json
 import logging
 import sys
 from datetime import datetime, timedelta
@@ -17,7 +16,8 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 # Import all enhanced components
 from analytics.advanced_analytics import MusicTrendAnalytics
-from core.data_store import EnhancedMusicDataStore
+from core.data_store import EnhancedMusicDataStore, database_path_from_config
+from core.logging_config import NofollowFileHandler, safe_log_level
 from core.notification_service import (
     EnhancedNotificationService,
     NotificationChannel,
@@ -25,6 +25,7 @@ from core.notification_service import (
     NotificationPriority,
 )
 from core.resilience import EnhancedResilience
+from core.utils import confine_relative_path, read_json, write_json
 from integrations.lastfm_integration import get_lastfm_client
 from integrations.social_discovery_engine import (
     SocialMusicDiscoveryEngine,
@@ -37,8 +38,8 @@ class EnhancedMusicDiscoveryApp:
 
     def __init__(self, config_dir: str = "config"):
         """Initialize the enhanced music discovery application."""
-        self.config_dir = Path(config_dir)
-        self.data_dir = Path("data")
+        self.config_dir = confine_relative_path(config_dir)
+        self.data_dir = confine_relative_path("data")
 
         # Load configurations
         self.configs = self._load_configurations()
@@ -49,9 +50,10 @@ class EnhancedMusicDiscoveryApp:
 
         # Initialize components
         self.resilience = EnhancedResilience()
-        self.data_store = EnhancedMusicDataStore(
-            self.configs.get("database", {}).get("path", "data/enhanced_music_trends.db")
+        configured_db = self.configs.get("database", {}).get(
+            "path", "data/enhanced_music_trends.db"
         )
+        self.data_store = EnhancedMusicDataStore(database_path_from_config(str(configured_db)))
         self.analytics = MusicTrendAnalytics(self.data_store)
         self.notifications = EnhancedNotificationService()
 
@@ -76,9 +78,12 @@ class EnhancedMusicDiscoveryApp:
         for config_type, filename in config_files.items():
             config_path = self.config_dir / filename
             try:
-                if config_path.exists():
-                    with open(config_path) as f:
-                        configs[config_type] = json.load(f)
+                if config_path.is_symlink():
+                    print(f"❌ Refusing symlinked config: {config_path}")
+                    configs[config_type] = {}
+                elif config_path.is_file():
+                    loaded = read_json(config_path, default={})
+                    configs[config_type] = loaded if isinstance(loaded, dict) else {}
                 else:
                     print(f"⚠️ Config file not found: {config_path}")
                     configs[config_type] = {}
@@ -92,19 +97,22 @@ class EnhancedMusicDiscoveryApp:
         """Set up comprehensive logging."""
         log_config = self.configs.get("system", {}).get("logging", {})
 
-        # Create logs directory
-        logs_dir = Path("logs")
+        # Create logs directory inside the project and ignore symlinks.
+        logs_dir = confine_relative_path("logs")
         logs_dir.mkdir(exist_ok=True)
 
-        # Configure logging
-        log_level = getattr(logging, log_config.get("level", "INFO"))
+        # Configure logging from an allowlist. Do not getattr() on the logging module.
+        try:
+            log_level = safe_log_level(str(log_config.get("level", "INFO")))
+        except ValueError:
+            log_level = logging.INFO
         log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
         handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
 
         if log_config.get("file_logging", True):
             log_file = logs_dir / f"music_discovery_{datetime.now().strftime('%Y%m%d')}.log"
-            handlers.append(logging.FileHandler(log_file))
+            handlers.append(NofollowFileHandler(log_file))
 
         logging.basicConfig(level=log_level, format=log_format, handlers=handlers)
 
@@ -273,17 +281,13 @@ class EnhancedMusicDiscoveryApp:
                                 },
                             }
                         )
-                    self.logger.info(
-                        f"✅ Last.fm: {len(discoveries) - before} tracks"
-                    )
+                    self.logger.info(f"✅ Last.fm: {len(discoveries) - before} tracks")
             except Exception as e:
                 self.logger.warning(f"⚠️ Last.fm unavailable: {e}")
 
         # --- Fallback: mock data when no API keys are configured ---
         if not discoveries:
-            self.logger.warning(
-                "No API sources returned data — using mock discovery engine"
-            )
+            self.logger.warning("No API sources returned data — using mock discovery engine")
             mock_engine = create_mock_discovery_data()
             mock_results = await mock_engine.discover_emerging_music(region="US")
             for platform_name, metrics_list in mock_results.items():
@@ -429,15 +433,12 @@ class EnhancedMusicDiscoveryApp:
                 )
 
                 # Save cycle results
-                results_file = (
-                    self.data_dir
+                results_file = confine_relative_path(
+                    Path("data")
                     / "reports"
                     / f"cycle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                 )
-                results_file.parent.mkdir(parents=True, exist_ok=True)
-
-                with open(results_file, "w") as f:
-                    json.dump(cycle_results, f, indent=2)
+                write_json(results_file, cycle_results)
 
                 # Wait for next cycle
                 await asyncio.sleep(interval_minutes * 60)
