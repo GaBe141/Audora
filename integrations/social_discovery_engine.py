@@ -11,10 +11,35 @@ from typing import Any
 
 import aiohttp
 
-from core.utils import write_json
-
-# Import our existing trending schema
+from core.utils import confine_relative_path, write_json
 from integrations.trending_schema import TrendingSchema
+
+
+class _NoRedirectSession:
+    """Session that ignores proxy env and never follows redirects."""
+
+    def __init__(self) -> None:
+        self._session = aiohttp.ClientSession(trust_env=False)
+
+    async def __aenter__(self) -> "_NoRedirectSession":
+        await self._session.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
+        return await self._session.__aexit__(exc_type, exc, tb)
+
+    def get(self, *args: Any, **kwargs: Any) -> Any:
+        kwargs["allow_redirects"] = False
+        return self._session.get(*args, **kwargs)
+
+    def post(self, *args: Any, **kwargs: Any) -> Any:
+        kwargs["allow_redirects"] = False
+        return self._session.post(*args, **kwargs)
+
+
+def credentialed_session() -> _NoRedirectSession:
+    """Open an API session that will not leak credentials to a redirect or proxy."""
+    return _NoRedirectSession()
 
 
 class Platform(Enum):
@@ -129,7 +154,7 @@ class TikTokMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with credentialed_session() as session:
                 headers = {"Authorization": f"Bearer {self.api_key}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:
@@ -152,7 +177,7 @@ class TikTokMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with credentialed_session() as session:
                 headers = {"Authorization": f"Bearer {self.api_key}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:
@@ -173,7 +198,7 @@ class TikTokMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with credentialed_session() as session:
                 headers = {"Authorization": f"Bearer {self.api_key}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:
@@ -210,7 +235,7 @@ class YouTubeMusicAPI:
 
         try:
             async with (
-                aiohttp.ClientSession() as session,
+                credentialed_session() as session,
                 session.get(endpoint, params=params) as response,
             ):
                 if response.status == 200:
@@ -241,7 +266,7 @@ class YouTubeMusicAPI:
 
         try:
             async with (
-                aiohttp.ClientSession() as session,
+                credentialed_session() as session,
                 session.get(endpoint, params=params) as response,
             ):
                 if response.status == 200:
@@ -265,7 +290,7 @@ class YouTubeMusicAPI:
 
         try:
             async with (
-                aiohttp.ClientSession() as session,
+                credentialed_session() as session,
                 session.get(endpoint, params=params) as response,
             ):
                 if response.status == 200:
@@ -298,7 +323,7 @@ class TwitterMusicAPI:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with credentialed_session() as session:
                 headers = {"Authorization": f"Bearer {self.bearer_token}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:
@@ -318,7 +343,7 @@ class TwitterMusicAPI:
         params = {"id": location_id}  # 1 = Worldwide, 23424977 = US
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with credentialed_session() as session:
                 headers = {"Authorization": f"Bearer {self.bearer_token}"}
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status == 200:
@@ -760,7 +785,7 @@ class SocialMusicDiscoveryEngine:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filepath = f"data/social_discovery_report_{timestamp}.json"
 
-        saved_path = write_json(filepath, report)
+        saved_path = write_json(confine_relative_path(filepath), report)
         return str(saved_path)
 
 
