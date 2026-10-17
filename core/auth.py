@@ -1,13 +1,11 @@
 """Spotify authentication module with secure configuration."""
 
-import os
-from pathlib import Path
-
 import spotipy
 from spotipy.cache_handler import CacheFileHandler
 from spotipy.oauth2 import SpotifyOAuth
 
 from .config import get_config
+from .utils import PROJECT_ROOT, ensure_private_file
 
 
 def get_client() -> spotipy.Spotify:
@@ -23,11 +21,8 @@ def get_client() -> spotipy.Spotify:
     """
     config_manager = get_config()
     spotify_config = config_manager.get_spotify_config()
-    cache_path = Path(".cache")
-    if not cache_path.exists():
-        cache_path.touch(mode=0o600, exist_ok=True)
-    elif os.name != "nt":
-        os.chmod(cache_path, 0o600)
+    cache_path = PROJECT_ROOT / ".cache"
+    ensure_private_file(cache_path)
 
     auth_manager = SpotifyOAuth(
         client_id=spotify_config["client_id"],
