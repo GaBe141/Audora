@@ -1,12 +1,20 @@
 """Shared utility functions for the Audora project."""
 
+import errno
+import io
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+_CSV_FORMULA_STARTS = ("=", "+", "-", "@")
+_CREDENTIAL_FILE_NAMES = {".env", ".cache"}
 
 # Re-export for convenience
 try:
@@ -15,6 +23,152 @@ try:
     HAS_PANDAS = True
 except ImportError:
     HAS_PANDAS = False
+
+
+def _is_credential_file(path: Path) -> bool:
+    """True for dotenv files and the Spotify token cache."""
+    name = path.name
+    return name in _CREDENTIAL_FILE_NAMES or name.startswith(".env.")
+
+
+def resolve_project_path(path: Path | str, *, base: Path | None = None) -> Path:
+    """Resolve a path and keep it inside the project root.
+
+    Relative paths cannot escape the root. Absolute paths are accepted only
+    when they already resolve inside the root. A symlinked final component is
+    refused so a data file cannot be pointed at a credential file.
+    """
+    root = (base if base is not None else PROJECT_ROOT).resolve()
+    raw = Path(path)
+    if not raw.is_absolute():
+        return confine_relative_path(raw, base=root)
+    if raw.is_symlink():
+        raise ValueError(f"Refusing to use a symlinked path: {raw}")
+    resolved = raw.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Path escapes the project root") from exc
+    return resolved
+
+
+def confine_relative_path(path: Path | str, *, base: Path | None = None) -> Path:
+    """Resolve a relative path and keep it inside the project root.
+
+    Absolute paths and a symlinked final component are rejected.
+    """
+    root = (base if base is not None else PROJECT_ROOT).resolve()
+    raw = Path(path)
+    if raw.is_absolute():
+        raise ValueError("Absolute paths are not allowed")
+    candidate = root / raw
+    if candidate.is_symlink():
+        raise ValueError("Refusing to use a symlinked path")
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Path escapes the project root") from exc
+    return resolved
+
+
+def _nofollow_flags(flags: int) -> int:
+    if hasattr(os, "O_NOFOLLOW"):
+        return flags | os.O_NOFOLLOW
+    return flags
+
+
+def _raise_if_symlink_error(exc: OSError) -> None:
+    if exc.errno == errno.ELOOP:
+        raise ValueError("Refusing to follow a symlink") from exc
+
+
+def read_nofollow_text(path: Path | str) -> str:
+    """Read a text file without following a final-component symlink."""
+    file_path = Path(path)
+    if file_path.is_symlink():
+        raise ValueError(f"Refusing to read a symlinked file: {file_path}")
+    fd = os.open(file_path, _nofollow_flags(os.O_RDONLY))
+    try:
+        handle = os.fdopen(fd, "r", encoding="utf-8")
+        fd = -1
+        with handle:
+            return handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def read_nofollow_bytes(path: Path | str) -> bytes:
+    """Read a file without following a final-component symlink."""
+    file_path = Path(path)
+    if file_path.is_symlink():
+        raise ValueError(f"Refusing to read a symlinked file: {file_path}")
+    fd = os.open(file_path, _nofollow_flags(os.O_RDONLY))
+    try:
+        handle = os.fdopen(fd, "rb")
+        fd = -1
+        with handle:
+            return handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def write_private_text(path: Path | str, content: str) -> Path:
+    """Write text with mode 600 without following a swapped-in symlink."""
+    file_path = Path(path)
+    if file_path.is_symlink():
+        raise ValueError(f"Refusing to write through a symlink: {file_path}")
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    flags = _nofollow_flags(os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    fd = os.open(file_path, flags, 0o600)
+    try:
+        if os.name != "nt":
+            os.fchmod(fd, 0o600)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        with handle:
+            handle.write(content)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    return file_path
+
+
+def ensure_private_file(path: Path | str) -> Path:
+    """Create a secret file if needed and force mode 600 without following a symlink."""
+    file_path = Path(path)
+    if file_path.is_symlink():
+        raise ValueError("Refusing to use a symlinked secret file")
+    if not file_path.exists():
+        return write_private_text(file_path, "")
+    if os.name == "nt":
+        return file_path
+    fd = os.open(file_path, _nofollow_flags(os.O_RDONLY))
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    return file_path
+
+
+def neutralize_csv_value(value: Any) -> Any:
+    """Prefix spreadsheet formula cells so exported CSV cannot execute them."""
+    if not isinstance(value, str) or value == "":
+        return value
+    probe = value.lstrip(" \t\r")
+    if probe.startswith(_CSV_FORMULA_STARTS):
+        return "'" + value
+    return value
+
+
+def neutralize_csv_frame(df: Any) -> Any:
+    """Neutralize formula-looking cells in every column of a DataFrame."""
+    neutralized = df.copy()
+    for column in neutralized.columns:
+        neutralized[column] = neutralized[column].map(neutralize_csv_value)
+    return neutralized
 
 
 # JSON utilities
@@ -32,10 +186,18 @@ def read_json(path: Path | str, default: Any = None) -> Any:
     Raises:
         json.JSONDecodeError: If JSON is malformed and no default provided
     """
-    path = Path(path)
+    path = resolve_project_path(path)
+    if _is_credential_file(path):
+        raise ValueError(f"Refusing to read a credential file: {path.name}")
+    if path.is_symlink():
+        raise ValueError(f"Refusing to read a symlinked JSON file: {path}")
+    fd = -1
     try:
-        with path.open("r", encoding="utf-8") as fh:
-            return json.load(fh)
+        fd = os.open(path, _nofollow_flags(os.O_RDONLY))
+        handle = os.fdopen(fd, "r", encoding="utf-8")
+        fd = -1
+        with handle:
+            return json.load(handle)
     except FileNotFoundError:
         if default is not None:
             logger.warning(f"JSON file not found: {path}, using default")
@@ -46,6 +208,12 @@ def read_json(path: Path | str, default: Any = None) -> Any:
         if default is not None:
             return default
         raise
+    except OSError as exc:
+        _raise_if_symlink_error(exc)
+        raise
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def write_json(
@@ -54,6 +222,8 @@ def write_json(
     indent: int = 2,
     ensure_ascii: bool = False,
     create_dirs: bool = True,
+    *,
+    private: bool = False,
 ) -> Path:
     """
     Write JSON file safely.
@@ -71,19 +241,38 @@ def write_json(
     Raises:
         Exception: If writing fails
     """
-    path = Path(path)
+    path = resolve_project_path(path)
+    if _is_credential_file(path):
+        raise ValueError(f"Refusing to write a credential file: {path.name}")
+    if path.is_symlink():
+        raise ValueError(f"Refusing to write a symlinked JSON file: {path}")
+    fd = -1
     try:
         if create_dirs:
             path.parent.mkdir(parents=True, exist_ok=True)
 
-        with path.open("w", encoding="utf-8") as fh:
-            json.dump(obj, fh, indent=indent, ensure_ascii=ensure_ascii, default=str)
+        flags = _nofollow_flags(os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+        mode = 0o600 if private else 0o644
+        fd = os.open(path, flags, mode)
+        if private and os.name != "nt":
+            os.fchmod(fd, 0o600)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        with handle:
+            json.dump(obj, handle, indent=indent, ensure_ascii=ensure_ascii, default=str)
 
         logger.debug(f"Wrote JSON to {path}")
         return path
+    except OSError as exc:
+        _raise_if_symlink_error(exc)
+        logger.error(f"Failed to write JSON to {path}: {exc}")
+        raise
     except Exception as e:
         logger.error(f"Failed to write JSON to {path}: {e}")
         raise
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> Path:  # pd.DataFrame
@@ -98,12 +287,25 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
     Returns:
         Path object of the written file
     """
-    filepath = Path(filepath)
+    filepath = resolve_project_path(filepath)
+    if _is_credential_file(filepath):
+        raise ValueError(f"Refusing to write a credential file: {filepath.name}")
+    if filepath.is_symlink():
+        raise ValueError(f"Refusing to write CSV through a symlink: {filepath}")
 
     if create_dirs:
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(filepath, index=False)
+    frame = neutralize_csv_frame(df)
+    fd = os.open(filepath, _nofollow_flags(os.O_WRONLY | os.O_CREAT | os.O_TRUNC), 0o644)
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8", newline="")
+        fd = -1
+        with handle:
+            frame.to_csv(handle, index=False)
+    finally:
+        if fd >= 0:
+            os.close(fd)
     logger.debug(f"Saved DataFrame to {filepath}")
     return filepath
 
@@ -198,14 +400,16 @@ def load_dataframe(
     if not HAS_PANDAS:
         raise ImportError("pandas is required for load_dataframe")
 
-    filepath = Path(filepath)
+    filepath = resolve_project_path(filepath)
+    if _is_credential_file(filepath):
+        raise ValueError(f"Refusing to read a credential file: {filepath.name}")
 
     if not filepath.exists():
         logger.warning(f"CSV file not found: {filepath}")
         return pd.DataFrame() if default_empty else None
 
     try:
-        df = pd.read_csv(filepath)
+        df = pd.read_csv(io.StringIO(read_nofollow_text(filepath)))
 
         # Validate required columns
         if required_columns:
@@ -346,10 +550,11 @@ def save_report(
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{prefix}_{timestamp_str}.json"
 
-    # Create full path
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    filepath = output_path / filename
+    safe_name = Path(filename).name
+    if safe_name in {"", ".", ".."}:
+        raise ValueError("Invalid report filename")
+    filepath = confine_relative_path(Path(output_dir) / safe_name)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:
