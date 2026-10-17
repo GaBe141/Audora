@@ -27,10 +27,13 @@ from core.utils import (
     is_sensitive_filename,
     load_dataframe,
     neutralize_csv_frame,
+    open_project_writer,
     read_json,
     redact_secrets,
     resolve_project_path,
     save_dataframe,
+    save_matplotlib_figure,
+    save_plotly_html,
     write_json,
 )
 from integrations.extended_platforms import safe_path_segment
@@ -70,10 +73,18 @@ class TestRedirectAndSsrf:
     def test_spotify_redirect_rejects_lookalike_hosts(self):
         validate_spotify_redirect_uri("http://127.0.0.1:8888/callback")
         validate_spotify_redirect_uri("http://localhost:8888/callback")
+        validate_spotify_redirect_uri("http://127.0.0.1./callback")
         for uri in (
             "http://localhost.evil.com/callback",
             "http://127.0.0.1.evil.com/callback",
             "http://127.0.0.1@evil.com/callback",
+            "http://@127.0.0.1/callback",
+            "http://127.0.0.1../callback",
+            "http://localhost../callback",
+            "http://127.0.0.1:8888../callback",
+            "http://127.0.0.1:08888/callback",
+            "http://127.0.0.1:8888%40evil.com/callback",
+            "http://127.0.0.1:8888/callback#",
             "http://127.1/callback",
             "https://127.0.0.1/callback",
             "http://127.0.0.1:8888/callback\r\nSet-Cookie",
@@ -268,6 +279,40 @@ class TestProjectPathConfinement:
                 write_json(credential, {"x": 1})
             with pytest.raises(ValueError, match="credential"):
                 save_dataframe(pd.DataFrame({"a": [1]}), credential)
+
+    def test_figure_writer_refuses_symlink_escape_and_credentials(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
+        outside = tmp_path.parent / "secret-figure.txt"
+        outside.write_bytes(b"do-not-touch")
+        link = tmp_path / "chart.png"
+        link.symlink_to(outside)
+        parent_link = tmp_path / "out"
+        parent_link.symlink_to(tmp_path.parent)
+
+        class _FakeFigure:
+            def __init__(self) -> None:
+                self.kwargs: dict[str, object] | None = None
+
+            def savefig(self, handle, **kwargs) -> None:
+                self.kwargs = kwargs
+                handle.write(b"PNG")
+
+            def to_html(self) -> str:
+                return "<html>chart</html>"
+
+        for target in (link, outside, parent_link / "secret-figure.txt", tmp_path / ".env"):
+            with pytest.raises(ValueError), open_project_writer(target, binary=True) as handle:
+                handle.write(b"overwritten")
+        assert outside.read_bytes() == b"do-not-touch"
+
+        figure = _FakeFigure()
+        written = save_matplotlib_figure(figure, "data/chart.png", dpi=150)
+        assert written.read_bytes() == b"PNG"
+        assert figure.kwargs is not None
+        assert figure.kwargs["format"] == "png"
+        html_path = save_plotly_html(figure, "demo_visualizations/chart.html")
+        assert html_path.read_text(encoding="utf-8") == "<html>chart</html>"
+        assert outside.read_bytes() == b"do-not-touch"
 
     def test_email_refuses_secret_and_database_attachments(self, tmp_path, monkeypatch):
         monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
