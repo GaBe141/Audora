@@ -365,6 +365,11 @@ class TestProjectPathConfinement:
             "id_ed25519_sk",
             ".envrc",
             "../secret.env",
+            "ENV~1",
+            "CREDEN~1.JSO",
+            "NOTIFI~1.JSO",
+            "ID_RSA~1",
+            "TRENDS~1.SQL",
         ):
             message = NotificationMessage(
                 title="Report",
@@ -455,9 +460,33 @@ class TestSecretRedactionAndDashboardHost:
         assert is_sensitive_filename(".envrc")
         assert is_sensitive_filename(".envrc.local")
         assert is_sensitive_filename("authorized_keys2")
+        assert is_sensitive_filename("ENV~1")
+        assert is_sensitive_filename("env~2")
+        assert is_sensitive_filename("ENV~1.LOC")
+        assert is_sensitive_filename("ENVRC~1")
+        assert is_sensitive_filename("ID_RSA~1")
+        assert is_sensitive_filename("ID_ED2~1")
+        assert is_sensitive_filename("AUTHOR~1")
+        assert is_sensitive_filename("CREDEN~1.JSO")
+        assert is_sensitive_filename("CREDEN~1")
+        assert is_sensitive_filename("NOTIFI~1.JSO")
+        assert is_sensitive_filename("ENHANC~1.JSO")
+        assert is_sensitive_filename("SOCIAL~1.JSO")
+        assert is_sensitive_filename("ID_RSA~1.BAC")
+        assert is_sensitive_filename("..env.swp")
+        assert is_sensitive_filename("TRENDS~1.SQL")
+        assert is_sensitive_filename("MUSIC~1.SQ~")
+        assert is_sensitive_filename("VAULT~1.KDB")
+        assert is_sensitive_filename("PROD~1.TFS")
+        assert is_sensitive_filename("TRENDS~1.DB-")
+        assert is_sensitive_filename("MY0DB9~1.CNF")
         assert not is_sensitive_filename("my_credentials.csv")
+        assert not is_sensitive_filename("MY_CRE~1.CSV")
         assert not is_sensitive_filename("report.csv")
+        assert not is_sensitive_filename("CREDEN~1.CSV")
+        assert not is_sensitive_filename("NOTES~1.TXT")
         assert not is_sensitive_filename("id_safe")
+        assert not is_sensitive_filename("ID_SAF~1")
         (tmp_path / "config").mkdir()
         write_json("config/notification_config.json", {"email": {"password": "secret"}})
         assert read_json("config/notification_config.json")["email"]["password"] == "secret"
@@ -467,6 +496,12 @@ class TestSecretRedactionAndDashboardHost:
             read_json("config/notification_config.json.backup")
         with pytest.raises(ValueError, match="credential"):
             read_json(".id_rsa.swp")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("NOTIFI~1.JSO")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("ENV~1")
+        with pytest.raises(ValueError, match="credential"):
+            load_dataframe("TRENDS~1.SQL")
         with pytest.raises(ValueError, match="credential"):
             load_dataframe("config/notification_config.json")
         with pytest.raises(ValueError, match="credential"):
