@@ -29,6 +29,12 @@ _SECRET_FILE_NAMES = {
     "id_ecdsa",
     "id_ed25519",
     "credentials.json",
+    "credentials",
+    ".pgpass",
+    ".my.cnf",
+    ".htpasswd",
+    ".boto",
+    ".s3cfg",
     "authorized_keys",
     "notification_config.json",
     "enhanced_api_config.json",
@@ -53,6 +59,10 @@ _SECRET_FILE_SUFFIXES = (
     ".key",
     ".p12",
     ".pfx",
+    ".ppk",
+    ".kdbx",
+    ".p8",
+    ".tfstate",
 )
 _DISGUISED_FILE_SUFFIXES = (
     ".bak",
