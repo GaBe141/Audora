@@ -17,7 +17,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 # Import all enhanced components
 from analytics.advanced_analytics import MusicTrendAnalytics
-from core.data_store import EnhancedMusicDataStore
+from core.data_store import EnhancedMusicDataStore, database_path_from_config
 from core.notification_service import (
     EnhancedNotificationService,
     NotificationChannel,
@@ -25,6 +25,7 @@ from core.notification_service import (
     NotificationPriority,
 )
 from core.resilience import EnhancedResilience
+from core.utils import confine_relative_path, read_nofollow_text, write_json
 from integrations.lastfm_integration import get_lastfm_client
 from integrations.social_discovery_engine import (
     SocialMusicDiscoveryEngine,
@@ -37,8 +38,10 @@ class EnhancedMusicDiscoveryApp:
 
     def __init__(self, config_dir: str = "config"):
         """Initialize the enhanced music discovery application."""
-        self.config_dir = Path(config_dir)
-        self.data_dir = Path("data")
+        self.config_dir = confine_relative_path(config_dir)
+        self.data_dir = confine_relative_path("data")
+        if self.config_dir.is_symlink() or self.data_dir.is_symlink():
+            raise OSError("Refusing to use a symlinked config or data directory")
 
         # Load configurations
         self.configs = self._load_configurations()
@@ -49,9 +52,10 @@ class EnhancedMusicDiscoveryApp:
 
         # Initialize components
         self.resilience = EnhancedResilience()
-        self.data_store = EnhancedMusicDataStore(
-            self.configs.get("database", {}).get("path", "data/enhanced_music_trends.db")
+        configured_db = self.configs.get("database", {}).get(
+            "path", "data/enhanced_music_trends.db"
         )
+        self.data_store = EnhancedMusicDataStore(database_path_from_config(str(configured_db)))
         self.analytics = MusicTrendAnalytics(self.data_store)
         self.notifications = EnhancedNotificationService()
 
@@ -77,8 +81,7 @@ class EnhancedMusicDiscoveryApp:
             config_path = self.config_dir / filename
             try:
                 if config_path.exists():
-                    with open(config_path) as f:
-                        configs[config_type] = json.load(f)
+                    configs[config_type] = json.loads(read_nofollow_text(config_path))
                 else:
                     print(f"⚠️ Config file not found: {config_path}")
                     configs[config_type] = {}
@@ -273,17 +276,13 @@ class EnhancedMusicDiscoveryApp:
                                 },
                             }
                         )
-                    self.logger.info(
-                        f"✅ Last.fm: {len(discoveries) - before} tracks"
-                    )
+                    self.logger.info(f"✅ Last.fm: {len(discoveries) - before} tracks")
             except Exception as e:
                 self.logger.warning(f"⚠️ Last.fm unavailable: {e}")
 
         # --- Fallback: mock data when no API keys are configured ---
         if not discoveries:
-            self.logger.warning(
-                "No API sources returned data — using mock discovery engine"
-            )
+            self.logger.warning("No API sources returned data — using mock discovery engine")
             mock_engine = create_mock_discovery_data()
             mock_results = await mock_engine.discover_emerging_music(region="US")
             for platform_name, metrics_list in mock_results.items():
@@ -434,10 +433,7 @@ class EnhancedMusicDiscoveryApp:
                     / "reports"
                     / f"cycle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                 )
-                results_file.parent.mkdir(parents=True, exist_ok=True)
-
-                with open(results_file, "w") as f:
-                    json.dump(cycle_results, f, indent=2)
+                write_json(results_file, cycle_results)
 
                 # Wait for next cycle
                 await asyncio.sleep(interval_minutes * 60)
