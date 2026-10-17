@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from core.utils import save_matplotlib_figure
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
@@ -132,7 +134,7 @@ def plot_personal_vs_global_artists(
     plt.tight_layout()
 
     out_path = DATA_DIR / "personal_vs_global_trends.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
 
@@ -245,7 +247,7 @@ def plot_genre_popularity_matrix(
     plt.tight_layout()
 
     out_path = DATA_DIR / "global_genre_matrix.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
 
@@ -367,6 +369,6 @@ def plot_listening_influence_analysis(
     plt.tight_layout()
 
     out_path = DATA_DIR / "listening_influence_analysis.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    save_matplotlib_figure(plt, out_path, dpi=150, bbox_inches="tight")
     plt.close()
     return out_path
