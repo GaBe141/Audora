@@ -11,7 +11,7 @@ from typing import Any
 
 import aiohttp
 
-from core.utils import confine_relative_path, write_json
+from core.utils import confine_relative_path, redact_secrets, write_json
 from integrations.trending_schema import TrendingSchema
 
 
@@ -164,7 +164,7 @@ class TikTokMusicAPI:
                         print(f"TikTok API error: {response.status}")
                         return []
         except Exception as e:
-            print(f"TikTok API exception: {e}")
+            print(f"TikTok API exception: {redact_secrets(e)}")
             return []
 
     async def get_sound_analytics(self, sound_id: str) -> dict[str, Any]:
@@ -185,7 +185,7 @@ class TikTokMusicAPI:
                     else:
                         return {"error": f"API error: {response.status}"}
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": redact_secrets(e)}
 
     async def track_hashtag_music(self, hashtag: str) -> list[dict[str, Any]]:
         """Track music associated with trending hashtags."""
@@ -207,7 +207,7 @@ class TikTokMusicAPI:
                     else:
                         return []
         except Exception as e:
-            print(f"Hashtag music tracking error: {e}")
+            print(f"Hashtag music tracking error: {redact_secrets(e)}")
             return []
 
 
@@ -245,7 +245,7 @@ class YouTubeMusicAPI:
                     print(f"YouTube API error: {response.status}")
                     return []
         except Exception as e:
-            print(f"YouTube API exception: {e}")
+            print(f"YouTube API exception: {redact_secrets(e)}")
             return []
 
     async def search_music_by_keyword(
@@ -275,7 +275,7 @@ class YouTubeMusicAPI:
                 else:
                     return []
         except Exception as e:
-            print(f"YouTube search error: {e}")
+            print(f"YouTube search error: {redact_secrets(e)}")
             return []
 
     async def get_video_analytics(self, video_id: str) -> dict[str, Any]:
@@ -300,7 +300,7 @@ class YouTubeMusicAPI:
                 else:
                     return {"error": f"API error: {response.status}"}
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": redact_secrets(e)}
 
 
 class TwitterMusicAPI:
@@ -333,7 +333,7 @@ class TwitterMusicAPI:
                         print(f"Twitter API error: {response.status}")
                         return []
         except Exception as e:
-            print(f"Twitter API exception: {e}")
+            print(f"Twitter API exception: {redact_secrets(e)}")
             return []
 
     async def get_trending_music_hashtags(self, location_id: int = 1) -> list[dict[str, Any]]:
@@ -369,7 +369,7 @@ class TwitterMusicAPI:
                     else:
                         return []
         except Exception as e:
-            print(f"Twitter trends error: {e}")
+            print(f"Twitter trends error: {redact_secrets(e)}")
             return []
 
 
