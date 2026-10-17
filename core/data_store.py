@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sqlite3
+import stat
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -1013,19 +1014,41 @@ class EnhancedMusicDataStore:
             }
 
     def create_backup(self) -> str:
-        """Create a backup of the database."""
+        """Create a backup of the database.
+
+        The copy is written through the descriptor opened with ``O_NOFOLLOW``.
+        Re-opening the path would follow a symlink swapped in after creation
+        and dump the database onto an attacker-chosen file.
+        """
         backup_filename = f"music_trends_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
         backup_path = self.backup_dir / backup_filename
         if backup_path.exists() or backup_path.is_symlink():
             raise ValueError("Refusing to overwrite an existing backup path")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         fd = os.open(backup_path, flags, 0o600)
-        os.close(fd)
-
-        with self.get_connection() as source_conn, sqlite3.connect(backup_path) as backup_conn:
-            source_conn.backup(backup_conn)
+        try:
+            if os.name != "nt":
+                os.fchmod(fd, 0o600)
+            identity = os.fstat(fd)
+            uri = f"file:///proc/self/fd/{fd}?mode=rw"
+            with (
+                self.get_connection() as source_conn,
+                sqlite3.connect(uri, uri=True) as backup_conn,
+            ):
+                backup_conn.execute("PRAGMA journal_mode=OFF")
+                source_conn.backup(backup_conn)
+                backup_conn.commit()
+            current = os.lstat(backup_path)
+            if (
+                stat.S_ISLNK(current.st_mode)
+                or current.st_ino != identity.st_ino
+                or current.st_dev != identity.st_dev
+            ):
+                raise ValueError("Backup path changed while the database was being copied")
+        finally:
+            os.close(fd)
         _lock_down_file(backup_path)
 
         self.logger.info(f"Database backup created: {backup_path}")
