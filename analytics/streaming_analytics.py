@@ -1,6 +1,7 @@
 """Advanced integration of statistical analysis with multi-source streaming data."""
 
 import sys
+import traceback
 import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ sys.path.append(str(Path(__file__).parent / "src"))
 sys.path.append(str(Path(__file__).parent.parent / "core"))
 
 from analytics.statistical_analysis import StreamingDataQualityAnalyzer, StreamingForecastingEngine
+from core.utils import load_dataframe, resolve_project_path, write_json, write_private_text
 from visualization.statistical_viz import (
     StatisticalVisualizationEngine,
     visualize_comprehensive_results,
@@ -64,7 +66,9 @@ class AdvancedStreamingAnalytics:
             file_path = self.data_dir / filename
             if file_path.exists():
                 try:
-                    df = pd.read_csv(file_path)
+                    df = load_dataframe(file_path, default_empty=False)
+                    if df is None:
+                        continue
                     loaded_data[source] = df
                     if self.verbose:
                         print(f"   ✅ {source}: {len(df)} rows, {len(df.columns)} columns")
@@ -452,7 +456,7 @@ class AdvancedStreamingAnalytics:
         """Create comprehensive analysis report with visualizations."""
         print("\n📊 Creating comprehensive analysis report...")
 
-        output_path = Path(output_dir)
+        output_path = resolve_project_path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
         # Combine all results
@@ -470,9 +474,6 @@ class AdvancedStreamingAnalytics:
                 "forecast_analyses": len(self.forecasts),
             },
         }
-
-        # Save results using centralized utility
-        from core.utils import write_json
 
         results_file = output_path / "comprehensive_analysis_results.json"
         write_json(str(results_file), comprehensive_results)
@@ -500,38 +501,33 @@ class AdvancedStreamingAnalytics:
         return str(output_path)
 
     def _create_text_summary(self, results: dict[str, Any], output_file: Path):
-        """Create human-readable text summary."""
-        with output_file.open("w") as f:
-            f.write("SPOTIFY INSIGHTS - ADVANCED STATISTICAL ANALYSIS REPORT\n")
-            f.write("=" * 60 + "\n\n")
-
-            f.write(f"Generated: {results['timestamp']}\n")
-            f.write(f"Analysis Type: {results['analysis_type']}\n\n")
-
-            # Summary section
-            summary = results.get("summary", {})
-            f.write("EXECUTIVE SUMMARY\n")
-            f.write("-" * 20 + "\n")
-            f.write(f"Data Sources Analyzed: {summary.get('total_sources', 0)}\n")
-            f.write(f"Datasets Processed: {summary.get('processed_datasets', 0)}\n")
-            f.write(f"Quality Analyses: {summary.get('quality_analyses', 0)}\n")
-            f.write(f"Forecast Analyses: {summary.get('forecast_analyses', 0)}\n\n")
-
-            # Insights section
-            insights = results.get("insights", {})
-            if insights:
-                f.write("KEY INSIGHTS\n")
-                f.write("-" * 15 + "\n")
-
-                for insight_type, insight_list in insights.items():
-                    if isinstance(insight_list, list) and insight_list:
-                        f.write(f"\n{insight_type.upper().replace('_', ' ')}:\n")
-                        for insight in insight_list:
-                            f.write(f"  • {insight}\n")
-
-            f.write(
-                "\nFor detailed results and visualizations, see the JSON file and visualization folder.\n"
-            )
+        """Create human-readable text summary without following a symlink."""
+        lines = [
+            "SPOTIFY INSIGHTS - ADVANCED STATISTICAL ANALYSIS REPORT",
+            "=" * 60,
+            "",
+            f"Generated: {results['timestamp']}",
+            f"Analysis Type: {results['analysis_type']}",
+            "",
+            "EXECUTIVE SUMMARY",
+            "-" * 20,
+            f"Data Sources Analyzed: {results.get('summary', {}).get('total_sources', 0)}",
+            f"Datasets Processed: {results.get('summary', {}).get('processed_datasets', 0)}",
+            f"Quality Analyses: {results.get('summary', {}).get('quality_analyses', 0)}",
+            f"Forecast Analyses: {results.get('summary', {}).get('forecast_analyses', 0)}",
+            "",
+        ]
+        insights = results.get("insights", {})
+        if insights:
+            lines.extend(["KEY INSIGHTS", "-" * 15])
+            for insight_type, insight_list in insights.items():
+                if isinstance(insight_list, list) and insight_list:
+                    lines.append(f"\n{insight_type.upper().replace('_', ' ')}:")
+                    lines.extend(f"  • {insight}" for insight in insight_list)
+        lines.append(
+            "\nFor detailed results and visualizations, see the JSON file and visualization folder.\n"
+        )
+        write_private_text(resolve_project_path(output_file), "\n".join(lines))
 
     def run_complete_analysis(self) -> str:
         """Run the complete advanced analytics pipeline."""
@@ -569,8 +565,6 @@ class AdvancedStreamingAnalytics:
 
         except Exception as e:
             print(f"\n❌ Pipeline failed: {e}")
-            import traceback
-
             traceback.print_exc()
             return ""
 
