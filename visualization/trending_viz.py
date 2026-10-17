@@ -6,7 +6,7 @@ Creates interactive charts and dashboards for trending analysis.
 import warnings
 from typing import Any, cast
 
-from core.utils import read_json, resolve_project_path
+from core.utils import read_json, resolve_project_path, save_matplotlib_figure, save_plotly_html
 
 # Avoid heavy imports at module load; import within functions when needed
 
@@ -201,7 +201,7 @@ class TrendingVisualizationEngine:
         plt.tight_layout()
 
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+            save_matplotlib_figure(plt, save_path, dpi=300, bbox_inches="tight")
             print(f"📊 Trending timeline saved to {save_path}")
 
         plt.show()
@@ -385,7 +385,7 @@ class TrendingVisualizationEngine:
         fig.update_xaxes(title_text="Momentum", row=2, col=2)
 
         if save_path:
-            fig.write_html(save_path)
+            save_plotly_html(fig, save_path)
             print(f"📊 Interactive dashboard saved to {save_path}")
 
         fig.show()
@@ -431,7 +431,7 @@ class TrendingVisualizationEngine:
         plt.tight_layout()
 
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+            save_matplotlib_figure(plt, save_path, dpi=300, bbox_inches="tight")
             print(f"📊 Trending heatmap saved to {save_path}")
 
         plt.show()
@@ -521,7 +521,7 @@ class TrendingVisualizationEngine:
         plt.tight_layout()
 
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+            save_matplotlib_figure(plt, save_path, dpi=300, bbox_inches="tight")
             print(f"📊 Trend predictions saved to {save_path}")
 
         plt.show()
