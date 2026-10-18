@@ -277,7 +277,9 @@ class EnhancedNotificationService:
                     user_config = read_json(config_path)
                     self._deep_merge(default_config, user_config)
             except Exception as e:
-                self.logger.error(f"Failed to load config file {config_file}: {e}")
+                self.logger.error(
+                    "Failed to load config file %s: %s", config_file, redact_secrets(e)
+                )
 
         # Also attempt to load from default config path
         if not config_file:
@@ -287,7 +289,7 @@ class EnhancedNotificationService:
                     user_config = read_json(default_path)
                     self._deep_merge(default_config, user_config)
             except Exception as e:
-                self.logger.warning(f"Could not load notification config: {e}")
+                self.logger.warning("Could not load notification config: %s", redact_secrets(e))
 
         return default_config
 
@@ -304,7 +306,7 @@ class EnhancedNotificationService:
         try:
             config_path = self._notification_config_path(path)
         except ValueError as e:
-            self.logger.error(f"Failed to save notification config: {e}")
+            self.logger.error("Failed to save notification config: %s", redact_secrets(e))
             raise
         # Only save channel-specific sections (not internal runtime state)
         saveable_keys = [
@@ -321,7 +323,7 @@ class EnhancedNotificationService:
             write_json(config_path, to_save, private=True)
             self.logger.info(f"Notification config saved to {config_path}")
         except Exception as e:
-            self.logger.error(f"Failed to save notification config: {e}")
+            self.logger.error("Failed to save notification config: %s", redact_secrets(e))
             raise
 
     def _env_flag(self, name: str) -> bool:
@@ -334,6 +336,36 @@ class EnhancedNotificationService:
     def _allow_private_smtp(self) -> bool:
         """Whether RFC1918 SMTP servers are allowed."""
         return self._env_flag("AUDORA_ALLOW_PRIVATE_SMTP")
+
+    def _delivery_secrets(self, channel: NotificationChannel) -> tuple[str, ...]:
+        """Values that must not be repeated in an error for this channel.
+
+        Custom webhook URLs are the credential. Slack and Discord token URLs
+        are credentials too, including paths the provider patterns do not name.
+        """
+        if channel is NotificationChannel.EMAIL:
+            email = self.config.get("email", {})
+            return (str(email.get("password", "")),)
+        if channel is NotificationChannel.SLACK:
+            return (str(self.config.get("slack", {}).get("webhook_url", "")),)
+        if channel is NotificationChannel.DISCORD:
+            return (str(self.config.get("discord", {}).get("webhook_url", "")),)
+        if channel is NotificationChannel.WEBHOOK:
+            return (str(self.config.get("webhook", {}).get("url", "")),)
+        if channel is NotificationChannel.SMS:
+            sms = self.config.get("sms", {})
+            return (str(sms.get("api_secret", "")), str(sms.get("api_key", "")))
+        if channel is NotificationChannel.CONSOLE:
+            return ()
+        return ()
+
+    def _redact_delivery_error(self, channel: NotificationChannel, error: Any, *extra: str) -> str:
+        """Redact provider patterns and this channel's exact secrets.
+
+        ``extra`` covers a URL after validation strips it, which can differ
+        from the value still stored on the channel config.
+        """
+        return redact_secrets(error, *self._delivery_secrets(channel), *extra)
 
     def _unwrap_ip(self, parsed: ipaddress.IPv4Address | ipaddress.IPv6Address):
         if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
@@ -754,7 +786,10 @@ System status: {{ system_status }}
                 if channel in self.channel_handlers:
                     result = await self.channel_handlers[channel](message)
                     if isinstance(result, dict) and result.get("error"):
-                        result = {**result, "error": redact_secrets(result["error"])}
+                        result = {
+                            **result,
+                            "error": self._redact_delivery_error(channel, result["error"]),
+                        }
                     delivery_results[channel.value] = result
 
                     if result.get("success", False):
@@ -766,14 +801,15 @@ System status: {{ system_status }}
                     failed_channels.append(channel.value)
 
             except Exception as e:
+                safe_error = self._redact_delivery_error(channel, e)
                 self.logger.error(
                     "Failed to send notification via %s: %s",
                     channel.value,
-                    redact_secrets(e),
+                    safe_error,
                 )
                 delivery_results[channel.value] = {
                     "success": False,
-                    "error": redact_secrets(e),
+                    "error": safe_error,
                 }
                 failed_channels.append(channel.value)
 
@@ -926,8 +962,9 @@ System status: {{ system_status }}
             return {"success": True, "recipients": len(email_config["recipients"])}
 
         except Exception as e:
-            self.logger.error("Failed to send email notification: %s", redact_secrets(e))
-            return {"success": False, "error": redact_secrets(e)}
+            safe_error = self._redact_delivery_error(NotificationChannel.EMAIL, e)
+            self.logger.error("Failed to send email notification: %s", safe_error)
+            return {"success": False, "error": safe_error}
 
     async def _send_slack(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification to Slack."""
@@ -993,14 +1030,16 @@ System status: {{ system_status }}
             if status == 200:
                 self.logger.info("Slack notification sent successfully")
                 return {"success": True, "status_code": status}
-            self.logger.error(
-                "Slack notification failed: %s - %s", status, redact_secrets(error_text)
+            safe_error = self._redact_delivery_error(
+                NotificationChannel.SLACK, f"HTTP {status}: {error_text}", webhook_url
             )
-            return {"success": False, "error": redact_secrets(f"HTTP {status}: {error_text}")}
+            self.logger.error("Slack notification failed: %s - %s", status, safe_error)
+            return {"success": False, "error": safe_error}
 
         except Exception as e:
-            self.logger.error("Failed to send Slack notification: %s", redact_secrets(e))
-            return {"success": False, "error": redact_secrets(e)}
+            safe_error = self._redact_delivery_error(NotificationChannel.SLACK, e, webhook_url)
+            self.logger.error("Failed to send Slack notification: %s", safe_error)
+            return {"success": False, "error": safe_error}
 
     async def _send_discord(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification to Discord."""
@@ -1058,14 +1097,16 @@ System status: {{ system_status }}
             if status in [200, 204]:
                 self.logger.info("Discord notification sent successfully")
                 return {"success": True, "status_code": status}
-            self.logger.error(
-                "Discord notification failed: %s - %s", status, redact_secrets(error_text)
+            safe_error = self._redact_delivery_error(
+                NotificationChannel.DISCORD, f"HTTP {status}: {error_text}", webhook_url
             )
-            return {"success": False, "error": redact_secrets(f"HTTP {status}: {error_text}")}
+            self.logger.error("Discord notification failed: %s - %s", status, safe_error)
+            return {"success": False, "error": safe_error}
 
         except Exception as e:
-            self.logger.error("Failed to send Discord notification: %s", redact_secrets(e))
-            return {"success": False, "error": redact_secrets(e)}
+            safe_error = self._redact_delivery_error(NotificationChannel.DISCORD, e, webhook_url)
+            self.logger.error("Failed to send Discord notification: %s", safe_error)
+            return {"success": False, "error": safe_error}
 
     def _get_priority_color(self, priority: NotificationPriority) -> int:
         """Get Discord embed color based on priority."""
@@ -1120,14 +1161,16 @@ System status: {{ system_status }}
             if 200 <= status < 300:
                 self.logger.info(f"Webhook notification sent successfully: {status}")
                 return {"success": True, "status_code": status}
-            self.logger.error(
-                "Webhook notification failed: %s - %s", status, redact_secrets(error_text)
+            safe_error = self._redact_delivery_error(
+                NotificationChannel.WEBHOOK, f"HTTP {status}: {error_text}", url
             )
-            return {"success": False, "error": redact_secrets(f"HTTP {status}: {error_text}")}
+            self.logger.error("Webhook notification failed: %s - %s", status, safe_error)
+            return {"success": False, "error": safe_error}
 
         except Exception as e:
-            self.logger.error("Failed to send webhook notification: %s", redact_secrets(e))
-            return {"success": False, "error": redact_secrets(e)}
+            safe_error = self._redact_delivery_error(NotificationChannel.WEBHOOK, e, url)
+            self.logger.error("Failed to send webhook notification: %s", safe_error)
+            return {"success": False, "error": safe_error}
 
     async def _send_console(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification to console."""
@@ -1159,8 +1202,9 @@ System status: {{ system_status }}
             return {"success": True, "method": "console"}
 
         except Exception as e:
-            self.logger.error(f"Failed to send console notification: {e}")
-            return {"success": False, "error": redact_secrets(e)}
+            safe_error = self._redact_delivery_error(NotificationChannel.CONSOLE, e)
+            self.logger.error("Failed to send console notification: %s", safe_error)
+            return {"success": False, "error": safe_error}
 
     async def _send_sms(self, message: NotificationMessage) -> dict[str, Any]:
         """Send notification via SMS."""
