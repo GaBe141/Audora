@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import requests
+
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -1094,6 +1096,30 @@ def _redact_oauth_field(match: re.Match[str]) -> str:
         return match.group(0)
     prefix = match.group(0)[: -len(token)]
     return f"{prefix}REDACTED"
+
+
+class _NoRedirectRequestsSession(requests.Session):
+    """Requests session that ignores proxy and CA environment and never follows redirects.
+
+    A stock ``requests.Session`` trusts ``HTTPS_PROXY`` and ``REQUESTS_CA_BUNDLE``.
+    Spotipy posts the client secret, authorization code, and refresh token with
+    that session. A custom CA plus a proxy can read the body, and a 307 response
+    replays the same body to the redirect target. ``trust_env`` is set in
+    ``__init__`` because ``merge_environment_settings`` reads it per request.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.trust_env = False
+
+    def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        kwargs["allow_redirects"] = False
+        return super().request(method, url, **kwargs)
+
+
+def credentialed_requests_session() -> requests.Session:
+    """Open a requests session that will not leak credentials to a proxy or a redirect."""
+    return _NoRedirectRequestsSession()
 
 
 def redact_secrets(value: Any, *known_secrets: str) -> str:

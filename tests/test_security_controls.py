@@ -6,6 +6,8 @@ import inspect
 import json
 import os
 import sqlite3
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import aiohttp
@@ -25,6 +27,7 @@ from core.notification_service import (
 from core.utils import (
     JsonTokenCache,
     _windows_short_aliases,
+    credentialed_requests_session,
     dashboard_request_allowed,
     is_sensitive_filename,
     load_dataframe,
@@ -604,6 +607,63 @@ class TestSecretRedactionAndDashboardHost:
         assert long_letters not in redact_secrets(f"'code': '{long_letters}'")
         short_word = "a" * 30
         assert short_word in redact_secrets(f"?code={short_word}")
+
+    def test_spotify_session_ignores_proxy_ca_and_redirects(self, monkeypatch):
+        """Spotipy must not send the refresh token through env proxy, CA, or a 307."""
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/tmp/attacker-ca.pem")
+        monkeypatch.setenv("CURL_CA_BUNDLE", "/tmp/attacker-ca.pem")
+        session = credentialed_requests_session()
+        assert session.trust_env is False
+        settings = session.merge_environment_settings(
+            "https://accounts.spotify.com/api/token",
+            {},
+            False,
+            True,
+            None,
+        )
+        assert settings["proxies"] == {}
+        assert settings["verify"] is True
+
+        hits: list[str] = []
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                hits.append(self.path)
+                body = b"not-the-refresh-token"
+                self.send_response(307)
+                self.send_header("Location", "http://127.0.0.1:9/stolen")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = server.server_address[1]
+            response = session.post(
+                f"http://127.0.0.1:{port}/token",
+                data={"refresh_token": "super-secret-refresh-token"},
+                timeout=5,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert response.status_code == 307
+        assert hits == ["/token"]
+        assert response.headers["Location"].endswith("/stolen")
+        auth_source = (
+            Path(__file__)
+            .resolve()
+            .parents[1]
+            .joinpath("core", "auth.py")
+            .read_text(encoding="utf-8")
+        )
+        assert auth_source.count("credentialed_requests_session()") == 2
 
     def test_redacts_live_environment_secrets(self, monkeypatch):
         monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "spotify-live-secret")
