@@ -584,6 +584,34 @@ class TestSecretRedactionAndDashboardHost:
         assert is_sensitive_filename("#EBCAB~1.TXT")
         assert is_sensitive_filename("#EBCAB~1.TX~")
         for long_name in (
+            "#.env.canary.swp#",
+            "#.env.nightly.swp#",
+            "#.env.txt.swp#",
+            "#.env.csv.swp#",
+            "#.env.canary.local.swp#",
+            "#.env.canary.swo#",
+            "#.env.canary.swn#",
+            "#.env.canary.swx#",
+            ".#.env.canary.swp#",
+            ".env.canary.swp~",
+            ".env.nightly.swo~",
+            ".env.txt.swp~",
+        ):
+            aliases = _windows_short_aliases(long_name)
+            assert any(alias.endswith(".sw~") for alias in aliases), long_name
+            for alias in aliases:
+                assert is_sensitive_filename(alias), alias
+                assert is_sensitive_filename(alias.upper() + "::$DATA"), alias
+        assert is_sensitive_filename("#ENVCA~1.SW~")
+        assert is_sensitive_filename("#ENVNI~1.SW~")
+        assert is_sensitive_filename("#ENVTX~1.SW~")
+        assert is_sensitive_filename("ENVCAN~1.SW~")
+        # ``#environment.txt.swp#`` collides with the truncated vim-swap
+        # extension. ``#ENVIR~1.TXT`` (no swap) stays allowed below.
+        assert is_sensitive_filename("#ENVIR~1.SW~")
+        assert not is_sensitive_filename("ENTRY~1.SW~")
+        assert not is_sensitive_filename("#ENTRY~1.SW~")
+        for long_name in (
             "#.env~#",
             "#id_rsa.bak#",
             "#id_rsa.swp#",
@@ -676,6 +704,10 @@ class TestSecretRedactionAndDashboardHost:
             read_json("#E7E5E~1.LOC")
         with pytest.raises(ValueError, match="credential"):
             read_json("#EBCAB~1.TXT")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("#ENVCA~1.SW~")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("ENVCAN~1.SW~")
         with pytest.raises(ValueError, match="credential"):
             read_json("#id_rsa.bak#")
         with pytest.raises(ValueError, match="credential"):
