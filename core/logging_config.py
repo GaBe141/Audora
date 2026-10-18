@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.utils import open_unlinked_file
+from core.utils import open_unlinked_file, redact_secrets
 
 _LOG_LEVELS = {
     "DEBUG": logging.DEBUG,
@@ -83,7 +83,7 @@ class JSONFormatter(logging.Formatter):
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact_secrets(record.getMessage()),
             "module": record.module,
             "function": record.funcName,
             "line": record.lineno,
@@ -95,13 +95,19 @@ class JSONFormatter(logging.Formatter):
         if record.exc_info:
             log_data["exception"] = {
                 "type": record.exc_info[0].__name__ if record.exc_info[0] else None,
-                "message": str(record.exc_info[1]) if record.exc_info[1] else None,
-                "traceback": self.formatException(record.exc_info),
+                "message": (redact_secrets(record.exc_info[1]) if record.exc_info[1] else None),
+                "traceback": redact_secrets(self.formatException(record.exc_info)),
             }
 
         # Add custom fields from 'extra' parameter
-        if hasattr(record, "extra_fields"):
-            log_data.update(record.extra_fields)
+        extra_fields = getattr(record, "extra_fields", None)
+        if isinstance(extra_fields, dict):
+            log_data.update(
+                {
+                    key: redact_secrets(value) if isinstance(value, str) else value
+                    for key, value in extra_fields.items()
+                }
+            )
 
         # Add any other custom attributes
         for key, value in record.__dict__.items():
@@ -130,10 +136,12 @@ class JSONFormatter(logging.Formatter):
                 "extra_fields",
             ]:
                 try:
-                    log_data[key] = value
+                    log_data[key] = redact_secrets(value) if isinstance(value, str) else value
                 except (TypeError, ValueError):
-                    log_data[key] = str(value)
+                    log_data[key] = redact_secrets(value)
 
+        # Scrub before serialization. Redacting the JSON text would swallow the
+        # closing quote that follows a token URL.
         return json.dumps(log_data, default=str)
 
 
@@ -168,7 +176,7 @@ class ColoredConsoleFormatter(logging.Formatter):
         record.levelname = f"{color}{self.BOLD}{record.levelname}{self.RESET}"
         record.name = f"{self.BOLD}{record.name}{self.RESET}"
 
-        return super().format(record)
+        return redact_secrets(super().format(record))
 
 
 def setup_logging(
