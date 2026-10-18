@@ -778,6 +778,40 @@ class TestSecretRedactionAndDashboardHost:
         assert "https://charts.spotify.com/chart" in redacted
         assert "https://example.com/webhook/docs" in redacted
 
+    def test_redacts_config_only_webhook_authorization_token(self, monkeypatch):
+        """A token that exists only in the webhook config must not survive an error body."""
+        monkeypatch.delenv("WEBHOOK_TOKEN", raising=False)
+        token = "config-only-webhook-token"
+        api_key = "custom-header-api-key"
+        service = EnhancedNotificationService.__new__(EnhancedNotificationService)
+        service.config = {
+            "webhook": {
+                "url": "https://alerts.example.com/ingest/plain-secret-value",
+                "headers": {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {token}",
+                    "X-Api-Key": api_key,
+                    "X-Auth": "json",
+                },
+            }
+        }
+        leaked = (
+            f"HTTP 401: invalid token {token} key {api_key} "
+            "expected application/json "
+            "https://example.com/webhook/docs "
+            "https://charts.spotify.com/chart"
+        )
+        redacted = service._redact_delivery_error(NotificationChannel.WEBHOOK, leaked)
+        assert token not in redacted
+        assert api_key not in redacted
+        assert "application/json" in redacted
+        assert "https://example.com/webhook/docs" in redacted
+        assert "https://charts.spotify.com/chart" in redacted
+        # Shorter than 8 characters, so a sensitive header must not punch a hole.
+        assert "application/json" in service._redact_delivery_error(
+            NotificationChannel.WEBHOOK, "expected application/json"
+        )
+
     def test_spotify_session_ignores_proxy_ca_and_redirects(self, monkeypatch):
         """Spotipy must not send the refresh token through env proxy, CA, or a 307."""
         monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")

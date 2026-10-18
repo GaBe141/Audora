@@ -71,6 +71,36 @@ _FORBIDDEN_WEBHOOK_HEADERS = {
     "connection",
     "upgrade",
 }
+# Header names that carry a credential. Content-Type is not in this list:
+# ``application/json`` is long enough that exact erasure would punch a hole
+# in an ordinary HTTP error.
+_SENSITIVE_HEADER_MARKERS = ("token", "secret", "key", "password", "auth")
+
+
+def _webhook_header_secrets(headers: Any) -> tuple[str, ...]:
+    """Credential values from webhook headers a response body can echo.
+
+    ``Authorization: Bearer <token>`` is matched by the bearer pattern only
+    when the scheme is still attached. Peers often repeat the raw token.
+    The scheme word is not included. ``Content-Type`` is not a credential.
+    """
+    if not isinstance(headers, dict):
+        return ()
+    secrets: list[str] = []
+    for key, value in headers.items():
+        if not isinstance(key, str) or not isinstance(value, str | int | float):
+            continue
+        if not any(marker in key.lower() for marker in _SENSITIVE_HEADER_MARKERS):
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        secrets.append(text)
+        scheme, _, token = text.partition(" ")
+        token = token.strip()
+        if token and scheme.isalpha():
+            secrets.append(token)
+    return tuple(secrets)
 
 
 def _contains_control_char(value: str) -> bool:
@@ -348,6 +378,9 @@ class EnhancedNotificationService:
 
         Custom webhook URLs are the credential. Slack and Discord token URLs
         are credentials too, including paths the provider patterns do not name.
+        A bearer token that lives only in the webhook config file is not
+        ``WEBHOOK_TOKEN``, so a response body that echoes the raw token would
+        otherwise stay in the error log.
         """
         if channel is NotificationChannel.EMAIL:
             email = self.config.get("email", {})
@@ -357,7 +390,11 @@ class EnhancedNotificationService:
         if channel is NotificationChannel.DISCORD:
             return (str(self.config.get("discord", {}).get("webhook_url", "")),)
         if channel is NotificationChannel.WEBHOOK:
-            return (str(self.config.get("webhook", {}).get("url", "")),)
+            webhook = self.config.get("webhook", {})
+            return (
+                str(webhook.get("url", "")),
+                *_webhook_header_secrets(webhook.get("headers")),
+            )
         if channel is NotificationChannel.SMS:
             sms = self.config.get("sms", {})
             return (str(sms.get("api_secret", "")), str(sms.get("api_key", "")))
