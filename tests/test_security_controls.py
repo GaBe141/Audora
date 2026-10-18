@@ -1047,6 +1047,18 @@ class TestDatabaseBackup:
             EnhancedMusicDataStore(str(db_path), backup_dir=str(tmp_path / "backups"))
         assert outside.read_text(encoding="utf-8") == "SECRET-ORIGINAL"
 
+    def test_wal_refuses_hard_linked_shared_memory_file(self, tmp_path):
+        from core.data_store import EnhancedMusicDataStore
+
+        secret = tmp_path.parent / "id_rsa"
+        secret.write_text("PRIVATE-KEY-DATA\n", encoding="utf-8")
+        db_path = tmp_path / "trends.db"
+        os.link(secret, Path(f"{db_path}-shm"))
+        with pytest.raises(ValueError, match="hard-linked"):
+            EnhancedMusicDataStore(str(db_path), backup_dir=str(tmp_path / "backups"))
+        assert secret.read_text(encoding="utf-8") == "PRIVATE-KEY-DATA\n"
+        assert secret.stat().st_size == len("PRIVATE-KEY-DATA\n")
+
     def test_database_refuses_parent_directory_symlink(self, tmp_path):
         from core.data_store import EnhancedMusicDataStore
 
