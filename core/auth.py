@@ -1,5 +1,7 @@
 """Spotify authentication module with secure configuration."""
 
+import secrets
+
 import requests
 import spotipy
 import urllib3
@@ -41,6 +43,12 @@ def get_client() -> spotipy.Spotify:
     Spotipy's default session would send the client secret and refresh token
     through those channels.
 
+    ``state`` is a fresh unguessable value on every client. Spotipy's localhost
+    callback accepts the first ``code`` it receives and, when ``state`` is
+    omitted, does not check where that code came from. Another page on the
+    machine can submit its own authorization code during login and bind this
+    app to a different Spotify account.
+
     Returns:
         spotipy.Spotify: Authenticated Spotify client
 
@@ -54,6 +62,7 @@ def get_client() -> spotipy.Spotify:
         client_secret=spotify_config["client_secret"],
         redirect_uri=spotify_config["redirect_uri"],
         scope=spotify_config["scopes"],
+        state=secrets.token_urlsafe(32),
         cache_handler=JsonTokenCache(PROJECT_ROOT / ".cache"),
         open_browser=True,
         show_dialog=False,
