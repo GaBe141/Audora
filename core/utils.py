@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import stat
 import unicodedata
 from collections.abc import Iterator
@@ -1120,6 +1121,22 @@ class _NoRedirectRequestsSession(requests.Session):
 def credentialed_requests_session() -> requests.Session:
     """Open a requests session that will not leak credentials to a proxy or a redirect."""
     return _NoRedirectRequestsSession()
+
+
+def public_tls_context() -> ssl.SSLContext:
+    """Return a TLS client context that ignores environment CA overrides.
+
+    ``ssl.create_default_context()`` loads ``SSL_CERT_FILE`` and
+    ``SSL_CERT_DIR`` through ``load_default_certs()``. Those variables replace
+    the public trust store. SMTP AUTH and webhook bearer tokens are sent on
+    that TLS session, so a private CA in the process environment can read
+    them. Requests sessions already ignore ``REQUESTS_CA_BUNDLE`` when
+    ``trust_env`` is false and verify with their own bundle. smtplib and
+    aiohttp need that same bundle instead of the environment store.
+    """
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(cafile=requests.certs.where())
+    return context
 
 
 def redact_secrets(value: Any, *known_secrets: str) -> str:
