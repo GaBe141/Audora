@@ -114,6 +114,11 @@ _GENERATED_SHORT_NAME_RE = re.compile(
     r"^([a-z0-9_$%'@`!(){}^#&\-]{1,6})~(\d{1,6})"
     r"(?:\.([a-z0-9_$%'@`!(){}^#&\-]{0,2}~?|[a-z0-9_$%'@`!(){}^#&\-]{1,3}))?$"
 )
+# Collision form: the first two basis characters plus four checksum nibbles.
+# ``.env.canary.local`` is ``ENVCAN~1.LOC`` until names collide, then
+# ``EN9DD6~1.LOC``. The third character is a hex digit, so this does not match
+# the primary basis ``ENVCAN`` or ``ENVIRO``.
+_DOTENV_CHECKSUM_BASIS_RE = re.compile(r"^en[0-9a-f]{4}$")
 
 # Re-export for convenience
 try:
@@ -321,8 +326,9 @@ def _is_windows_short_secret(candidate: str) -> bool:
     NTFS can store ``ENV~1`` for ``.env`` and ``CREDEN~1.JSO`` for
     ``credentials.json``. ``.env.production.local`` is ``ENVPRO~1.LOC``: the
     mode sits in the basis, so an ``ENV`` / ``ENVRC`` basis check misses it.
-    Generation is often disabled on current volumes; when a short name exists,
-    opening it still opens the long file.
+    After collisions the same file is ``EN9DD6~1.LOC`` (``EN`` plus the
+    long-name checksum). Generation is often disabled on current volumes; when
+    a short name exists, opening it still opens the long file.
     """
     if candidate in _SHORT_SECRET_ALIASES:
         return True
@@ -339,7 +345,17 @@ def _is_windows_short_secret(candidate: str) -> bool:
     # basis with ENV and puts ``local`` or the disguise in the extension.
     # ``environment.txt`` is ``ENVIRO~1.TXT`` and stays allowed. ``ENVPRO~1``
     # with no extension is the short name of ``envprofile`` and stays allowed.
-    return basis.startswith("env") and extension in _DOTENV_COMPOUND_EXTENSIONS
+    if basis.startswith("env") and extension in _DOTENV_COMPOUND_EXTENSIONS:
+        return True
+    # Unlisted modes are not in ``_SHORT_SECRET_ALIASES``. Their collision
+    # alias keeps only ``EN`` and stores the checksum in the rest of the basis.
+    # ``envelope.local`` has the same collision shape and is refused with it.
+    # ``EN41DD~1.TXT`` (``environment.txt``) and ``ENA51B~1`` (``envprofile``)
+    # use a different extension, or none, and stay allowed.
+    return (
+        _DOTENV_CHECKSUM_BASIS_RE.fullmatch(basis) is not None
+        and extension in _DOTENV_COMPOUND_EXTENSIONS
+    )
 
 
 def _filename_forms(filename: str) -> list[str]:
@@ -427,7 +443,8 @@ def is_sensitive_filename(filename: str) -> bool:
     """True for secrets, databases, keys, and disguised copies of those files.
 
     Disguises include Windows 8.3 short names such as ``ENV~1``,
-    ``ENVPRO~1.LOC`` for ``.env.production.local``, and ``NOTIFI~1.JSO``.
+    ``ENVPRO~1.LOC`` for ``.env.production.local``, ``EN9DD6~1.LOC`` for
+    ``.env.canary.local`` after short-name collisions, and ``NOTIFI~1.JSO``.
     The canonical live config names stay readable through the JSON helpers;
     their short names do not.
     """
