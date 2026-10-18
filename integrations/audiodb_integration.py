@@ -6,6 +6,9 @@ from typing import Any
 import pandas as pd
 import requests
 
+from core.utils import credentialed_requests_session, redact_secrets
+from integrations.extended_platforms import safe_path_segment
+
 # Note: config import is optional for standalone execution
 
 BASE_URL = "https://www.theaudiodb.com/api/v1/json"
@@ -16,7 +19,9 @@ class AudioDBAPI:
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key
-        self.session = requests.Session()
+        # The API key is a path segment. A stock session lets SSLKEYLOGFILE
+        # decrypt that request, and a redirect would replay it.
+        self.session = credentialed_requests_session()
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second
 
@@ -35,17 +40,16 @@ class AudioDBAPI:
         self._rate_limit()
 
         # Use API key if available, otherwise use free key (123)
-        if self.api_key:
-            url = f"{BASE_URL}/{self.api_key}/{endpoint}"
-        else:
-            url = f"{BASE_URL}/123/{endpoint}"  # Free API key is 123
+        api_key = safe_path_segment(self.api_key or "123", label="AudioDB key")
+        safe_endpoint = safe_path_segment(endpoint, label="AudioDB endpoint")
+        url = f"{BASE_URL}/{api_key}/{safe_endpoint}"
 
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, allow_redirects=False, timeout=30)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"AudioDB API error: {e}")
+            print(f"AudioDB API error: {redact_secrets(e)}")
             return None
 
     def search_artist(self, artist_name: str) -> dict | None:
