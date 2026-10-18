@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from core.utils import confine_relative_path, read_json, write_json
+from core.utils import confine_relative_path, read_json, redact_secrets, write_json
 
 
 @dataclass
@@ -218,7 +218,7 @@ class SocialAPIManager:
         # Record errors
         if not success:
             config.error_count += 1
-            config.last_error = error
+            config.last_error = redact_secrets(error)
 
             # Disable if too many errors
             if config.error_count >= 10:
