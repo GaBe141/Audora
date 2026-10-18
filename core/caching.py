@@ -188,10 +188,22 @@ class RedisCacheBackend(CacheBackend):
         )
         return os.urandom(32)
 
-    def _serialize(self, value: Any) -> bytes:
-        """Serialize a JSON cache value and sign the payload."""
+    def _signed_material(self, key: str, payload: bytes) -> bytes:
+        """Bind a signature to one cache key.
+
+        A signature over the payload alone can be copied onto another key.
+        The length prefix keeps a key that contains the payload bytes from
+        producing the same input as a different key.
+        """
+        key_bytes = key.encode("utf-8")
+        return len(key_bytes).to_bytes(4, "big") + key_bytes + payload
+
+    def _serialize(self, key: str, value: Any) -> bytes:
+        """Serialize a JSON cache value and sign it for this key."""
         payload = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        signature = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+        signature = hmac.new(
+            self._signing_key, self._signed_material(key, payload), hashlib.sha256
+        ).hexdigest()
         envelope = {
             "v": 2,
             "alg": "HMAC-SHA256",
@@ -200,8 +212,8 @@ class RedisCacheBackend(CacheBackend):
         }
         return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
-    def _deserialize(self, value: bytes) -> Any | None:
-        """Deserialize a JSON cache value only after signature verification."""
+    def _deserialize(self, key: str, value: bytes) -> Any | None:
+        """Deserialize a JSON cache value only after the key-bound signature matches."""
         try:
             envelope = json.loads(value.decode("utf-8"))
             if (
@@ -220,7 +232,9 @@ class RedisCacheBackend(CacheBackend):
                 return None
 
             payload = base64.b64decode(payload_b64.encode("ascii"), validate=True)
-            expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest()
+            expected_sig = hmac.new(
+                self._signing_key, self._signed_material(key, payload), hashlib.sha256
+            ).hexdigest()
             if not hmac.compare_digest(str(envelope["sig"]), expected_sig):
                 logger.warning("Rejected cache entry with invalid signature")
                 return None
@@ -236,7 +250,7 @@ class RedisCacheBackend(CacheBackend):
             value = self._client.get(key)
             if value is None:
                 return None
-            return self._deserialize(value)
+            return self._deserialize(key, value)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
@@ -244,7 +258,7 @@ class RedisCacheBackend(CacheBackend):
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
         """Set value in cache with optional TTL."""
         try:
-            serialized = self._serialize(value)
+            serialized = self._serialize(key, value)
             if ttl:
                 self._client.setex(key, ttl, serialized)
             else:
