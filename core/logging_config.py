@@ -15,6 +15,31 @@ from typing import Any
 
 from core.utils import open_unlinked_file, redact_secrets
 
+
+def _redact_log_value(value: Any) -> Any:
+    """Redact secrets in a log field before it is serialized.
+
+    Nested mappings are walked so a structured extra cannot keep a webhook
+    URL or API key that a top-level string check would miss. The serialized
+    JSON document is left alone: a URL pattern would consume the closing quote.
+    """
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            safe_key = redact_secrets(key) if isinstance(key, str) else key
+            redacted[safe_key] = _redact_log_value(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_log_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_log_value(item) for item in value)
+    if value is None or isinstance(value, int | float | bool):
+        return value
+    return redact_secrets(value)
+
+
 _LOG_LEVELS = {
     "DEBUG": logging.DEBUG,
     "INFO": logging.INFO,
@@ -83,7 +108,7 @@ class JSONFormatter(logging.Formatter):
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "level": record.levelname,
             "logger": record.name,
-            "message": redact_secrets(record.getMessage()),
+            "message": _redact_log_value(record.getMessage()),
             "module": record.module,
             "function": record.funcName,
             "line": record.lineno,
@@ -95,19 +120,14 @@ class JSONFormatter(logging.Formatter):
         if record.exc_info:
             log_data["exception"] = {
                 "type": record.exc_info[0].__name__ if record.exc_info[0] else None,
-                "message": (redact_secrets(record.exc_info[1]) if record.exc_info[1] else None),
-                "traceback": redact_secrets(self.formatException(record.exc_info)),
+                "message": (_redact_log_value(record.exc_info[1]) if record.exc_info[1] else None),
+                "traceback": _redact_log_value(self.formatException(record.exc_info)),
             }
 
         # Add custom fields from 'extra' parameter
         extra_fields = getattr(record, "extra_fields", None)
         if isinstance(extra_fields, dict):
-            log_data.update(
-                {
-                    key: redact_secrets(value) if isinstance(value, str) else value
-                    for key, value in extra_fields.items()
-                }
-            )
+            log_data.update({key: _redact_log_value(value) for key, value in extra_fields.items()})
 
         # Add any other custom attributes
         for key, value in record.__dict__.items():
@@ -136,7 +156,7 @@ class JSONFormatter(logging.Formatter):
                 "extra_fields",
             ]:
                 try:
-                    log_data[key] = redact_secrets(value) if isinstance(value, str) else value
+                    log_data[key] = _redact_log_value(value)
                 except (TypeError, ValueError):
                     log_data[key] = redact_secrets(value)
 
@@ -145,7 +165,19 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(log_data, default=str)
 
 
-class ColoredConsoleFormatter(logging.Formatter):
+class RedactingFormatter(logging.Formatter):
+    """Plain-text formatter that removes secrets from the rendered line.
+
+    Discovery and setup install this on both the console and the log file.
+    A stock Formatter writes webhook URLs and API keys in cleartext, including
+    when stdout is not a terminal and when file logs are not JSON.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_secrets(super().format(record))
+
+
+class ColoredConsoleFormatter(RedactingFormatter):
     """Format log records with colors for console output.
 
     This formatter adds ANSI color codes for different log levels,
@@ -176,7 +208,7 @@ class ColoredConsoleFormatter(logging.Formatter):
         record.levelname = f"{color}{self.BOLD}{record.levelname}{self.RESET}"
         record.name = f"{self.BOLD}{record.name}{self.RESET}"
 
-        return redact_secrets(super().format(record))
+        return super().format(record)
 
 
 def setup_logging(
@@ -235,12 +267,12 @@ def setup_logging(
         console_handler.setLevel(level)
 
         if sys.stdout.isatty():  # Use colors only in interactive terminals
-            console_formatter = ColoredConsoleFormatter(
+            console_formatter: logging.Formatter = ColoredConsoleFormatter(
                 fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
         else:
-            console_formatter = logging.Formatter(
+            console_formatter = RedactingFormatter(
                 fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
@@ -261,7 +293,7 @@ def setup_logging(
             main_handler.setFormatter(JSONFormatter())
         else:
             main_handler.setFormatter(
-                logging.Formatter(
+                RedactingFormatter(
                     fmt="%(asctime)s - %(name)s - %(levelname)s - "
                     "%(module)s:%(funcName)s:%(lineno)d - %(message)s",
                     datefmt="%Y-%m-%d %H:%M:%S",
@@ -279,7 +311,7 @@ def setup_logging(
             error_handler.setFormatter(JSONFormatter())
         else:
             error_handler.setFormatter(
-                logging.Formatter(
+                RedactingFormatter(
                     fmt="%(asctime)s - %(name)s - %(levelname)s - "
                     "%(module)s:%(funcName)s:%(lineno)d - %(message)s\n"
                     "Exception: %(exc_info)s",
@@ -374,6 +406,7 @@ __all__ = [
     "setup_logging",
     "get_logger",
     "JSONFormatter",
+    "RedactingFormatter",
     "ColoredConsoleFormatter",
     "LogContext",
     "NofollowFileHandler",
