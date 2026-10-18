@@ -382,12 +382,15 @@ def _run_command(args: list[str]) -> tuple[str, str]:
         out, _ = proc.communicate(timeout=300)
         exit_code = proc.returncode
         status = f"Done (exit {exit_code})"
-        return status, out or "(no output)"
+        # Discovery and demo scripts print request exceptions. Those strings
+        # include the URL, and Last.fm / AudioDB put the API key in that URL.
+        # The log panel is the browser, so the raw stream must be scrubbed.
+        return status, redact_secrets(out or "(no output)")
     except subprocess.TimeoutExpired:
         proc.kill()
         return "Done (timeout)", "(process timed out)"
     except Exception as e:
-        return "Error", str(e)
+        return "Error", redact_secrets(e)
 
 
 def _get_data_store():
