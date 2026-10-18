@@ -68,6 +68,27 @@ class TestJSONFormatter:
         assert data["exception"]["type"] == "ValueError"
         assert "test error" in (data["exception"].get("message") or "")
 
+    def test_format_redacts_webhook_urls(self):
+        formatter = JSONFormatter()
+        secret = "https://discord.com/api/v10/webhooks/123/super-secret-token"
+        record = logging.LogRecord(
+            name="test",
+            level=logging.ERROR,
+            pathname="",
+            lineno=0,
+            msg="delivery failed",
+            args=(),
+            exc_info=None,
+        )
+        record.funcName = "f"
+        record.module = "m"
+        record.thread = 0
+        record.threadName = "Main"
+        record.getMessage = lambda: f"delivery failed {secret}"
+        output = formatter.format(record)
+        assert "super-secret-token" not in output
+        assert "REDACTED" in output
+
 
 class TestColoredConsoleFormatter:
     """Tests for ColoredConsoleFormatter - at least message and level appear."""
