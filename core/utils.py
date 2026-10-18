@@ -1075,6 +1075,20 @@ def redact_secrets(value: Any, *known_secrets: str) -> str:
     return text
 
 
+def _canonical_http_port(port_text: str) -> int | None:
+    """Return a decimal port in 1..65535, rejecting leading zeros.
+
+    ``int('08050')`` is 8050. A browser keeps the leading zero, so that
+    authority is a different origin from port 8050 and must not compare equal.
+    """
+    if not port_text.isdigit() or (len(port_text) > 1 and port_text.startswith("0")):
+        return None
+    port = int(port_text)
+    if not 0 < port <= 65535:
+        return None
+    return port
+
+
 def is_loopback_http_host(host_header: str) -> bool:
     """True when a Host or Origin netloc is localhost or a loopback address."""
     if not isinstance(host_header, str):
@@ -1092,15 +1106,17 @@ def is_loopback_http_host(host_header: str) -> bool:
             return False
         hostname = host[1:end]
         rest = host[end + 1 :]
-        if rest and not re.fullmatch(r":[0-9]{1,5}", rest):
-            return False
-        if rest and not 0 < int(rest[1:]) <= 65535:
+        if rest and (not rest.startswith(":") or _canonical_http_port(rest[1:]) is None):
             return False
         return hostname == "::1"
     if host.count(":") > 1:
         return False
     hostname, separator, port = host.partition(":")
-    if separator and (not port.isdigit() or not 0 < int(port) <= 65535):
+    if separator and _canonical_http_port(port) is None:
+        return False
+    # One trailing dot is the FQDN form. Stripping every dot would accept
+    # ``127.0.0.1..``, which browsers keep as an empty DNS label.
+    if hostname.endswith(".."):
         return False
     return hostname.rstrip(".") in {"localhost", "127.0.0.1"}
 
@@ -1114,10 +1130,10 @@ def _loopback_authority(host_header: str) -> tuple[str, int | None] | None:
         end = host.find("]")
         hostname = host[1:end]
         rest = host[end + 1 :]
-        port = int(rest[1:]) if rest else None
+        port = _canonical_http_port(rest[1:]) if rest else None
         return hostname, port
     hostname, separator, port_text = host.partition(":")
-    port = int(port_text) if separator else None
+    port = _canonical_http_port(port_text) if separator else None
     return hostname.rstrip("."), port
 
 
@@ -1138,6 +1154,15 @@ def dashboard_request_allowed(
         return False
     parsed = None
     if origin:
+        # Check the raw Origin. ``str.strip`` and ``urlparse`` drop CR/LF,
+        # Unicode line separators, and Unicode spaces, so a forged header
+        # would otherwise collapse onto the loopback allowlist.
+        if (
+            not isinstance(origin, str)
+            or "\\" in origin
+            or contains_unsafe_codepoint(origin, format_chars=True)
+        ):
+            return False
         parsed = urlparse(origin.strip())
         if parsed.scheme not in {"http", "https"} or not is_loopback_http_host(parsed.netloc):
             return False
