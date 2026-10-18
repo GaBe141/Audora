@@ -608,6 +608,39 @@ class TestSecretRedactionAndDashboardHost:
         ordinary = "https://example.com/webhook/docs"
         assert ordinary in redact_secrets(f"docs {ordinary}")
 
+    def test_redacts_http_discord_office_and_custom_webhook_urls(self):
+        """An http URL holds the same webhook secret as the https form."""
+        discord = "http://discord.com/api/webhooks/123/http-discord-token"
+        canary = "http://canary.discord.com/api/v10/webhooks/9/http-canary-token"
+        custom = "http://alerts.example.com/webhooks/http-custom-token"
+        hooks = "http://alerts.example.com/hooks/http-hook-token"
+        office = (
+            "http://outlook.office.com/webhook/"
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@tenant/IncomingWebhook/"
+            "http-office-token/guid"
+        )
+        teams = (
+            "http://contoso.webhook.office.com/webhookb2/"
+            "aaaaaaaa-bbbb/IncomingWebhook/http-teams-token/guid"
+        )
+        leaked = f"post {discord} {canary} {custom} {hooks} {office} {teams}"
+        redacted = redact_secrets(leaked)
+        assert "http-discord-token" not in redacted
+        assert "http-canary-token" not in redacted
+        assert "http-custom-token" not in redacted
+        assert "http-hook-token" not in redacted
+        assert "http-office-token" not in redacted
+        assert "http-teams-token" not in redacted
+        assert "https://charts.spotify.com/chart" in redact_secrets(
+            "see https://charts.spotify.com/chart"
+        )
+        assert "https://example.com/webhook/docs" in redact_secrets(
+            "docs https://example.com/webhook/docs"
+        )
+        assert "http://example.com/webhook/docs" in redact_secrets(
+            "docs http://example.com/webhook/docs"
+        )
+
     def test_redacts_basic_and_discord_bot_authorization(self):
         secret = base64.b64encode(b"spotify-client-id:spotify-client-secret").decode("ascii")
         bot = "MTAxMjM0NTY3ODkwMTIz.AbCdEf.GhIjKlMnOpQrStUvWxYz012345"
