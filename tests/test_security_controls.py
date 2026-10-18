@@ -40,6 +40,7 @@ from core.utils import (
     write_json,
     write_private_text,
 )
+from integrations.api_config import SocialAPIManager
 from integrations.extended_platforms import safe_path_segment
 from integrations.musicbrainz_integration import _require_mbid
 from integrations.spotify_charts_integration import _safe_chart_target
@@ -56,9 +57,15 @@ def _redis_backend() -> RedisCacheBackend:
 class TestCacheEnvelope:
     def test_json_envelope_round_trip(self):
         backend = _redis_backend()
-        encoded = backend._serialize({"track": "Song", "score": 3})
+        encoded = backend._serialize("audora:track", {"track": "Song", "score": 3})
         assert json.loads(encoded)["v"] == 2
-        assert backend._deserialize(encoded) == {"track": "Song", "score": 3}
+        assert backend._deserialize("audora:track", encoded) == {"track": "Song", "score": 3}
+
+    def test_signature_is_bound_to_the_cache_key(self):
+        backend = _redis_backend()
+        encoded = backend._serialize("audora:tracks", {"track": "Song"})
+        assert backend._deserialize("audora:tracks", encoded) == {"track": "Song"}
+        assert backend._deserialize("audora:other", encoded) is None
 
     def test_rejects_legacy_pickle_envelope(self):
         backend = _redis_backend()
@@ -66,7 +73,7 @@ class TestCacheEnvelope:
         envelope = json.dumps(
             {"v": 1, "alg": "HMAC-SHA256", "sig": "abc", "payload": payload}
         ).encode()
-        assert backend._deserialize(envelope) is None
+        assert backend._deserialize("audora:legacy", envelope) is None
 
     def test_clear_does_not_flush_the_database(self):
         source = inspect.getsource(RedisCacheBackend.clear)
@@ -95,6 +102,12 @@ class TestRedirectAndSsrf:
             "http://127.0.0.1#@evil.com",
             "http://127.0.0.1:8888\\@evil.com/callback",
             "http://127.0.0.1:8888/callback\x7f",
+            "http://127.0.0.1:8888/callback\u2028@evil.com",
+            "http://127.0.0.1:8888/callback\u00a0@evil.com",
+            "http://127.0.0.1:8888/callback\u0085",
+            "http://localhost:8888/callback\ufeff",
+            "http://127.0.0.1:8888/callback\u200b",
+            "http://\u2028127.0.0.1:8888/callback",
         ):
             with pytest.raises(ValueError):
                 validate_spotify_redirect_uri(uri)
@@ -122,6 +135,11 @@ class TestRedirectAndSsrf:
             "https://example.com\\@127.0.0.1/hook",
             "https://evil.com\r\n.127.0.0.1/hook",
             "https://①②⑦.0.0.1/hook",
+            "https://example.com/\u2028hook",
+            "https://example.com/\u200bhook",
+            "https://example.com/\ufeffhook",
+            "https://example.com/hook\u2028",
+            "https://example.com/hook\u00a0",
         )
         for url in blocked:
             with pytest.raises(ValueError):
@@ -170,6 +188,11 @@ class TestRedirectAndSsrf:
         with pytest.raises(ValueError, match="unsafe characters"):
             svc._safe_attachment_name("report\r\nBcc: x.csv")
         assert svc._safe_attachment_name("trend.csv") == "trend.csv"
+        assert svc._safe_header("Track\u200dTitle", "subject") == "Track\u200dTitle"
+        with pytest.raises(ValueError, match="control character"):
+            svc._safe_header("Artist\u2028Name", "subject")
+        with pytest.raises(ValueError, match="Invalid SMTP host"):
+            svc._validate_smtp_host("smtp.example.com\u2028", 587)
 
     def test_smtp_ssl_verifies_certificates(self):
         source = inspect.getsource(EnhancedNotificationService._send_email)
@@ -497,6 +520,31 @@ class TestSecretRedactionAndDashboardHost:
             NotificationChannel.EMAIL, "auth failed for smtp-password-value"
         )
         assert "smtp-password-value" not in mail_error
+
+    def test_redacts_live_environment_secrets(self, monkeypatch):
+        monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "spotify-live-secret")
+        monkeypatch.setenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
+        monkeypatch.setenv("HOME", "/home/listener")
+        redacted = redact_secrets("leaked spotify-live-secret in the body")
+        assert "spotify-live-secret" not in redacted
+        assert "http://127.0.0.1:8888/callback" in redact_secrets(
+            "redirect http://127.0.0.1:8888/callback"
+        )
+        assert "/home/listener" in redact_secrets("wrote /home/listener/cache")
+
+    def test_persisted_api_error_redacts_the_stored_key(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
+        (tmp_path / "config").mkdir()
+        manager = SocialAPIManager("config/social_apis.json")
+        secret = "raw-provider-key"
+        manager.set_api_key("youtube", secret)
+        manager.record_request("youtube", success=False, error=f"upstream echoed {secret}")
+        stored = manager.get_config("youtube")
+        assert stored is not None
+        assert secret not in stored.last_error
+        assert "REDACTED" in stored.last_error
+        saved = (tmp_path / "config" / "social_apis.json").read_text(encoding="utf-8")
+        assert saved.count(secret) == 1
 
     def test_disguised_secret_names_are_blocked(self, tmp_path, monkeypatch):
         monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
@@ -890,6 +938,8 @@ class TestSecretRedactionAndDashboardHost:
         )
         assert not dashboard_request_allowed("127.0.0.1:8050", None, "same-origin", "POST")
         assert dashboard_request_allowed("127.0.0.1:8050", None, "cross-site", "GET")
+        assert not dashboard_request_allowed("\u2028127.0.0.1:8050", None, None, "GET")
+        assert not dashboard_request_allowed("127.0.0.1:8050\ufeff", None, None, "GET")
 
 
 class TestDatabaseBackup:
