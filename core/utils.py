@@ -1029,6 +1029,16 @@ _SECRET_JSON_RE = re.compile(
 )
 _URL_USERINFO_RE = re.compile(r"(?i)(https?://)([^/\s:@]+):([^/\s@]+)@")
 _BEARER_RE = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9\-._~+/]+=*")
+# Spotipy logs ``Authorization: Basic <base64(client_id:client_secret)>`` on
+# the token request. Bearer redaction does not match that scheme, so the
+# client secret stays recoverable from a debug log. A long token that contains
+# a digit or a base64 symbol is a credential; "Basic authentication" is not.
+_BASIC_AUTH_RE = re.compile(r"(?i)(\bbasic\s+)([A-Za-z0-9+/]{16,}={0,2})")
+# Discord bot calls send ``Authorization: Bot <id>.<hmac>.<signature>``.
+# A short word after "Bot" (for example "Bot started") is not a token.
+_BOT_AUTH_RE = re.compile(
+    r"(?i)(\bbot\s+)([A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{20,})"
+)
 # Discord documents both ``/api/webhooks/`` and ``/api/v10/webhooks/``. The
 # version segment is the live token URL, so a pattern that stops at ``/api/``
 # leaves that bearer token in logs and dashboard errors. Slack workflow and
@@ -1048,8 +1058,16 @@ _WEBHOOK_SECRET_RE = re.compile(
 _AUDIODB_KEY_RE = re.compile(r"(?i)(/api/v1/json/)([^/\s\"']+)")
 
 
+def _redact_basic_authorization(match: re.Match[str]) -> str:
+    """Drop a Basic credential and leave an ordinary English phrase in place."""
+    token = match.group(2)
+    if any(char in token for char in "0123456789+/"):
+        return f"{match.group(1)}REDACTED"
+    return match.group(0)
+
+
 def redact_secrets(value: Any, *known_secrets: str) -> str:
-    """Remove API keys, webhook URLs, and URL passwords from an error string.
+    """Remove API keys, webhook URLs, and authorization secrets from text.
 
     ``known_secrets`` are exact values already in hand, such as a custom
     webhook URL or an SMTP password. Provider patterns do not match every
@@ -1077,6 +1095,8 @@ def redact_secrets(value: Any, *known_secrets: str) -> str:
     text = _SECRET_JSON_RE.sub(r"\1\2\1: \3REDACTED\3", text)
     text = _SECRET_QUERY_RE.sub(r"\1=REDACTED", text)
     text = _BEARER_RE.sub(r"\1REDACTED", text)
+    text = _BASIC_AUTH_RE.sub(_redact_basic_authorization, text)
+    text = _BOT_AUTH_RE.sub(r"\1REDACTED", text)
     text = _WEBHOOK_SECRET_RE.sub("https://webhook.invalid/REDACTED", text)
     text = _AUDIODB_KEY_RE.sub(r"\1REDACTED", text)
     return text
