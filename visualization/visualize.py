@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
+from core.utils import save_matplotlib_figure
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
@@ -27,7 +29,7 @@ def plot_top_artists_bar(df: pd.DataFrame, title: str = "Top Artists (short term
     plt.ylabel("Artist")
     plt.title(title)
     plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
+    save_matplotlib_figure(plt, out_path, dpi=150)
     plt.close()
     return out_path
 
@@ -68,6 +70,6 @@ def plot_recently_played_heatmap(
     plt.xlabel("Hour of day")
     plt.ylabel("Day of week")
     plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
+    save_matplotlib_figure(plt, out_path, dpi=150)
     plt.close()
     return out_path
