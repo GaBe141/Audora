@@ -4,6 +4,7 @@ Enhanced Music Discovery Application - Complete Integration
 This is the main application file that brings together all enhanced components.
 """
 
+import argparse
 import asyncio
 import logging
 import sys
@@ -17,7 +18,12 @@ sys.path.append(str(Path(__file__).parent.parent))
 # Import all enhanced components
 from analytics.advanced_analytics import MusicTrendAnalytics
 from core.data_store import EnhancedMusicDataStore, database_path_from_config
-from core.logging_config import NofollowFileHandler, safe_log_filename, safe_log_level
+from core.logging_config import (
+    NofollowFileHandler,
+    RedactingFormatter,
+    safe_log_filename,
+    safe_log_level,
+)
 from core.notification_service import (
     EnhancedNotificationService,
     NotificationChannel,
@@ -25,7 +31,13 @@ from core.notification_service import (
     NotificationPriority,
 )
 from core.resilience import EnhancedResilience
-from core.utils import confine_relative_path, read_json, resolve_project_path, write_json
+from core.utils import (
+    confine_relative_path,
+    read_json,
+    redact_secrets,
+    resolve_project_path,
+    write_json,
+)
 from integrations.lastfm_integration import get_lastfm_client
 from integrations.social_discovery_engine import (
     SocialMusicDiscoveryEngine,
@@ -86,7 +98,7 @@ class EnhancedMusicDiscoveryApp:
                 else:
                     configs[config_type] = loaded
             except Exception as e:
-                print(f"❌ Error loading {filename}: {e}")
+                print(f"❌ Error loading {filename}: {redact_secrets(e)}")
                 configs[config_type] = {}
 
         return configs
@@ -100,19 +112,23 @@ class EnhancedMusicDiscoveryApp:
         logs_dir = resolve_project_path("logs")
         logs_dir.mkdir(exist_ok=True)
 
-        # Configure logging
+        # Configure logging. A stock Formatter writes request URLs, API keys,
+        # and webhook tokens into stdout and the daily log file.
         log_level = safe_log_level(log_config.get("level", "INFO"))
-        log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-
-        handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+        formatter = RedactingFormatter(fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        stream = logging.StreamHandler(sys.stdout)
+        stream.setFormatter(formatter)
+        handlers: list[logging.Handler] = [stream]
 
         if log_config.get("file_logging", True):
             log_file = logs_dir / safe_log_filename(
                 f"music_discovery_{datetime.now().strftime('%Y%m%d')}.log"
             )
-            handlers.append(NofollowFileHandler(log_file))
+            file_handler = NofollowFileHandler(log_file)
+            file_handler.setFormatter(formatter)
+            handlers.append(file_handler)
 
-        logging.basicConfig(level=log_level, format=log_format, handlers=handlers)
+        logging.basicConfig(level=log_level, handlers=handlers)
 
     async def run_discovery_cycle(self) -> dict[str, Any]:
         """Run a complete discovery cycle with all enhanced features."""
@@ -157,19 +173,21 @@ class EnhancedMusicDiscoveryApp:
             self.logger.info("✅ Discovery cycle completed successfully")
 
         except Exception as e:
-            error_msg = f"Discovery cycle failed: {e}"
+            safe_error = redact_secrets(e)
+            error_msg = f"Discovery cycle failed: {safe_error}"
             self.logger.error(error_msg)
             cycle_results["errors"].append(error_msg)
 
-            # Send error notification
+            # Send error notification. The raw exception can carry an API key
+            # or webhook URL, and those channels would repeat it.
             message = NotificationMessage(
                 title="Discovery Cycle Error",
-                content=f"Discovery cycle failed: {str(e)}",
+                content=error_msg,
                 priority=NotificationPriority.HIGH,
                 channels=[NotificationChannel.EMAIL, NotificationChannel.SLACK],
                 data={
                     "alert_type": "Discovery Cycle Error",
-                    "issue_description": str(e),
+                    "issue_description": safe_error,
                     "severity": "HIGH",
                     "timestamp": datetime.now().isoformat(),
                     "system_status": "DEGRADED",
@@ -250,7 +268,7 @@ class EnhancedMusicDiscoveryApp:
                     )
             self.logger.info(f"✅ Social engine: {len(discoveries)} tracks")
         except Exception as e:
-            self.logger.warning(f"⚠️ Social engine unavailable: {e}")
+            self.logger.warning("⚠️ Social engine unavailable: %s", redact_secrets(e))
 
         # --- Source 2: Last.fm global charts ---
         if self.lastfm_client:
@@ -281,7 +299,7 @@ class EnhancedMusicDiscoveryApp:
                         )
                     self.logger.info(f"✅ Last.fm: {len(discoveries) - before} tracks")
             except Exception as e:
-                self.logger.warning(f"⚠️ Last.fm unavailable: {e}")
+                self.logger.warning("⚠️ Last.fm unavailable: %s", redact_secrets(e))
 
         # --- Fallback: mock data when no API keys are configured ---
         if not discoveries:
@@ -318,7 +336,7 @@ class EnhancedMusicDiscoveryApp:
                 self.data_store.store_trend_data(discovery)
                 self.logger.debug(f"Stored: {discovery['track_name']} by {discovery['artist']}")
             except Exception as e:
-                self.logger.error(f"Failed to store discovery: {e}")
+                self.logger.error("Failed to store discovery: %s", redact_secrets(e))
 
     async def _run_analytics(self) -> dict[str, Any]:
         """Run advanced analytics on collected data."""
@@ -445,7 +463,7 @@ class EnhancedMusicDiscoveryApp:
                 self.logger.info("👋 Monitoring stopped by user")
                 break
             except Exception as e:
-                self.logger.error(f"❌ Monitoring cycle error: {e}")
+                self.logger.error("❌ Monitoring cycle error: %s", redact_secrets(e))
                 await asyncio.sleep(60)  # Wait 1 minute before retrying
 
 
@@ -458,12 +476,9 @@ def main():
     try:
         app = EnhancedMusicDiscoveryApp()
     except Exception as e:
-        print(f"❌ Failed to initialize application: {e}")
+        print(f"❌ Failed to initialize application: {redact_secrets(e)}")
         print("💡 Run enhanced_setup.py first to set up the system")
         return 1
-
-    # Run mode selection
-    import argparse
 
     parser = argparse.ArgumentParser(description="Enhanced Music Discovery System")
     parser.add_argument(
@@ -494,7 +509,7 @@ def main():
             if cycle_results["errors"]:
                 print("\n❌ ERRORS:")
                 for error in cycle_results["errors"]:
-                    print(f"  • {error}")
+                    print(f"  • {redact_secrets(error)}")
 
             print("\n💾 Results saved to: data/reports/")
 
@@ -509,7 +524,7 @@ def main():
         print("\n👋 Application stopped by user")
         return 0
     except Exception as e:
-        print(f"\n❌ Application error: {e}")
+        print(f"\n❌ Application error: {redact_secrets(e)}")
         return 1
 
 
