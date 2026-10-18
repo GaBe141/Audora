@@ -19,7 +19,13 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
-from core.utils import PROJECT_ROOT, confine_relative_path, open_unlinked_file, save_dataframe
+from core.utils import (
+    PROJECT_ROOT,
+    confine_relative_path,
+    mkdir_nofollow,
+    open_unlinked_file,
+    save_dataframe,
+)
 
 
 def database_path_from_config(path: str) -> str:
@@ -142,7 +148,7 @@ class EnhancedMusicDataStore:
             ):
                 raise ValueError("Backup directory must stay inside the project or temp directory")
             self.backup_dir = backup_candidate
-        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        mkdir_nofollow(self.backup_dir)
         self.logger = logging.getLogger(__name__)
 
         # Initialize cache
@@ -210,7 +216,7 @@ class EnhancedMusicDataStore:
 
         self._reject_database_symlinks()
         db_file = Path(self.db_path)
-        db_file.parent.mkdir(parents=True, exist_ok=True)
+        mkdir_nofollow(db_file.parent)
         flags = os.O_RDWR | os.O_CREAT
         fd = -1
         try:
