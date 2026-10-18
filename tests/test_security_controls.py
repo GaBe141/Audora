@@ -521,6 +521,36 @@ class TestSecretRedactionAndDashboardHost:
         )
         assert "smtp-password-value" not in mail_error
 
+    def test_redacts_teams_office_and_http_slack_webhook_urls(self):
+        teams = (
+            "https://contoso.webhook.office.com/webhookb2/"
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@tenant/IncomingWebhook/"
+            "teams-secret-value/22222222-2222-2222-2222-222222222222"
+        )
+        office = (
+            "https://outlook.office.com/webhook/"
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@tenant/IncomingWebhook/"
+            "office-secret-value/guid"
+        )
+        office365 = (
+            "https://outlook.office365.com/webhook/"
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@tenant/IncomingWebhook/"
+            "office365-secret-value/guid"
+        )
+        http_slack = "http://hooks.slack.com/services/T00/B00/http-slack-token"
+        leaked = f"post {teams} {office} {office365} {http_slack}"
+        redacted = redact_secrets(leaked)
+        assert "teams-secret-value" not in redacted
+        assert "office-secret-value" not in redacted
+        assert "office365-secret-value" not in redacted
+        assert "http-slack-token" not in redacted
+        assert "https://charts.spotify.com/chart" in redact_secrets(
+            "see https://charts.spotify.com/chart"
+        )
+        # Singular /webhook/ on an ordinary host is not a credential URL.
+        ordinary = "https://example.com/webhook/docs"
+        assert ordinary in redact_secrets(f"docs {ordinary}")
+
     def test_redacts_live_environment_secrets(self, monkeypatch):
         monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "spotify-live-secret")
         monkeypatch.setenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
