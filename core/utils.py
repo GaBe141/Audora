@@ -1066,6 +1066,36 @@ def _redact_basic_authorization(match: re.Match[str]) -> str:
     return match.group(0)
 
 
+# Spotipy logs the token-request body with ``%r``. That line contains
+# ``'code': '<authorization code>'`` and, for PKCE, ``'code_verifier': ...``.
+# The verifier plus the code redeem an access token without the client secret.
+# A short ``code=`` value (a status, a language, a chart name) is not a credential.
+_OAUTH_FIELD_RE = re.compile(
+    r"(?i)(?:(?P<quote>['\"])(?P<qkey>code_verifier|code)(?P=quote)\s*:\s*(?P<vquote>['\"])|"
+    r"(?:^|[?&])(?P<qkey2>code_verifier|code)=)"
+    r"(?P<token>[A-Za-z0-9\-._~+/=]{8,})"
+)
+
+
+def _oauth_field_is_secret(key: str, token: str) -> bool:
+    """True when an OAuth code or PKCE verifier is long enough to be a credential."""
+    if key == "code_verifier":
+        return True
+    if len(token) >= 43:
+        return True
+    return len(token) >= 20 and any(char in token for char in "0123456789-._~+/")
+
+
+def _redact_oauth_field(match: re.Match[str]) -> str:
+    """Drop an authorization code or PKCE verifier and keep the surrounding text."""
+    token = match.group("token")
+    key = (match.group("qkey") or match.group("qkey2") or "").lower()
+    if not _oauth_field_is_secret(key, token):
+        return match.group(0)
+    prefix = match.group(0)[: -len(token)]
+    return f"{prefix}REDACTED"
+
+
 def redact_secrets(value: Any, *known_secrets: str) -> str:
     """Remove API keys, webhook URLs, and authorization secrets from text.
 
@@ -1097,6 +1127,7 @@ def redact_secrets(value: Any, *known_secrets: str) -> str:
     text = _BEARER_RE.sub(r"\1REDACTED", text)
     text = _BASIC_AUTH_RE.sub(_redact_basic_authorization, text)
     text = _BOT_AUTH_RE.sub(r"\1REDACTED", text)
+    text = _OAUTH_FIELD_RE.sub(_redact_oauth_field, text)
     text = _WEBHOOK_SECRET_RE.sub("https://webhook.invalid/REDACTED", text)
     text = _AUDIODB_KEY_RE.sub(r"\1REDACTED", text)
     return text
