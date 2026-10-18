@@ -1021,8 +1021,13 @@ def neutralize_csv_frame(df: Any) -> Any:
     return neutralized
 
 
+# SoundCloud authenticates with ``client_id`` in the query string. That name
+# is not ``client_secret`` or ``api_key``, and the value lives in the API
+# config rather than an environment variable, so an exception URL keeps the
+# key. A Spotify client id inside a token-body dict is a public identifier
+# and is not this parameter.
 _SECRET_QUERY_RE = re.compile(
-    r"(?i)\b(client_secret|secret_key|shared_secret|api_key|apikey|api_secret|"
+    r"(?i)\b(client_secret|client_id|secret_key|shared_secret|api_key|apikey|api_secret|"
     r"access_token|refresh_token|bot_token|token|password|passwd|secret|sig|signature|key)"
     r"=([^&\s\"']+)"
 )
@@ -1075,17 +1080,24 @@ def _redact_basic_authorization(match: re.Match[str]) -> str:
 # ``'code': '<authorization code>'`` and, for PKCE, ``'code_verifier': ...``.
 # The verifier plus the code redeem an access token without the client secret.
 # A short ``code=`` value (a status, a language, a chart name) is not a credential.
+# The authorize URL is logged at INFO and includes ``state``. That value is
+# what stops another local page from binding this app to a different Spotify
+# account. ``token_urlsafe(32)`` is 43 characters. A short ``state=`` value is
+# left alone.
 _OAUTH_FIELD_RE = re.compile(
-    r"(?i)(?:(?P<quote>['\"])(?P<qkey>code_verifier|code)(?P=quote)\s*:\s*(?P<vquote>['\"])|"
-    r"(?:^|[?&])(?P<qkey2>code_verifier|code)=)"
+    r"(?i)(?:(?P<quote>['\"])(?P<qkey>code_verifier|code|state)(?P=quote)\s*:\s*(?P<vquote>['\"])|"
+    r"(?:^|[?&])(?P<qkey2>code_verifier|code|state)=)"
     r"(?P<token>[A-Za-z0-9\-._~+/=]{8,})"
 )
 
 
 def _oauth_field_is_secret(key: str, token: str) -> bool:
-    """True when an OAuth code or PKCE verifier is long enough to be a credential."""
+    """True when an OAuth code, PKCE verifier, or CSRF state is a credential."""
     if key == "code_verifier":
         return True
+    # 22 characters is ``token_urlsafe(16)``. Shorter state values are statuses.
+    if key == "state":
+        return len(token) >= 22
     if len(token) >= 43:
         return True
     return len(token) >= 20 and any(char in token for char in "0123456789-._~+/")

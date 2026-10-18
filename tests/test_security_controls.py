@@ -745,6 +745,39 @@ class TestSecretRedactionAndDashboardHost:
         short_word = "a" * 30
         assert short_word in redact_secrets(f"?code={short_word}")
 
+    def test_redacts_oauth_state_and_soundcloud_client_id(self):
+        """Login CSRF state and SoundCloud client ids must not survive in logs."""
+        state = "K7xQ" + ("a1" * 20)
+        soundcloud_id = "0123456789abcdef0123456789abcdef"
+        challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        leaked = (
+            "Opened https://accounts.spotify.com/authorize?client_id=spotify-public-id"
+            "&response_type=code&redirect_uri=http://127.0.0.1:8888/callback"
+            f"&state={state} in your browser "
+            f"SoundCloud API exception: 401, url=URL('https://api.soundcloud.com/tracks"
+            f"?client_id={soundcloud_id}&limit=50') "
+            "{'client_id': 'spotify-client', 'grant_type': 'authorization_code'} "
+            "callback?code=200&state=abc&state=published "
+            f"code_challenge={challenge} "
+            "client_secret=spotify-secret "
+            "https://charts.spotify.com/chart "
+            "https://example.com/webhook/docs"
+        )
+        redacted = redact_secrets(leaked)
+        assert state not in redacted
+        assert soundcloud_id not in redacted
+        assert "spotify-public-id" not in redacted
+        assert "spotify-secret" not in redacted
+        assert "state=REDACTED" in redacted
+        assert "client_id=REDACTED" in redacted
+        assert "'client_id': 'spotify-client'" in redacted
+        assert "state=abc" in redacted
+        assert "state=published" in redacted
+        assert "code=200" in redacted
+        assert challenge in redacted
+        assert "https://charts.spotify.com/chart" in redacted
+        assert "https://example.com/webhook/docs" in redacted
+
     def test_spotify_session_ignores_proxy_ca_and_redirects(self, monkeypatch):
         """Spotipy must not send the refresh token through env proxy, CA, or a 307."""
         monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
