@@ -612,6 +612,42 @@ class TestSecretRedactionAndDashboardHost:
         assert not is_sensitive_filename("ENTRY~1.SW~")
         assert not is_sensitive_filename("#ENTRY~1.SW~")
         for long_name in (
+            "#secrets.pem#",
+            "secrets.pem~",
+            "#token.key#",
+            "token.key~",
+            "#client.p12#",
+            "client.p12~",
+            "#client.pfx#",
+            "client.pfx~",
+            "#login.ppk#",
+            "login.ppk~",
+        ):
+            aliases = _windows_short_aliases(long_name)
+            assert any(alias.endswith(("pe~", "ke~", "p1~", "pf~", "pp~")) for alias in aliases)
+            for alias in aliases:
+                assert is_sensitive_filename(alias), alias
+                assert is_sensitive_filename(alias.upper() + "::$DATA"), alias
+        assert is_sensitive_filename("#SECRE~1.PE~")
+        assert is_sensitive_filename("SECRET~1.PE~")
+        assert is_sensitive_filename("#TOKEN~1.KE~")
+        assert is_sensitive_filename("TOKEN~1.KE~")
+        assert is_sensitive_filename("#CLIEN~1.P1~")
+        assert is_sensitive_filename("CLIENT~1.P1~")
+        assert is_sensitive_filename("#CLIEN~1.PF~")
+        assert is_sensitive_filename("CLIENT~1.PF~")
+        assert is_sensitive_filename("#LOGIN~1.PP~")
+        assert is_sensitive_filename("LOGIN~1.PP~")
+        # Safe-extension forms of ordinary documents that share those two
+        # letters are refused on purpose. The untruncated extensions stay open.
+        assert is_sensitive_filename("ARCHIV~1.PE~")
+        assert not is_sensitive_filename("ARCHIV~1.PEO")
+        assert is_sensitive_filename("README~1.KE~")
+        assert is_sensitive_filename("SLIDES~1.PP~")
+        assert not is_sensitive_filename("SLIDES~1.PPT")
+        for plain_name in ("archive.people", "slides.pptx", "notes.txt", "report.csv"):
+            assert not is_sensitive_filename(plain_name)
+        for long_name in (
             "#.env~#",
             "#id_rsa.bak#",
             "#id_rsa.swp#",
