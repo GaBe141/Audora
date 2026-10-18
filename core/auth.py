@@ -5,10 +5,14 @@ import secrets
 import requests
 import spotipy
 import urllib3
-from requests.adapters import HTTPAdapter
 from spotipy.oauth2 import SpotifyOAuth
 
-from core.utils import PROJECT_ROOT, JsonTokenCache, credentialed_requests_session
+from core.utils import (
+    PROJECT_ROOT,
+    JsonTokenCache,
+    credentialed_requests_session,
+    credentialed_tls_adapter,
+)
 
 from .config import get_config
 
@@ -26,9 +30,13 @@ _API_RETRY = urllib3.Retry(
 
 
 def _spotify_api_session() -> requests.Session:
-    """API session with Spotipy's retries, still blind to proxy env and redirects."""
+    """API session with Spotipy's retries, still blind to proxy env, redirects, and key logs.
+
+    Replacing the mounted adapter with a stock ``HTTPAdapter`` would let urllib3
+    write TLS session keys again. The auth session stays separate and does not retry.
+    """
     session = credentialed_requests_session()
-    adapter = HTTPAdapter(max_retries=_API_RETRY)
+    adapter = credentialed_tls_adapter(max_retries=_API_RETRY)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session

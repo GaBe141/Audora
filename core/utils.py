@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -1119,25 +1120,60 @@ class _NoRedirectRequestsSession(requests.Session):
         return super().request(method, url, **kwargs)
 
 
-def credentialed_requests_session() -> requests.Session:
-    """Open a requests session that will not leak credentials to a proxy or a redirect."""
-    return _NoRedirectRequestsSession()
-
-
 def public_tls_context() -> ssl.SSLContext:
-    """Return a TLS client context that ignores environment CA overrides.
+    """Return a TLS client context that ignores environment CA overrides and key logs.
 
     ``ssl.create_default_context()`` loads ``SSL_CERT_FILE`` and
     ``SSL_CERT_DIR`` through ``load_default_certs()``. Those variables replace
     the public trust store. SMTP AUTH and webhook bearer tokens are sent on
     that TLS session, so a private CA in the process environment can read
-    them. Requests sessions already ignore ``REQUESTS_CA_BUNDLE`` when
-    ``trust_env`` is false and verify with their own bundle. smtplib and
-    aiohttp need that same bundle instead of the environment store.
+    them. ``SSLKEYLOGFILE`` is the same leak: a context that honors it writes
+    the session keys that decrypt those tokens. This context loads the
+    requests CA bundle and leaves the key log unset. smtplib and aiohttp take
+    the context directly. urllib3 builds its own context for requests and
+    turns the key log back on, so those sessions must pass this context in.
     """
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.load_verify_locations(cafile=requests.certs.where())
+    context.keylog_filename = None
     return context
+
+
+class _PublicTLSAdapter(HTTPAdapter):
+    """Requests adapter whose TLS context does not write session keys.
+
+    urllib3 copies ``SSLKEYLOGFILE`` onto every context it creates. The file
+    decrypts the Spotify client secret, refresh token, and API keys sent with
+    this process. A context from ``public_tls_context`` leaves that log off.
+    """
+
+    def init_poolmanager(
+        self, connections: int, maxsize: int, block: bool = False, **pool_kwargs: Any
+    ) -> None:
+        pool_kwargs["ssl_context"] = public_tls_context()
+        super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
+
+    def proxy_manager_for(self, proxy: str, **proxy_kwargs: Any) -> Any:
+        proxy_kwargs["ssl_context"] = public_tls_context()
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+
+def credentialed_requests_session() -> requests.Session:
+    """Open a requests session that will not leak credentials.
+
+    Proxy environment variables and redirects are ignored, and TLS session
+    keys are not written to ``SSLKEYLOGFILE``.
+    """
+    session = _NoRedirectRequestsSession()
+    adapter = _PublicTLSAdapter()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def credentialed_tls_adapter(**kwargs: Any) -> HTTPAdapter:
+    """Return the credentialed TLS adapter, including a caller-supplied retry policy."""
+    return _PublicTLSAdapter(**kwargs)
 
 
 def redact_secrets(value: Any, *known_secrets: str) -> str:
