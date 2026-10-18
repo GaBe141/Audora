@@ -116,9 +116,10 @@ _GENERATED_SHORT_NAME_RE = re.compile(
 )
 # Collision form: the first two basis characters plus four checksum nibbles.
 # ``.env.canary.local`` is ``ENVCAN~1.LOC`` until names collide, then
-# ``EN9DD6~1.LOC``. The third character is a hex digit, so this does not match
-# the primary basis ``ENVCAN`` or ``ENVIRO``.
-_DOTENV_CHECKSUM_BASIS_RE = re.compile(r"^en[0-9a-f]{4}$")
+# ``EN9DD6~1.LOC``. Emacs autosave ``#.env.canary#`` keeps ``#`` in the basis
+# and collides as ``#EB57A~1.CAN``. The third character is a hex digit, so this
+# does not match the primary basis ``ENVCAN``, ``ENVIRO``, or ``#ENV``.
+_DOTENV_CHECKSUM_BASIS_RE = re.compile(r"^(?:en|#e)[0-9a-f]{4}$")
 # ``.env.<mode>`` stores the mode in the extension (``.env.canary`` →
 # ``ENB38A~1.CAN``). Ordinary files that share the ``EN`` + checksum shape
 # keep ``txt`` and ``csv``. The safe-extension form rewrites the third
@@ -241,15 +242,19 @@ def _short_name_parts(name: str) -> tuple[str, str, bool, bool]:
 def _dotenv_document_checksums() -> frozenset[str]:
     """Collision bases of dotenv files whose extension is ``txt`` or ``csv``.
 
-    ``.env.txt`` is ``EN8119~1.TXT``. That extension is shared with
-    ``environment.txt`` (``EN41DD~1.TXT``), so the extension allowlist cannot
-    refuse it. The bases are derived from the long names.
+    ``.env.txt`` is ``EN8119~1.TXT`` and its Emacs autosave ``#.env.txt#`` is
+    ``#EBCAB~1.TXT``. Those extensions are shared with ``environment.txt``
+    (``EN41DD~1.TXT``, ``#E829F~1.TXT``), so the extension allowlist cannot
+    refuse them. The bases are derived from the long names.
     """
     names: list[str] = []
     for stem in (".env", ".envrc"):
         for extension in ("txt", "csv"):
-            names.append(f"{stem}.{extension}")
-            names.append(f"{stem}.{extension}~")
+            for name in (f"{stem}.{extension}", f"{stem}.{extension}~"):
+                names.append(name)
+                # Emacs autosave is ``#name#`` and the lock file is ``.#name``.
+                names.append(f"#{name}#")
+                names.append(f".#{name}")
     bases: set[str] = set()
     for name in names:
         basis, _extension, _truncated, early_checksum = _short_name_parts(name)
@@ -328,15 +333,20 @@ def _sensitive_long_names() -> set[str]:
         names.add(f".envrc.{suffix}.local")
     expanded = set(names)
     for name in names:
-        for extra in _DISGUISED_FILE_SUFFIXES:
-            expanded.add(f"{name}{extra}")
-        for number in range(1, 10):
-            expanded.add(f"{name}.{number}")
+        disguised = [f"{name}{extra}" for extra in _DISGUISED_FILE_SUFFIXES]
+        disguised.extend(f"{name}.{number}" for number in range(1, 10))
+        for variant in (name, *disguised):
+            expanded.add(variant)
+            # Emacs autosave is ``#name#`` and the lock file is ``.#name``.
+            # A backup wrapped that way (``#id_rsa.bak#``, ``#.env~#``) still
+            # has its own 8.3 alias.
+            expanded.add(f"#{variant}#")
+            expanded.add(f".#{variant}")
         expanded.add(f".{name}")
-        expanded.add(f"#{name}#")
-        expanded.add(f".#{name}")
         for swap in (".swp", ".swo", ".swn", ".swx"):
             expanded.add(f".{name}{swap}")
+            expanded.add(f"#{name}{swap}#")
+            expanded.add(f".#{name}{swap}")
     return expanded
 
 
@@ -380,15 +390,30 @@ def _is_windows_short_secret(candidate: str) -> bool:
     # Unlisted modes are not in ``_SHORT_SECRET_ALIASES``. After collisions
     # ``.env.<mode>`` and ``.envrc.<mode>`` keep only ``EN`` plus the checksum
     # and put the mode in the extension (``.env.canary`` → ``ENB38A~1.CAN`` /
-    # ``ENB38A~1.CA~``). ``txt`` and ``csv`` stay allowed so ``EN41DD~1.TXT``
-    # (``environment.txt``) and ``EN0EED~1.CSV`` (``envelope.csv``) still open.
-    # ``ENA51B~1`` (``envprofile``) has no extension. ``.env.txt`` uses the
-    # same extension with a different checksum and is refused by basis.
+    # ``ENB38A~1.CA~``). Emacs autosave uses the same shape with a leading
+    # ``#`` (``#.env.canary#`` → ``#EB57A~1.CAN`` / ``#EB57A~1.CA~``,
+    # ``#.env.canary.local#`` → ``#E7E5E~1.LOC``). ``txt`` and ``csv`` stay
+    # allowed so ``EN41DD~1.TXT`` (``environment.txt``) and ``#E829F~1.TXT``
+    # (``#environment.txt#``) still open. ``ENA51B~1`` and ``#E3C38~1``
+    # (``envprofile``, ``#envprofile#``) have no extension. ``.env.txt`` and
+    # ``#.env.txt#`` use that extension with a different checksum and are
+    # refused by basis.
     if _DOTENV_CHECKSUM_BASIS_RE.fullmatch(basis) is None or not extension:
         return False
     if basis in _DOTENV_DOCUMENT_CHECKSUMS:
         return True
     return extension not in _BENIGN_CHECKSUM_EXTENSIONS
+
+
+def _peel_disguise(name: str) -> str | None:
+    """Return ``name`` with one editor-backup or numeric-copy suffix removed."""
+    for extra in _DISGUISED_FILE_SUFFIXES:
+        if name.endswith(extra) and len(name) > len(extra):
+            return name[: -len(extra)]
+    numeric = _NUMERIC_COPY_RE.fullmatch(name)
+    if numeric:
+        return numeric.group(1)
+    return None
 
 
 def _filename_forms(filename: str) -> list[str]:
@@ -413,17 +438,9 @@ def _filename_forms(filename: str) -> list[str]:
         if separator and stream:
             name = stream
             continue
-        peeled = False
-        for extra in _DISGUISED_FILE_SUFFIXES:
-            if name.endswith(extra) and len(name) > len(extra):
-                name = name[: -len(extra)]
-                peeled = True
-                break
-        if peeled:
-            continue
-        numeric = _NUMERIC_COPY_RE.fullmatch(name)
-        if numeric:
-            name = numeric.group(1)
+        peeled = _peel_disguise(name)
+        if peeled is not None:
+            name = peeled
             continue
         break
     return forms
@@ -434,7 +451,8 @@ def _secret_name_candidates(form: str) -> list[str]:
 
     Vim writes the swap for ``id_rsa`` as ``.id_rsa.swp`` and the swap for
     ``.env`` as ``..env.swp``. Emacs uses ``#id_rsa#`` and ``.#id_rsa``.
-    Stripping those prefixes must still recognize the secret.
+    Stripping those prefixes must still recognize the secret, including when
+    the autosave wraps a backup (``#id_rsa.bak#``, ``#.env~#``).
     """
     candidates: list[str] = []
     pending = [form]
@@ -451,6 +469,9 @@ def _secret_name_candidates(form: str) -> list[str]:
             pending.append(current[1:-1])
         elif current.startswith("#") and len(current) > 1:
             pending.append(current[1:])
+        peeled = _peel_disguise(current)
+        if peeled is not None:
+            pending.append(peeled)
     return candidates
 
 
@@ -478,7 +499,8 @@ def is_sensitive_filename(filename: str) -> bool:
     Disguises include Windows 8.3 short names such as ``ENV~1``,
     ``ENVPRO~1.LOC`` for ``.env.production.local``, ``EN9DD6~1.LOC`` for
     ``.env.canary.local`` after short-name collisions, ``ENB38A~1.CAN`` for
-    ``.env.canary``, and ``NOTIFI~1.JSO``.
+    ``.env.canary``, ``#EB57A~1.CAN`` for the Emacs autosave ``#.env.canary#``,
+    and ``NOTIFI~1.JSO``.
     The canonical live config names stay readable through the JSON helpers;
     their short names do not.
     """
