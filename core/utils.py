@@ -109,7 +109,31 @@ _ENV_SHORT_SUFFIXES = (
 )
 # First three characters of sensitive extensions that do not fit in 8.3,
 # plus the FsRtlSafeExtensions form that rewrites the third character to "~".
-_TRUNCATED_SECRET_EXTENSIONS = frozenset({"sql", "sq~", "kdb", "kd~", "tfs", "tf~", "db-", "db~"})
+# ``.pem``, ``.key``, ``.p12``, ``.pfx``, and ``.ppk`` fit until Emacs adds
+# ``#`` or a backup adds ``~``. That extra character makes Windows emit
+# ``PE~``, ``KE~``, ``P1~``, ``PF~``, or ``PP~`` (``#secrets.pem#`` →
+# ``#SECRE~1.PE~``, ``token.key~`` → ``TOKEN~1.KE~``). The untruncated
+# spelling still ends in the real suffix and is refused above. ``PE~`` also
+# matches ``.people``; ``KE~`` matches ``.keynote``; ``PP~`` matches
+# ``.pptx``. Those safe-extension aliases are refused on purpose. The
+# untruncated ``PEO`` and ``PPT`` forms stay allowed.
+_TRUNCATED_SECRET_EXTENSIONS = frozenset(
+    {
+        "sql",
+        "sq~",
+        "kdb",
+        "kd~",
+        "tfs",
+        "tf~",
+        "db-",
+        "db~",
+        "pe~",
+        "ke~",
+        "p1~",
+        "pf~",
+        "pp~",
+    }
+)
 _GENERATED_SHORT_NAME_RE = re.compile(
     r"^([a-z0-9_$%'@`!(){}^#&\-]{1,6})~(\d{1,6})"
     r"(?:\.([a-z0-9_$%'@`!(){}^#&\-]{0,2}~?|[a-z0-9_$%'@`!(){}^#&\-]{1,3}))?$"
@@ -512,7 +536,8 @@ def is_sensitive_filename(filename: str) -> bool:
     ``ENVPRO~1.LOC`` for ``.env.production.local``, ``EN9DD6~1.LOC`` for
     ``.env.canary.local`` after short-name collisions, ``ENB38A~1.CAN`` for
     ``.env.canary``, ``#EB57A~1.CAN`` for the Emacs autosave ``#.env.canary#``,
-    ``#ENVCA~1.SW~`` for ``#.env.canary.swp#``, and ``NOTIFI~1.JSO``.
+    ``#ENVCA~1.SW~`` for ``#.env.canary.swp#``, ``#SECRE~1.PE~`` for
+    ``#secrets.pem#``, and ``NOTIFI~1.JSO``.
     The canonical live config names stay readable through the JSON helpers;
     their short names do not.
     """
