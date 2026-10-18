@@ -940,6 +940,32 @@ class TestSecretRedactionAndDashboardHost:
         assert dashboard_request_allowed("127.0.0.1:8050", None, "cross-site", "GET")
         assert not dashboard_request_allowed("\u2028127.0.0.1:8050", None, None, "GET")
         assert not dashboard_request_allowed("127.0.0.1:8050\ufeff", None, None, "GET")
+        assert dashboard_request_allowed(
+            "127.0.0.1.:8050", "http://127.0.0.1.:8050", "same-origin", "POST"
+        )
+        assert not dashboard_request_allowed(
+            "127.0.0.1..:8050", "http://127.0.0.1..:8050", "same-origin", "POST"
+        )
+        assert not dashboard_request_allowed("localhost..", None, None, "GET")
+        assert not dashboard_request_allowed(
+            "127.0.0.1:08050", "http://127.0.0.1:08050", "same-origin", "POST"
+        )
+        assert not dashboard_request_allowed(
+            "127.0.0.1:8050", "http://127.0.0.1:08050", "same-origin", "POST"
+        )
+        assert not dashboard_request_allowed("[::1]:08050", None, None, "GET")
+        assert not dashboard_request_allowed(
+            "127.0.0.1:8050", "http://127.0.0.1:8050\r\n", "same-origin", "POST"
+        )
+        assert not dashboard_request_allowed(
+            "127.0.0.1:8050", "http://127.0.0.1:8050\u00a0", "same-origin", "POST"
+        )
+        assert not dashboard_request_allowed(
+            "127.0.0.1:8050", "http://127.0.0.1:8050\u3000", "same-origin", "POST"
+        )
+        assert not dashboard_request_allowed(
+            "127.0.0.1:8050", "\u2028http://127.0.0.1:8050", "same-origin", "POST"
+        )
 
 
 class TestDatabaseBackup:
