@@ -1032,11 +1032,18 @@ _BEARER_RE = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9\-._~+/]+=*")
 # Discord documents both ``/api/webhooks/`` and ``/api/v10/webhooks/``. The
 # version segment is the live token URL, so a pattern that stops at ``/api/``
 # leaves that bearer token in logs and dashboard errors. Slack workflow and
-# GovSlack hosts use the same kind of unguessable path.
+# GovSlack hosts use the same kind of unguessable path. Teams and legacy
+# Office 365 connectors put the secret in ``/webhookb2/`` or ``/webhook/``,
+# which is not the ``/webhooks/`` segment the generic pattern matches. An
+# ``http://`` Slack URL carries the same token as the https form.
 _WEBHOOK_SECRET_RE = re.compile(
-    r"(?i)https://(?:hooks\.slack(?:-gov)?\.com/(?:services|workflows|triggers)/\S+"
-    r"|(?:[\w.-]+\.)?discord(?:app)?\.com/api(?:/v\d+)?/webhooks/\S+"
-    r"|\S+/(?:webhooks|hooks|services|workflows|triggers)/\S+)"
+    r"(?i)(?:"
+    r"https?://hooks\.slack(?:-gov)?\.com/(?:services|workflows|triggers)/\S+"
+    r"|https://(?:[\w.-]+\.)?discord(?:app)?\.com/api(?:/v\d+)?/webhooks/\S+"
+    r"|https://(?:(?:[\w.-]+\.)?webhook\.office\.com|outlook\.office(?:365)?\.com)"
+    r"/(?:webhookb2|webhook)/\S+"
+    r"|https://\S+/(?:webhooks|hooks|services|workflows|triggers)/\S+"
+    r")"
 )
 _AUDIODB_KEY_RE = re.compile(r"(?i)(/api/v1/json/)([^/\s\"']+)")
 
