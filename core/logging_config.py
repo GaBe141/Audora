@@ -6,10 +6,86 @@ file and console output, improving observability and debugging capabilities.
 
 import json
 import logging
+import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from core.utils import open_unlinked_file, redact_secrets
+
+
+def _redact_log_value(value: Any) -> Any:
+    """Redact secrets in a log field before it is serialized.
+
+    Nested mappings are walked so a structured extra cannot keep a webhook
+    URL or API key that a top-level string check would miss. The serialized
+    JSON document is left alone: a URL pattern would consume the closing quote.
+    """
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            safe_key = redact_secrets(key) if isinstance(key, str) else key
+            redacted[safe_key] = _redact_log_value(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_log_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_log_value(item) for item in value)
+    if value is None or isinstance(value, int | float | bool):
+        return value
+    return redact_secrets(value)
+
+
+_LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+
+def safe_log_level(level: str | int) -> int:
+    """Map a configured level to a real logging level.
+
+    Config values are allowlisted so a file cannot select arbitrary logging objects.
+    """
+    if isinstance(level, int):
+        return level
+    return _LOG_LEVELS.get(str(level).upper(), logging.INFO)
+
+
+def safe_log_filename(name: str) -> str:
+    """Drop directory components from a log file name."""
+    base = Path(str(name)).name
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", base).strip("._")
+    return cleaned or "audora"
+
+
+class NofollowFileHandler(logging.FileHandler):
+    """File handler that refuses symlink and hard-link targets and keeps logs mode 600."""
+
+    def _open(self) -> Any:
+        if Path(self.baseFilename).is_symlink():
+            raise OSError(f"Refusing to log through a symlink: {self.baseFilename}")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        try:
+            fd = open_unlinked_file(self.baseFilename, flags, 0o600)
+        except ValueError as exc:
+            raise OSError(str(exc)) from exc
+        try:
+            if os.name != "nt":
+                os.fchmod(fd, 0o600)
+            handle = os.fdopen(fd, "a", encoding=self.encoding or "utf-8")
+            fd = -1
+            return handle
+        finally:
+            if fd >= 0:
+                os.close(fd)
 
 
 class JSONFormatter(logging.Formatter):
@@ -32,7 +108,7 @@ class JSONFormatter(logging.Formatter):
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": _redact_log_value(record.getMessage()),
             "module": record.module,
             "function": record.funcName,
             "line": record.lineno,
@@ -44,13 +120,14 @@ class JSONFormatter(logging.Formatter):
         if record.exc_info:
             log_data["exception"] = {
                 "type": record.exc_info[0].__name__ if record.exc_info[0] else None,
-                "message": str(record.exc_info[1]) if record.exc_info[1] else None,
-                "traceback": self.formatException(record.exc_info),
+                "message": (_redact_log_value(record.exc_info[1]) if record.exc_info[1] else None),
+                "traceback": _redact_log_value(self.formatException(record.exc_info)),
             }
 
         # Add custom fields from 'extra' parameter
-        if hasattr(record, "extra_fields"):
-            log_data.update(record.extra_fields)
+        extra_fields = getattr(record, "extra_fields", None)
+        if isinstance(extra_fields, dict):
+            log_data.update({key: _redact_log_value(value) for key, value in extra_fields.items()})
 
         # Add any other custom attributes
         for key, value in record.__dict__.items():
@@ -79,14 +156,28 @@ class JSONFormatter(logging.Formatter):
                 "extra_fields",
             ]:
                 try:
-                    log_data[key] = value
+                    log_data[key] = _redact_log_value(value)
                 except (TypeError, ValueError):
-                    log_data[key] = str(value)
+                    log_data[key] = redact_secrets(value)
 
+        # Scrub before serialization. Redacting the JSON text would swallow the
+        # closing quote that follows a token URL.
         return json.dumps(log_data, default=str)
 
 
-class ColoredConsoleFormatter(logging.Formatter):
+class RedactingFormatter(logging.Formatter):
+    """Plain-text formatter that removes secrets from the rendered line.
+
+    Discovery and setup install this on both the console and the log file.
+    A stock Formatter writes webhook URLs and API keys in cleartext, including
+    when stdout is not a terminal and when file logs are not JSON.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_secrets(super().format(record))
+
+
+class ColoredConsoleFormatter(RedactingFormatter):
     """Format log records with colors for console output.
 
     This formatter adds ANSI color codes for different log levels,
@@ -158,11 +249,14 @@ def setup_logging(
     """
     # Create log directory
     log_path = Path(log_dir)
+    if log_path.is_symlink():
+        raise ValueError("Refusing to write logs through a symlinked directory")
     log_path.mkdir(parents=True, exist_ok=True)
+    level = safe_log_level(log_level)
 
     # Get root logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
+    root_logger.setLevel(level)
 
     # Remove existing handlers to avoid duplicates
     root_logger.handlers = []
@@ -170,15 +264,15 @@ def setup_logging(
     # Console handler (human-readable with colors)
     if console_output:
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(log_level)
+        console_handler.setLevel(level)
 
         if sys.stdout.isatty():  # Use colors only in interactive terminals
-            console_formatter = ColoredConsoleFormatter(
+            console_formatter: logging.Formatter = ColoredConsoleFormatter(
                 fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
         else:
-            console_formatter = logging.Formatter(
+            console_formatter = RedactingFormatter(
                 fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
@@ -191,15 +285,15 @@ def setup_logging(
         timestamp = datetime.now().strftime("%Y%m%d")
 
         # Main log file (all levels)
-        main_log_file = log_path / f"{app_name}_{timestamp}.log"
-        main_handler = logging.FileHandler(main_log_file, encoding="utf-8")
-        main_handler.setLevel(log_level)
+        main_log_file = log_path / f"{safe_log_filename(app_name)}_{timestamp}.log"
+        main_handler = NofollowFileHandler(main_log_file, encoding="utf-8")
+        main_handler.setLevel(level)
 
         if json_logs:
             main_handler.setFormatter(JSONFormatter())
         else:
             main_handler.setFormatter(
-                logging.Formatter(
+                RedactingFormatter(
                     fmt="%(asctime)s - %(name)s - %(levelname)s - "
                     "%(module)s:%(funcName)s:%(lineno)d - %(message)s",
                     datefmt="%Y-%m-%d %H:%M:%S",
@@ -209,15 +303,15 @@ def setup_logging(
         root_logger.addHandler(main_handler)
 
         # Error log file (ERROR and CRITICAL only)
-        error_log_file = log_path / f"{app_name}_errors_{timestamp}.log"
-        error_handler = logging.FileHandler(error_log_file, encoding="utf-8")
+        error_log_file = log_path / f"{safe_log_filename(app_name)}_errors_{timestamp}.log"
+        error_handler = NofollowFileHandler(error_log_file, encoding="utf-8")
         error_handler.setLevel(logging.ERROR)
 
         if json_logs:
             error_handler.setFormatter(JSONFormatter())
         else:
             error_handler.setFormatter(
-                logging.Formatter(
+                RedactingFormatter(
                     fmt="%(asctime)s - %(name)s - %(levelname)s - "
                     "%(module)s:%(funcName)s:%(lineno)d - %(message)s\n"
                     "Exception: %(exc_info)s",
@@ -312,6 +406,10 @@ __all__ = [
     "setup_logging",
     "get_logger",
     "JSONFormatter",
+    "RedactingFormatter",
     "ColoredConsoleFormatter",
     "LogContext",
+    "NofollowFileHandler",
+    "safe_log_level",
+    "safe_log_filename",
 ]
