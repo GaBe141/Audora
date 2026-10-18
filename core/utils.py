@@ -804,20 +804,39 @@ _SECRET_QUERY_RE = re.compile(
 )
 _SECRET_JSON_RE = re.compile(
     r"""(?i)(["'])(client_secret|secret_key|shared_secret|api_key|api_secret|"""
-    r"""access_token|refresh_token|bot_token|password)\1\s*:\s*(["'])([^"']*)\3"""
+    r"""access_token|refresh_token|bot_token|password|webhook_url)\1"""
+    r"""\s*:\s*(["'])([^"']*)\3"""
 )
 _URL_USERINFO_RE = re.compile(r"(?i)(https?://)([^/\s:@]+):([^/\s@]+)@")
 _BEARER_RE = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9\-._~+/]+=*")
+# Discord documents both ``/api/webhooks/`` and ``/api/v10/webhooks/``. The
+# version segment is the live token URL, so a pattern that stops at ``/api/``
+# leaves that bearer token in logs and dashboard errors. Slack workflow and
+# GovSlack hosts use the same kind of unguessable path.
 _WEBHOOK_SECRET_RE = re.compile(
-    r"(?i)https://(?:hooks\.slack\.com/services/\S+"
-    r"|(?:[\w.-]+\.)?discord(?:app)?\.com/api/webhooks/\S+)"
+    r"(?i)https://(?:hooks\.slack(?:-gov)?\.com/(?:services|workflows|triggers)/\S+"
+    r"|(?:[\w.-]+\.)?discord(?:app)?\.com/api(?:/v\d+)?/webhooks/\S+"
+    r"|\S+/(?:webhooks|hooks|services|workflows|triggers)/\S+)"
 )
 _AUDIODB_KEY_RE = re.compile(r"(?i)(/api/v1/json/)([^/\s\"']+)")
 
 
-def redact_secrets(value: Any) -> str:
-    """Remove API keys, webhook URLs, and URL passwords from an error string."""
+def redact_secrets(value: Any, *known_secrets: str) -> str:
+    """Remove API keys, webhook URLs, and URL passwords from an error string.
+
+    ``known_secrets`` are exact values already in hand, such as a custom
+    webhook URL or an SMTP password. Provider patterns do not match every
+    token URL, and a response body can echo the URL that was just called.
+    Only values of 8 characters or more are erased, so a short password cannot
+    punch holes through an unrelated error message.
+    """
     text = str(value)
+    for secret in sorted(
+        (item for item in known_secrets if isinstance(item, str) and len(item) >= 8),
+        key=len,
+        reverse=True,
+    ):
+        text = text.replace(secret, "REDACTED")
     text = _URL_USERINFO_RE.sub(r"\1REDACTED:REDACTED@", text)
     text = _SECRET_JSON_RE.sub(r"\1\2\1: \3REDACTED\3", text)
     text = _SECRET_QUERY_RE.sub(r"\1=REDACTED", text)
