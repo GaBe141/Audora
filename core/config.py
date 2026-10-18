@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 from dotenv import dotenv_values
 
-from core.utils import read_nofollow_text, write_private_text
+from core.utils import contains_unsafe_codepoint, read_nofollow_text, write_private_text
 
 
 class SecureConfig:
@@ -255,7 +255,10 @@ def validate_spotify_redirect_uri(redirect_uri: str) -> str:
     if not isinstance(redirect_uri, str):
         raise ValueError("Invalid redirect URI: value must be a string")
     cleaned = redirect_uri.strip()
-    if "\\" in cleaned or any(ord(char) < 32 or ord(char) == 127 for char in cleaned):
+    # Check the raw value. ``str.strip`` deletes Unicode line separators, and
+    # a BOM or zero-width character left in the URI is a different host to
+    # some browsers than the host urlparse reports.
+    if "\\" in redirect_uri or contains_unsafe_codepoint(redirect_uri, format_chars=True):
         raise ValueError(
             f"Invalid redirect URI: {redirect_uri}\n"
             "Redirect URIs cannot contain control characters or backslashes"
