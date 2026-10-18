@@ -31,6 +31,7 @@ from core.utils import (
     neutralize_csv_frame,
     open_project_writer,
     read_json,
+    read_nofollow_text,
     redact_secrets,
     resolve_project_path,
     save_dataframe,
@@ -334,6 +335,25 @@ class TestProjectPathConfinement:
             with pytest.raises(ValueError, match="hard-linked"):
                 opener()
         assert outside.read_text(encoding="utf-8") == "SPOTIFY_CLIENT_SECRET=leaked\n"
+
+    def test_refuses_parent_directory_symlink(self, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "secret.txt"
+        secret.write_text("SECRET-ORIGINAL", encoding="utf-8")
+        link = tmp_path / "link"
+        link.symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="symlink"):
+            read_nofollow_text(link / "secret.txt")
+        with pytest.raises(ValueError, match="symlink"):
+            write_private_text(link / "secret.txt", "OVERWRITTEN")
+        with pytest.raises(ValueError, match="symlink"):
+            write_private_text(link / "nested" / "new.txt", "OVERWRITTEN")
+
+        assert secret.read_text(encoding="utf-8") == "SECRET-ORIGINAL"
+        assert not (outside / "nested").exists()
+        assert not (outside / "new.txt").exists()
 
     def test_email_refuses_secret_and_database_attachments(self, tmp_path, monkeypatch):
         monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
@@ -889,6 +909,19 @@ class TestDatabaseBackup:
         with pytest.raises(ValueError, match="hard-linked"):
             EnhancedMusicDataStore(str(db_path), backup_dir=str(tmp_path / "backups"))
         assert outside.read_text(encoding="utf-8") == "SECRET-ORIGINAL"
+
+    def test_database_refuses_parent_directory_symlink(self, tmp_path):
+        from core.data_store import EnhancedMusicDataStore
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "trends.db"
+        secret.write_text("SECRET-ORIGINAL", encoding="utf-8")
+        link = tmp_path / "data"
+        link.symlink_to(outside, target_is_directory=True)
+        with pytest.raises(ValueError, match="symlink"):
+            EnhancedMusicDataStore(str(link / "trends.db"), backup_dir=str(tmp_path / "backups"))
+        assert secret.read_text(encoding="utf-8") == "SECRET-ORIGINAL"
 
     def test_log_handler_refuses_hard_link(self, tmp_path):
         from core.logging_config import NofollowFileHandler
