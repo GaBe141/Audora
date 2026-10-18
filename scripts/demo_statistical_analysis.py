@@ -7,9 +7,14 @@ from pathlib import Path
 # Add src directory to path
 sys.path.append(str(Path(__file__).parent / "src"))
 sys.path.append(str(Path(__file__).parent.parent / "core"))
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 import pandas as pd
 from src.statistical_analysis import StreamingDataQualityAnalyzer
+
+from core.utils import load_dataframe, write_json  # noqa: E402
 
 
 def load_existing_data():
@@ -32,7 +37,9 @@ def load_existing_data():
         file_path = data_dir / filename
         if file_path.exists():
             try:
-                df = pd.read_csv(file_path)
+                df = load_dataframe(file_path, default_empty=False)
+                if df is None:
+                    continue
                 loaded_files[filename] = df
                 print(f"   ✅ {filename}: {len(df)} rows, {len(df.columns)} columns")
             except Exception as e:
@@ -280,9 +287,6 @@ def create_analysis_report(data_files, insights):
             "missing_values": df.isnull().sum().to_dict(),
             "sample_data": df.head(3).to_dict("records") if len(df) > 0 else [],
         }
-
-    # Save report using centralized utility
-    from core.utils import write_json
 
     report_path = Path("data") / "streaming_analysis_report.json"
     write_json(str(report_path), report)
