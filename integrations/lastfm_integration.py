@@ -7,13 +7,14 @@ import time
 import pandas as pd
 import requests
 
+from core.config import get_config
 from core.exceptions import APIConnectionError, APIResponseError
-
-from .config import get_config
+from core.utils import redact_secrets
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 
 class LastFmAPI:
@@ -22,6 +23,7 @@ class LastFmAPI:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.session = requests.Session()
+        self.session.trust_env = False
         self.last_request_time = 0
         self.rate_limit_delay = 0.2  # 5 requests per second max
 
@@ -40,7 +42,14 @@ class LastFmAPI:
         request_params = {"method": method, "api_key": self.api_key, "format": "json", **params}
 
         try:
-            response = self.session.get(BASE_URL, params=request_params, timeout=10)
+            response = self.session.get(
+                BASE_URL, params=request_params, timeout=10, allow_redirects=False
+            )
+            if getattr(response, "status_code", None) in _REDIRECT_STATUSES:
+                raise APIConnectionError(
+                    message="Last.fm refused redirect",
+                    details={"method": method, "status_code": response.status_code},
+                )
             response.raise_for_status()
             data = response.json()
 
@@ -56,15 +65,17 @@ class LastFmAPI:
         except APIResponseError:
             raise
         except requests.exceptions.RequestException as e:
-            logger.error("Last.fm request failed for %s: %s", method, e)
+            safe_error = redact_secrets(e)
+            logger.error("Last.fm request failed for %s: %s", method, safe_error)
             raise APIConnectionError(
-                message=f"Last.fm request failed: {e}",
+                message=f"Last.fm request failed: {safe_error}",
                 details={"method": method},
             ) from e
         except json.JSONDecodeError as e:
-            logger.error("Last.fm returned invalid JSON for %s: %s", method, e)
+            safe_error = redact_secrets(e)
+            logger.error("Last.fm returned invalid JSON for %s: %s", method, safe_error)
             raise APIResponseError(
-                message=f"Last.fm returned invalid JSON: {e}",
+                message=f"Last.fm returned invalid JSON: {safe_error}",
                 details={"method": method},
             ) from e
 
