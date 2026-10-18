@@ -20,6 +20,55 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 _CSV_FORMULA_STARTS = ("=", "+", "-", "@")
+# Live credentials. Redaction uses these values when they are present so an
+# exception that echoes the raw secret is not written to a log or a report.
+# Names that hold usernames, paths, or ordinary settings are not listed.
+_SECRET_ENV_NAMES = (
+    "SPOTIFY_CLIENT_SECRET",
+    "LASTFM_API_KEY",
+    "LASTFM_SHARED_SECRET",
+    "SMTP_PASSWORD",
+    "SLACK_WEBHOOK_URL",
+    "DISCORD_WEBHOOK_URL",
+    "CUSTOM_WEBHOOK_URL",
+    "WEBHOOK_TOKEN",
+    "SMS_API_KEY",
+    "SMS_API_SECRET",
+    "AUDIODB_API_KEY",
+    "AUDORA_CACHE_SIGNING_KEY",
+    "YOUTUBE_API_KEY",
+    "TWITTER_BEARER_TOKEN",
+    "TIKTOK_API_KEY",
+    "REDDIT_CLIENT_SECRET",
+    "INSTAGRAM_ACCESS_TOKEN",
+)
+
+
+def contains_unsafe_codepoint(value: str, *, format_chars: bool = False) -> bool:
+    """True when text contains a character parsers disagree about.
+
+    ASCII controls and DEL are the usual header and URL injections. Unicode
+    line and paragraph separators and the next-line control are stripped by
+    some parsers and kept by others. Format characters such as a BOM or a
+    zero-width space, and Unicode spaces such as a non-breaking space, are
+    the same kind of split when ``format_chars`` is set. A redirect or
+    webhook checked after ``str.strip`` can then name a different host than
+    the one that is requested. Email subjects leave format characters alone
+    so a track title can contain an emoji joiner.
+    """
+    if not isinstance(value, str):
+        return True
+    for char in value:
+        if ord(char) < 32 or ord(char) == 127:
+            return True
+        category = unicodedata.category(char)
+        if category in {"Cc", "Zl", "Zp", "Cs"}:
+            return True
+        if format_chars and category in {"Cf", "Zs"}:
+            return True
+    return False
+
+
 _SECRET_FILE_NAMES = {
     ".env",
     ".cache",
@@ -1002,8 +1051,17 @@ def redact_secrets(value: Any, *known_secrets: str) -> str:
     punch holes through an unrelated error message.
     """
     text = str(value)
+    env_secrets = []
+    for name in _SECRET_ENV_NAMES:
+        raw = os.environ.get(name)
+        if isinstance(raw, str):
+            env_secrets.append(raw)
     for secret in sorted(
-        (item for item in known_secrets if isinstance(item, str) and len(item) >= 8),
+        (
+            item
+            for item in (*known_secrets, *env_secrets)
+            if isinstance(item, str) and len(item) >= 8
+        ),
         key=len,
         reverse=True,
     ):
@@ -1021,12 +1079,12 @@ def is_loopback_http_host(host_header: str) -> bool:
     """True when a Host or Origin netloc is localhost or a loopback address."""
     if not isinstance(host_header, str):
         return False
+    # Check the raw header. ``str.strip`` removes Unicode line separators, so
+    # a host of ``\\u2028127.0.0.1`` would otherwise become the loopback name.
+    if contains_unsafe_codepoint(host_header, format_chars=True):
+        return False
     host = host_header.strip().lower()
-    if (
-        not host
-        or any(ord(char) < 32 or ord(char) == 127 for char in host)
-        or any(char in host for char in "\\@ ")
-    ):
+    if not host or any(char in host for char in "\\@ "):
         return False
     if host.startswith("["):
         end = host.find("]")
