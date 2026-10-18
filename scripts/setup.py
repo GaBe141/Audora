@@ -14,8 +14,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.logging_config import NofollowFileHandler
-from core.utils import resolve_project_path, write_private_text
+from core.logging_config import NofollowFileHandler, RedactingFormatter
+from core.utils import redact_secrets, resolve_project_path, write_private_text
 
 # Enhanced package list with new dependencies
 ENHANCED_PACKAGES = [
@@ -71,13 +71,14 @@ class EnhancedMusicDiscoverySetup:
         """Set up logging for setup process."""
         log_path = resolve_project_path("logs/setup.log")
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        formatter = RedactingFormatter(fmt="%(asctime)s - %(levelname)s - %(message)s")
+        stream = logging.StreamHandler(sys.stdout)
+        stream.setFormatter(formatter)
+        file_handler = NofollowFileHandler(log_path)
+        file_handler.setFormatter(formatter)
         logging.basicConfig(
             level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-            handlers=[
-                logging.StreamHandler(sys.stdout),
-                NofollowFileHandler(log_path),
-            ],
+            handlers=[stream, file_handler],
         )
         return logging.getLogger(__name__)
 
@@ -731,8 +732,8 @@ def main():
         print("\n⚠️ Setup interrupted by user.")
         return 1
     except Exception as e:
-        print(f"\n❌ Setup failed with error: {e}")
-        logging.error(f"Unexpected error during setup: {e}")
+        print(f"\n❌ Setup failed with error: {redact_secrets(e)}")
+        logging.error("Unexpected error during setup: %s", redact_secrets(e))
         return 1
 
 
