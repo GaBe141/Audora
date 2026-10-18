@@ -10,7 +10,6 @@ import logging
 import os
 import smtplib
 import socket
-import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import encoders
@@ -30,6 +29,7 @@ from core.utils import (
     confine_relative_path,
     contains_unsafe_codepoint,
     is_sensitive_filename,
+    public_tls_context,
     read_json,
     read_nofollow_bytes,
     redact_secrets,
@@ -590,7 +590,9 @@ class EnhancedNotificationService:
         parsed = urlparse(url)
         client_host = self._webhook_client_host(url, parsed.hostname or "")
         resolver = _PinnedResolver(client_host, addresses)
-        connector = _PinnedConnector(resolver=resolver)  # type: ignore[arg-type]
+        # The pinned connector still has to ignore SSL_CERT_FILE. aiohttp's
+        # default context loads that CA and would decrypt the bearer token.
+        connector = _PinnedConnector(resolver=resolver, ssl=public_tls_context())  # type: ignore[arg-type]
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         async with (
             aiohttp.ClientSession(
@@ -948,7 +950,8 @@ System status: {{ system_status }}
             server: smtplib.SMTP
             if use_tls and port == 465:
                 # Python 3.12 SMTP_SSL() without a context uses CERT_NONE.
-                server = smtplib.SMTP_SSL(context=ssl.create_default_context(), timeout=30)
+                # The default context would still honor SSL_CERT_FILE.
+                server = smtplib.SMTP_SSL(context=public_tls_context(), timeout=30)
             else:
                 server = smtplib.SMTP(timeout=30)
             # connect() does not set _host. The certificate name must stay the
@@ -956,7 +959,7 @@ System status: {{ system_status }}
             server._host = hostname  # type: ignore[attr-defined]
             server.connect(pinned_ip, port)
             if use_tls and port != 465:
-                server.starttls(context=ssl.create_default_context())
+                server.starttls(context=public_tls_context())
 
             if email_config.get("username") and email_config.get("password"):
                 server.login(email_config["username"], email_config["password"])

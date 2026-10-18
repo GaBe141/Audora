@@ -6,6 +6,8 @@ import inspect
 import json
 import os
 import sqlite3
+import ssl
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -33,6 +35,7 @@ from core.utils import (
     load_dataframe,
     neutralize_csv_frame,
     open_project_writer,
+    public_tls_context,
     read_json,
     read_nofollow_text,
     redact_secrets,
@@ -46,6 +49,7 @@ from core.utils import (
 from integrations.api_config import SocialAPIManager
 from integrations.extended_platforms import safe_path_segment
 from integrations.musicbrainz_integration import _require_mbid
+from integrations.social_discovery_engine import _NoRedirectSession
 from integrations.spotify_charts_integration import _safe_chart_target
 from scripts.setup import EnhancedMusicDiscoverySetup
 
@@ -199,10 +203,60 @@ class TestRedirectAndSsrf:
 
     def test_smtp_ssl_verifies_certificates(self):
         source = inspect.getsource(EnhancedNotificationService._send_email)
-        assert "SMTP_SSL(context=ssl.create_default_context(), timeout=30)" in source
+        assert "public_tls_context()" in source
+        assert "create_default_context" not in source
         host_at = source.index("server._host = hostname")
         connect_at = source.index("server.connect(pinned_ip, port)")
         assert host_at < connect_at
+
+    def test_tls_ignores_environment_ca_file(self, tmp_path, monkeypatch):
+        """SSL_CERT_FILE must not become a trusted CA for SMTP or webhooks."""
+        key = tmp_path / "evil.key"
+        cert = tmp_path / "evil.pem"
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-keyout",
+                str(key),
+                "-out",
+                str(cert),
+                "-days",
+                "1",
+                "-nodes",
+                "-subj",
+                "/CN=Evil Test CA",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        monkeypatch.setenv("SSL_CERT_FILE", str(cert))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path))
+        poisoned = ssl.create_default_context()
+        pinned = public_tls_context()
+
+        def subject_names(context: ssl.SSLContext) -> set[str]:
+            names: set[str] = set()
+            for item in context.get_ca_certs():
+                for part in item["subject"]:
+                    for key, value in part:
+                        if key == "commonName":
+                            names.add(value)
+            return names
+
+        evil = subject_names(poisoned)
+        safe = subject_names(pinned)
+        assert "Evil Test CA" in evil
+        assert "Evil Test CA" not in safe
+        assert len(safe) > 10
+        assert pinned.verify_mode == ssl.CERT_REQUIRED
+        assert pinned.check_hostname is True
+        webhook_source = inspect.getsource(EnhancedNotificationService._post_pinned)
+        assert "ssl=public_tls_context()" in webhook_source
+        assert "ssl=public_tls_context()" in inspect.getsource(_NoRedirectSession.__init__)
 
     def test_smtp_blocks_private_and_teredo_addresses(self):
         svc = EnhancedNotificationService()
