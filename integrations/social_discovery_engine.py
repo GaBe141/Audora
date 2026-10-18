@@ -11,7 +11,7 @@ from typing import Any
 
 import aiohttp
 
-from core.utils import confine_relative_path, redact_secrets, write_json
+from core.utils import confine_relative_path, public_tls_context, redact_secrets, write_json
 from integrations.trending_schema import TrendingSchema
 
 
@@ -19,7 +19,12 @@ class _NoRedirectSession:
     """Session that ignores proxy env and never follows redirects."""
 
     def __init__(self) -> None:
-        self._session = aiohttp.ClientSession(trust_env=False)
+        # trust_env blocks HTTP_PROXY. aiohttp's default TLS context still
+        # loads SSL_CERT_FILE, which would let that CA read the client secret.
+        self._session = aiohttp.ClientSession(
+            trust_env=False,
+            connector=aiohttp.TCPConnector(ssl=public_tls_context()),
+        )
 
     async def __aenter__(self) -> "_NoRedirectSession":
         await self._session.__aenter__()
