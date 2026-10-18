@@ -573,6 +573,38 @@ class TestSecretRedactionAndDashboardHost:
         assert "https://charts.spotify.com/chart" in redacted
         assert "https://example.com/webhook/docs" in redacted
 
+    def test_redacts_oauth_authorization_code_and_pkce_verifier(self):
+        code = "AQB" + ("a1" * 24)
+        verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        leaked = (
+            "sending POST request to https://accounts.spotify.com/api/token with "
+            "Headers: {'Content-Type': 'application/x-www-form-urlencoded'} and Body: "
+            "{'client_id': 'spotify-client', 'grant_type': 'authorization_code', "
+            f"'code': '{code}', 'redirect_uri': 'http://127.0.0.1:8888/callback', "
+            f"'code_verifier': '{verifier}'}} "
+            f"http://127.0.0.1:8888/callback?code={code}&state=abc "
+            f"code_challenge={challenge} "
+            "status code=200 ?code=ok "
+            "https://charts.spotify.com/chart "
+            "https://example.com/webhook/docs"
+        )
+        redacted = redact_secrets(leaked)
+        assert code not in redacted
+        assert verifier not in redacted
+        assert "'code': 'REDACTED'" in redacted
+        assert "'code_verifier': 'REDACTED'" in redacted
+        assert "callback?code=REDACTED&state=abc" in redacted
+        assert challenge in redacted
+        assert "code=200" in redacted
+        assert "?code=ok" in redacted
+        assert "https://charts.spotify.com/chart" in redacted
+        assert "https://example.com/webhook/docs" in redacted
+        long_letters = "a" * 43
+        assert long_letters not in redact_secrets(f"'code': '{long_letters}'")
+        short_word = "a" * 30
+        assert short_word in redact_secrets(f"?code={short_word}")
+
     def test_redacts_live_environment_secrets(self, monkeypatch):
         monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "spotify-live-secret")
         monkeypatch.setenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
