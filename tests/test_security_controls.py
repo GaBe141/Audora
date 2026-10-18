@@ -551,6 +551,28 @@ class TestSecretRedactionAndDashboardHost:
         ordinary = "https://example.com/webhook/docs"
         assert ordinary in redact_secrets(f"docs {ordinary}")
 
+    def test_redacts_basic_and_discord_bot_authorization(self):
+        secret = base64.b64encode(b"spotify-client-id:spotify-client-secret").decode("ascii")
+        bot = "MTAxMjM0NTY3ODkwMTIz.AbCdEf.GhIjKlMnOpQrStUvWxYz012345"
+        leaked = (
+            "sending POST request to https://accounts.spotify.com/api/token "
+            f"with Headers: {{'Authorization': 'Basic {secret}'}} "
+            f"Authorization: Bot {bot} "
+            "Bot started "
+            "Basic authentication "
+            "https://charts.spotify.com/chart "
+            "https://example.com/webhook/docs"
+        )
+        redacted = redact_secrets(leaked)
+        assert secret not in redacted
+        assert bot not in redacted
+        assert "Basic REDACTED" in redacted
+        assert "Bot REDACTED" in redacted
+        assert "Bot started" in redacted
+        assert "Basic authentication" in redacted
+        assert "https://charts.spotify.com/chart" in redacted
+        assert "https://example.com/webhook/docs" in redacted
+
     def test_redacts_live_environment_secrets(self, monkeypatch):
         monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "spotify-live-secret")
         monkeypatch.setenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
