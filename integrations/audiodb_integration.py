@@ -6,7 +6,7 @@ from typing import Any
 import pandas as pd
 import requests
 
-from core.utils import redact_secrets
+from core.utils import credentialed_requests_session, redact_secrets
 from integrations.extended_platforms import safe_path_segment
 
 # Note: config import is optional for standalone execution
@@ -19,8 +19,9 @@ class AudioDBAPI:
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key
-        self.session = requests.Session()
-        self.session.trust_env = False
+        # The API key is a path segment. A stock session lets SSLKEYLOGFILE
+        # decrypt that request, and a redirect would replay it.
+        self.session = credentialed_requests_session()
         self.last_request_time = 0
         self.rate_limit_delay = 1.0  # 1 request per second
 

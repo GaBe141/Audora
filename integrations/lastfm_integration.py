@@ -9,7 +9,7 @@ import requests
 
 from core.config import get_config
 from core.exceptions import APIConnectionError, APIResponseError
-from core.utils import redact_secrets
+from core.utils import credentialed_requests_session, redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +22,9 @@ class LastFmAPI:
 
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.session = requests.Session()
-        self.session.trust_env = False
+        # The API key is a query parameter. A stock session lets SSLKEYLOGFILE
+        # decrypt that request, and a redirect would replay it.
+        self.session = credentialed_requests_session()
         self.last_request_time = 0
         self.rate_limit_delay = 0.2  # 5 requests per second max
 

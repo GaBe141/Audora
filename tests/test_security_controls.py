@@ -15,6 +15,8 @@ from pathlib import Path
 import aiohttp
 import pandas as pd
 import pytest
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
 
 from core.caching import RedisCacheBackend
 from core.config import validate_spotify_redirect_uri
@@ -30,6 +32,7 @@ from core.utils import (
     JsonTokenCache,
     _windows_short_aliases,
     credentialed_requests_session,
+    credentialed_tls_adapter,
     dashboard_request_allowed,
     is_sensitive_filename,
     load_dataframe,
@@ -257,6 +260,53 @@ class TestRedirectAndSsrf:
         webhook_source = inspect.getsource(EnhancedNotificationService._post_pinned)
         assert "ssl=public_tls_context()" in webhook_source
         assert "ssl=public_tls_context()" in inspect.getsource(_NoRedirectSession.__init__)
+
+    def test_requests_ignore_ssl_key_log(self, tmp_path, monkeypatch):
+        """SSLKEYLOGFILE must not decrypt Spotify, Last.fm, or AudioDB TLS."""
+        keylog = tmp_path / "tls-keys.log"
+        monkeypatch.setenv("SSLKEYLOGFILE", str(keylog))
+        poisoned = create_urllib3_context()
+        assert poisoned.keylog_filename == str(keylog)
+
+        pinned = public_tls_context()
+        assert pinned.keylog_filename is None
+        assert pinned.verify_mode == ssl.CERT_REQUIRED
+        assert pinned.check_hostname is True
+
+        def context_for(adapter: HTTPAdapter) -> ssl.SSLContext:
+            adapter.init_poolmanager(connections=1, maxsize=1, block=False)
+            context = adapter.poolmanager.connection_pool_kw["ssl_context"]
+            assert isinstance(context, ssl.SSLContext)
+            return context
+
+        session = credentialed_requests_session()
+        direct = context_for(session.get_adapter("https://accounts.spotify.com/api/token"))
+        assert direct.keylog_filename is None
+        assert direct.verify_mode == ssl.CERT_REQUIRED
+        assert direct.check_hostname is True
+
+        retried = credentialed_tls_adapter()
+        retry_context = context_for(retried)
+        assert retry_context.keylog_filename is None
+        proxy_manager = retried.proxy_manager_for("http://127.0.0.1:9")
+        proxy_context = proxy_manager.connection_pool_kw["ssl_context"]
+        assert isinstance(proxy_context, ssl.SSLContext)
+        assert proxy_context.keylog_filename is None
+
+        root = Path(__file__).resolve().parents[1]
+        auth_source = (root / "core" / "auth.py").read_text(encoding="utf-8")
+        assert "credentialed_tls_adapter(max_retries=_API_RETRY)" in auth_source
+        assert "HTTPAdapter(" not in auth_source
+        lastfm_source = (root / "integrations" / "lastfm_integration.py").read_text(
+            encoding="utf-8"
+        )
+        audiodb_source = (root / "integrations" / "audiodb_integration.py").read_text(
+            encoding="utf-8"
+        )
+        assert "credentialed_requests_session()" in lastfm_source
+        assert "credentialed_requests_session()" in audiodb_source
+        assert "requests.Session()" not in lastfm_source
+        assert "requests.Session()" not in audiodb_source
 
     def test_smtp_blocks_private_and_teredo_addresses(self):
         svc = EnhancedNotificationService()
