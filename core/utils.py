@@ -119,6 +119,12 @@ _GENERATED_SHORT_NAME_RE = re.compile(
 # ``EN9DD6~1.LOC``. The third character is a hex digit, so this does not match
 # the primary basis ``ENVCAN`` or ``ENVIRO``.
 _DOTENV_CHECKSUM_BASIS_RE = re.compile(r"^en[0-9a-f]{4}$")
+# ``.env.<mode>`` stores the mode in the extension (``.env.canary`` →
+# ``ENB38A~1.CAN``). Ordinary files that share the ``EN`` + checksum shape
+# keep ``txt`` and ``csv``. The safe-extension form rewrites the third
+# character to ``~`` (``TX~``), and filename normalization then strips that
+# trailing tilde, so ``tx`` and ``cs`` are the same document extensions.
+_BENIGN_CHECKSUM_EXTENSIONS = frozenset({"txt", "csv", "tx~", "cs~", "tx", "cs"})
 
 # Re-export for convenience
 try:
@@ -230,6 +236,30 @@ def _short_name_parts(name: str) -> tuple[str, str, bool, bool]:
         extra, _scan = _next_short_char(name, scan, skip_dots=True)
         truncated = bool(extra)
     return "".join(basis_chars), "".join(extension_chars), truncated, early_checksum
+
+
+def _dotenv_document_checksums() -> frozenset[str]:
+    """Collision bases of dotenv files whose extension is ``txt`` or ``csv``.
+
+    ``.env.txt`` is ``EN8119~1.TXT``. That extension is shared with
+    ``environment.txt`` (``EN41DD~1.TXT``), so the extension allowlist cannot
+    refuse it. The bases are derived from the long names.
+    """
+    names: list[str] = []
+    for stem in (".env", ".envrc"):
+        for extension in ("txt", "csv"):
+            names.append(f"{stem}.{extension}")
+            names.append(f"{stem}.{extension}~")
+    bases: set[str] = set()
+    for name in names:
+        basis, _extension, _truncated, early_checksum = _short_name_parts(name)
+        if not basis or early_checksum:
+            continue
+        bases.add((basis[:2] + _checksum_digits(name)).casefold())
+    return frozenset(bases)
+
+
+_DOTENV_DOCUMENT_CHECKSUMS = _dotenv_document_checksums()
 
 
 def _tilde_aliases(basis: str, extension: str) -> set[str]:
@@ -347,15 +377,18 @@ def _is_windows_short_secret(candidate: str) -> bool:
     # with no extension is the short name of ``envprofile`` and stays allowed.
     if basis.startswith("env") and extension in _DOTENV_COMPOUND_EXTENSIONS:
         return True
-    # Unlisted modes are not in ``_SHORT_SECRET_ALIASES``. Their collision
-    # alias keeps only ``EN`` and stores the checksum in the rest of the basis.
-    # ``envelope.local`` has the same collision shape and is refused with it.
-    # ``EN41DD~1.TXT`` (``environment.txt``) and ``ENA51B~1`` (``envprofile``)
-    # use a different extension, or none, and stay allowed.
-    return (
-        _DOTENV_CHECKSUM_BASIS_RE.fullmatch(basis) is not None
-        and extension in _DOTENV_COMPOUND_EXTENSIONS
-    )
+    # Unlisted modes are not in ``_SHORT_SECRET_ALIASES``. After collisions
+    # ``.env.<mode>`` and ``.envrc.<mode>`` keep only ``EN`` plus the checksum
+    # and put the mode in the extension (``.env.canary`` → ``ENB38A~1.CAN`` /
+    # ``ENB38A~1.CA~``). ``txt`` and ``csv`` stay allowed so ``EN41DD~1.TXT``
+    # (``environment.txt``) and ``EN0EED~1.CSV`` (``envelope.csv``) still open.
+    # ``ENA51B~1`` (``envprofile``) has no extension. ``.env.txt`` uses the
+    # same extension with a different checksum and is refused by basis.
+    if _DOTENV_CHECKSUM_BASIS_RE.fullmatch(basis) is None or not extension:
+        return False
+    if basis in _DOTENV_DOCUMENT_CHECKSUMS:
+        return True
+    return extension not in _BENIGN_CHECKSUM_EXTENSIONS
 
 
 def _filename_forms(filename: str) -> list[str]:
@@ -444,7 +477,8 @@ def is_sensitive_filename(filename: str) -> bool:
 
     Disguises include Windows 8.3 short names such as ``ENV~1``,
     ``ENVPRO~1.LOC`` for ``.env.production.local``, ``EN9DD6~1.LOC`` for
-    ``.env.canary.local`` after short-name collisions, and ``NOTIFI~1.JSO``.
+    ``.env.canary.local`` after short-name collisions, ``ENB38A~1.CAN`` for
+    ``.env.canary``, and ``NOTIFI~1.JSO``.
     The canonical live config names stay readable through the JSON helpers;
     their short names do not.
     """
