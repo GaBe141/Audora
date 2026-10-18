@@ -28,6 +28,7 @@ import yarl
 
 from core.utils import (
     confine_relative_path,
+    contains_unsafe_codepoint,
     is_sensitive_filename,
     read_json,
     read_nofollow_bytes,
@@ -73,8 +74,13 @@ _FORBIDDEN_WEBHOOK_HEADERS = {
 
 
 def _contains_control_char(value: str) -> bool:
-    """True when a string contains ASCII controls or DEL."""
-    return any(ord(char) < 32 or ord(char) == 127 for char in value)
+    """True for ASCII controls, DEL, and Unicode line separators.
+
+    Next-line (U+0085) and the line/paragraph separators are not below 32,
+    but mail and URL parsers still treat them as breaks. Format characters
+    are left alone here so a track title can contain an emoji joiner.
+    """
+    return contains_unsafe_codepoint(value)
 
 
 def _is_sensitive_attachment(path: Path) -> bool:
@@ -471,10 +477,12 @@ class EnhancedNotificationService:
         """Reject parser-differential characters before urlparse or DNS."""
         if not isinstance(url, str):
             raise ValueError("Webhook URL must be a string")
-        cleaned = url.strip()
-        if "\\" in cleaned or _contains_control_char(cleaned):
+        # Reject hazards on the raw string. ``strip`` removes Unicode line
+        # separators and non-breaking spaces, which would hide them from a
+        # check of the cleaned URL.
+        if "\\" in url or contains_unsafe_codepoint(url, format_chars=True):
             raise ValueError("Webhook URL contains unsafe characters")
-        return cleaned
+        return url.strip()
 
     def _hosts_equivalent(self, left: str, right: str) -> bool:
         """True when two parsers name the same host or the same IP."""
@@ -529,7 +537,7 @@ class EnhancedNotificationService:
         hostname = host.strip().rstrip(".")
         if (
             not hostname
-            or _contains_control_char(hostname)
+            or contains_unsafe_codepoint(host, format_chars=True)
             or any(char in hostname for char in " /\\@")
         ):
             raise ValueError("Invalid SMTP host")
