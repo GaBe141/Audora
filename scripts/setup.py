@@ -12,6 +12,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from core.logging_config import NofollowFileHandler, RedactingFormatter
+from core.utils import redact_secrets, resolve_project_path, write_private_text
+
 # Enhanced package list with new dependencies
 ENHANCED_PACKAGES = [
     # Core dependencies
@@ -64,13 +69,16 @@ class EnhancedMusicDiscoverySetup:
 
     def _setup_logging(self) -> logging.Logger:
         """Set up logging for setup process."""
+        log_path = resolve_project_path("logs/setup.log")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        formatter = RedactingFormatter(fmt="%(asctime)s - %(levelname)s - %(message)s")
+        stream = logging.StreamHandler(sys.stdout)
+        stream.setFormatter(formatter)
+        file_handler = NofollowFileHandler(log_path)
+        file_handler.setFormatter(formatter)
         logging.basicConfig(
             level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-            handlers=[
-                logging.StreamHandler(sys.stdout),
-                logging.FileHandler("setup.log", mode="w"),
-            ],
+            handlers=[stream, file_handler],
         )
         return logging.getLogger(__name__)
 
@@ -178,6 +186,10 @@ class EnhancedMusicDiscoverySetup:
 
         return True
 
+    def _write_private_file(self, path: Path, content: str) -> None:
+        """Write a credential or template file without following a symlink."""
+        write_private_text(resolve_project_path(path), content)
+
     def setup_configuration(self) -> bool:
         """Set up configuration files."""
         configs = {
@@ -191,8 +203,7 @@ class EnhancedMusicDiscoverySetup:
         for config_file, config_data in configs.items():
             config_path = self.config_dir / config_file
             try:
-                with open(config_path, "w") as f:
-                    json.dump(config_data, f, indent=2)
+                self._write_private_file(config_path, json.dumps(config_data, indent=2))
                 self.logger.info(f"  Created config: {config_file}")
             except Exception as e:
                 self.logger.error(f"  Failed to create {config_file}: {e}")
@@ -473,8 +484,7 @@ System Status: {{ system_status }}
         for template_name, template_content in templates.items():
             template_path = self.templates_dir / template_name
             try:
-                with open(template_path, "w") as f:
-                    f.write(template_content.strip())
+                self._write_private_file(template_path, template_content.strip())
                 self.logger.info(f"  Created template: {template_name}")
             except Exception as e:
                 self.logger.error(f"  Failed to create template {template_name}: {e}")
@@ -522,8 +532,7 @@ ENABLE_NOTIFICATIONS=True
 
         env_path = self.project_root / ".env.enhanced"
         try:
-            with open(env_path, "w") as f:
-                f.write(env_template.strip())
+            self._write_private_file(env_path, env_template.strip())
             self.logger.info(f"  Created environment file: {env_path}")
             self.logger.info("  ⚠️ Remember to update .env.enhanced with your actual API keys!")
             return True
@@ -723,8 +732,8 @@ def main():
         print("\n⚠️ Setup interrupted by user.")
         return 1
     except Exception as e:
-        print(f"\n❌ Setup failed with error: {e}")
-        logging.error(f"Unexpected error during setup: {e}")
+        print(f"\n❌ Setup failed with error: {redact_secrets(e)}")
+        logging.error("Unexpected error during setup: %s", redact_secrets(e))
         return 1
 
 
