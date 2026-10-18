@@ -516,8 +516,59 @@ def _is_exact_live_config(filename: str) -> bool:
     return filename.casefold().strip() in _LIVE_CONFIG_NAMES
 
 
+# OpenSSH writes the public half beside the private key. The private name is
+# refused; the ``.pub`` companion stays readable.
+_SSH_PUBLIC_KEY_NAMES = frozenset(
+    {
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ecdsa_sk",
+        "id_ed25519",
+        "id_ed25519_sk",
+    }
+)
+
+
+def _is_secret_basename(name: str) -> bool:
+    """True when ``name`` is a secret file, ignoring a later extra extension.
+
+    Windows 8.3 aliases are not decided here. ``CREDEN~1.CSV`` shares a stem
+    with ``credentials`` and must stay readable.
+    """
+    if name in _SECRET_FILE_NAMES:
+        return True
+    if name == ".env" or name.startswith(".env."):
+        return True
+    if name == ".envrc" or name.startswith(".envrc."):
+        return True
+    return name.endswith(_SECRET_FILE_SUFFIXES)
+
+
+def _secret_hidden_by_extension(candidate: str) -> bool:
+    """True when one or more ordinary extensions hide a secret basename.
+
+    ``id_rsa.txt``, ``credentials.json.lock``, and ``client.pem.txt`` still
+    name the secret. ``id_rsa.pub`` does not. The stem is always shorter, so
+    the walk stops.
+    """
+    dot = candidate.rfind(".")
+    if dot <= 0:
+        return False
+    stem = candidate[:dot]
+    if candidate[dot:] == ".pub" and stem in _SSH_PUBLIC_KEY_NAMES:
+        return False
+    if _is_secret_basename(stem):
+        return True
+    return _secret_hidden_by_extension(stem)
+
+
 def _candidate_is_secret(candidate: str) -> bool:
-    """True when one normalized spelling is a secret, key, or database name."""
+    """True when one normalized spelling is a secret, key, or database name.
+
+    macOS AppleDouble files keep a copy under a ``._`` prefix (``._.env``,
+    ``._id_rsa``). A benign document such as ``._report.csv`` stays allowed.
+    """
     if candidate in _SECRET_FILE_NAMES:
         return True
     if candidate == ".env" or candidate.startswith(".env."):
@@ -526,7 +577,11 @@ def _candidate_is_secret(candidate: str) -> bool:
         return True
     if candidate.endswith(_SECRET_FILE_SUFFIXES):
         return True
-    return _is_windows_short_secret(candidate)
+    if _is_windows_short_secret(candidate):
+        return True
+    if candidate.startswith("._") and len(candidate) > 2 and _candidate_is_secret(candidate[2:]):
+        return True
+    return _secret_hidden_by_extension(candidate)
 
 
 def is_sensitive_filename(filename: str) -> bool:
@@ -538,6 +593,9 @@ def is_sensitive_filename(filename: str) -> bool:
     ``.env.canary``, ``#EB57A~1.CAN`` for the Emacs autosave ``#.env.canary#``,
     ``#ENVCA~1.SW~`` for ``#.env.canary.swp#``, ``#SECRE~1.PE~`` for
     ``#secrets.pem#``, and ``NOTIFI~1.JSO``.
+    An extra extension (``id_rsa.txt``, ``credentials.json.lock``) and an
+    AppleDouble prefix (``._.env``, ``._id_rsa``) are refused. ``id_rsa.pub``
+    stays allowed.
     The canonical live config names stay readable through the JSON helpers;
     their short names do not.
     """
