@@ -23,7 +23,6 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 warnings.filterwarnings("ignore")
 
@@ -38,6 +37,8 @@ sys.path.extend(
 
 from advanced_analytics import MusicTrendAnalytics  # noqa: E402
 from statistical_analysis import StreamingDataQualityAnalyzer  # noqa: E402
+
+from core.utils import load_dataframe  # noqa: E402
 
 
 class AudoraMusicExplorer:
@@ -78,7 +79,10 @@ class AudoraMusicExplorer:
             filepath = self.data_dir / filename
             if filepath.exists():
                 try:
-                    self.music_data[key] = pd.read_csv(filepath)
+                    frame = load_dataframe(filepath, default_empty=False)
+                    if frame is None:
+                        continue
+                    self.music_data[key] = frame
                     loaded_count += 1
                 except Exception as e:
                     print(f"❌ Error loading {filename}: {e}")

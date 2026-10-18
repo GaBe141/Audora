@@ -3,12 +3,15 @@ Integration module for trending schema with Spotify streaming data.
 Connects real-time streaming data to trending analysis framework.
 """
 
+import io
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, TypedDict
 
 import numpy as np
 import pandas as pd
+
+from core.utils import confine_relative_path, read_nofollow_text, save_report, write_private_text
 
 from .trending_schema import TrendCategory, TrendDirection, TrendingSchema
 
@@ -58,14 +61,20 @@ class SpotifyTrendingIntegration:
         }
 
         for filename, category in self.file_mappings.items():
-            file_path = self.data_dir / filename
+            try:
+                file_path = confine_relative_path(self.data_dir / filename)
+            except ValueError as exc:
+                error_msg = f"Error processing {filename}: {exc}"
+                results["processing_errors"].append(error_msg)
+                print(f"   ❌ {filename}: {error_msg}")
+                continue
 
             if not file_path.exists():
                 print(f"   ⚠️ {filename}: File not found")
                 continue
 
             try:
-                df = pd.read_csv(file_path)
+                df = pd.read_csv(io.StringIO(read_nofollow_text(file_path)))
                 extractor = self.value_extractors.get(filename)
 
                 if extractor:
@@ -444,7 +453,7 @@ class SpotifyTrendingIntegration:
         """Create comprehensive trending analysis report."""
         print("\n📋 Creating trending analysis report...")
 
-        output_path = Path(output_dir)
+        output_path = confine_relative_path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
         # Generate insights
@@ -452,7 +461,7 @@ class SpotifyTrendingIntegration:
 
         # Export trending snapshot
         snapshot = self.trending_schema.export_trending_snapshot(
-            str(output_path / "trending_snapshot.json")
+            str(Path(output_dir) / "trending_snapshot.json")
         )
 
         # Create comprehensive report
@@ -467,14 +476,11 @@ class SpotifyTrendingIntegration:
             "detailed_snapshot": snapshot,
         }
 
-        # Save main report using centralized utility
-        from core.utils import save_report
-
         saved_path = save_report(
             report,
             filename="spotify_trending_report.json",
             prefix="spotify_trending",
-            output_dir=str(output_path),
+            output_dir=output_dir,
             add_timestamp=False,
         )
 
@@ -487,58 +493,54 @@ class SpotifyTrendingIntegration:
 
         return str(output_path)
 
-    def _create_text_summary(self, insights: dict[str, Any], output_file: Path):
+    def _create_text_summary(self, insights: dict[str, Any], output_file: Path) -> None:
         """Create human-readable trending summary."""
-        with output_file.open("w", encoding="utf-8") as f:
-            f.write("SPOTIFY TRENDING ANALYSIS REPORT\n")
-            f.write("=" * 40 + "\n\n")
+        summary = insights["summary"]
+        lines = [
+            "SPOTIFY TRENDING ANALYSIS REPORT",
+            "=" * 40,
+            "",
+            f"Generated: {insights['timestamp']}",
+            "",
+            "EXECUTIVE SUMMARY",
+            "-" * 20,
+            f"Total Trending Items: {summary['total_trending_items']}",
+            f"Viral Content: {summary['viral_items']}",
+            f"Emerging Trends: {summary['emerging_trends']}",
+            f"Categories Analyzed: {summary['categories_with_data']}",
+            "",
+        ]
 
-            f.write(f"Generated: {insights['timestamp']}\n\n")
+        if insights["viral_content"]:
+            lines.extend(["VIRAL CONTENT 🚀", "-" * 20])
+            for item in insights["viral_content"]:
+                lines.append(f"🔥 {item['name']} ({item['category']})")
+                lines.append(f"   Growth: +{item['growth_rate']:.1f}%")
+            lines.append("")
 
-            # Summary
-            summary = insights["summary"]
-            f.write("EXECUTIVE SUMMARY\n")
-            f.write("-" * 20 + "\n")
-            f.write(f"Total Trending Items: {summary['total_trending_items']}\n")
-            f.write(f"Viral Content: {summary['viral_items']}\n")
-            f.write(f"Emerging Trends: {summary['emerging_trends']}\n")
-            f.write(f"Categories Analyzed: {summary['categories_with_data']}\n\n")
+        if insights["emerging_trends"]:
+            lines.extend(["EMERGING TRENDS 🌱", "-" * 20])
+            for item in insights["emerging_trends"]:
+                lines.append(f"📈 {item['name']} ({item['category']})")
+                lines.append(f"   Momentum: {item['momentum']:.2f}")
+            lines.append("")
 
-            # Viral content
-            if insights["viral_content"]:
-                f.write("VIRAL CONTENT 🚀\n")
-                f.write("-" * 20 + "\n")
-                for item in insights["viral_content"]:
-                    f.write(f"🔥 {item['name']} ({item['category']})\n")
-                    f.write(f"   Growth: +{item['growth_rate']:.1f}%\n")
-                f.write("\n")
+        lines.extend(["TOP MOVERS BY CATEGORY", "-" * 30])
+        for category, data in insights["category_analysis"].items():
+            lines.append(f"\n{category.upper()}:")
+            for item in data["top_trending"][:3]:
+                direction_emoji = (
+                    "📈"
+                    if "rising" in item["direction"]
+                    else "🚀" if "viral" in item["direction"] else "📊"
+                )
+                lines.append(f"  {direction_emoji} {item['name']}")
+                lines.append(
+                    "     Growth: "
+                    f"{item['growth_rate']:.1f}% | Strength: {item['trend_strength']:.2f}"
+                )
 
-            # Emerging trends
-            if insights["emerging_trends"]:
-                f.write("EMERGING TRENDS 🌱\n")
-                f.write("-" * 20 + "\n")
-                for item in insights["emerging_trends"]:
-                    f.write(f"📈 {item['name']} ({item['category']})\n")
-                    f.write(f"   Momentum: {item['momentum']:.2f}\n")
-                f.write("\n")
-
-            # Top movers by category
-            f.write("TOP MOVERS BY CATEGORY\n")
-            f.write("-" * 30 + "\n")
-            for category, data in insights["category_analysis"].items():
-                f.write(f"\n{category.upper()}:\n")
-                for item in data["top_trending"][:3]:
-                    direction_emoji = (
-                        "📈"
-                        if "rising" in item["direction"]
-                        else "🚀"
-                        if "viral" in item["direction"]
-                        else "📊"
-                    )
-                    f.write(f"  {direction_emoji} {item['name']}\n")
-                    f.write(
-                        f"     Growth: {item['growth_rate']:.1f}% | Strength: {item['trend_strength']:.2f}\n"
-                    )
+        write_private_text(output_file, "\n".join(lines) + "\n")
 
 
 def main():
