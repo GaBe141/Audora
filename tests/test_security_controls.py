@@ -432,6 +432,52 @@ class TestSecretRedactionAndDashboardHost:
         assert "super-token" not in redacted
         assert "REDACTED" in redacted
 
+    def test_redacts_versioned_discord_and_custom_webhook_urls(self):
+        leaked = (
+            "https://discord.com/api/v10/webhooks/123/v10-token "
+            "https://canary.discord.com/api/v9/webhooks/99/canary-token "
+            "https://ptb.discordapp.com/api/v10/webhooks/77/ptb-token "
+            "https://hooks.slack.com/workflows/T1/A1/111/workflow-token "
+            "https://hooks.slack.com/triggers/T1/222/trigger-token "
+            "https://hooks.slack-gov.com/services/T1/B1/gov-token "
+            '{"webhook_url": "https://alerts.example.com/hook/json-token"} '
+            "https://charts.spotify.com/chart"
+        )
+        redacted = redact_secrets(leaked)
+        assert "v10-token" not in redacted
+        assert "canary-token" not in redacted
+        assert "ptb-token" not in redacted
+        assert "workflow-token" not in redacted
+        assert "trigger-token" not in redacted
+        assert "gov-token" not in redacted
+        assert "json-token" not in redacted
+        assert "https://charts.spotify.com/chart" in redacted
+
+        custom = "https://alerts.example.com/hooks/custom-secret-value"
+        assert "custom-secret-value" not in redact_secrets(f"echo {custom}")
+        plain = "https://alerts.example.com/ingest/plain-secret-value"
+        assert plain in redact_secrets(f"echo {plain}")
+        assert plain not in redact_secrets(f"echo {plain}", plain)
+        # Shorter than 8 characters, so it must not be erased globally.
+        assert redact_secrets("abcd abcd", "abcd") == "abcd abcd"
+
+        service = EnhancedNotificationService.__new__(EnhancedNotificationService)
+        service.config = {
+            "webhook": {"url": plain},
+            "slack": {"webhook_url": ""},
+            "discord": {"webhook_url": ""},
+            "email": {"password": "smtp-password-value"},
+            "sms": {},
+        }
+        delivery_error = service._redact_delivery_error(
+            NotificationChannel.WEBHOOK, f"ClientResponseError url={plain}"
+        )
+        assert "plain-secret-value" not in delivery_error
+        mail_error = service._redact_delivery_error(
+            NotificationChannel.EMAIL, "auth failed for smtp-password-value"
+        )
+        assert "smtp-password-value" not in mail_error
+
     def test_disguised_secret_names_are_blocked(self, tmp_path, monkeypatch):
         monkeypatch.setattr("core.utils.PROJECT_ROOT", tmp_path)
         assert is_sensitive_filename("id_rsa.")
