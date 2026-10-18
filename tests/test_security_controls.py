@@ -754,6 +754,29 @@ class TestSecretRedactionAndDashboardHost:
                 assert not is_sensitive_filename(alias), alias
         for alias in _windows_short_aliases("envelope.local"):
             assert is_sensitive_filename(alias), alias
+        assert is_sensitive_filename("id_rsa.txt")
+        assert is_sensitive_filename("id_rsa.lock")
+        assert is_sensitive_filename("ID_RSA.TXT")
+        assert is_sensitive_filename("id_rsa.txt.bak")
+        assert is_sensitive_filename("#id_rsa.txt#")
+        assert is_sensitive_filename("credentials.json.txt")
+        assert is_sensitive_filename("credentials.json.dist")
+        assert is_sensitive_filename("credentials.json.lock")
+        assert is_sensitive_filename("notification_config.json.txt")
+        assert is_sensitive_filename("client.pem.txt")
+        assert is_sensitive_filename("server.key.lock")
+        assert is_sensitive_filename("trends.db.txt")
+        assert is_sensitive_filename("._.env")
+        assert is_sensitive_filename("._.env.local")
+        assert is_sensitive_filename("._id_rsa")
+        assert is_sensitive_filename("._id_rsa.txt")
+        assert is_sensitive_filename("._credentials.json")
+        assert is_sensitive_filename("._.netrc")
+        assert not is_sensitive_filename("id_rsa.pub")
+        assert not is_sensitive_filename("ID_ED25519.PUB")
+        assert not is_sensitive_filename("id_ecdsa_sk.pub")
+        assert not is_sensitive_filename("._id_rsa.pub")
+        assert not is_sensitive_filename("._report.csv")
         assert not is_sensitive_filename("my_credentials.csv")
         assert not is_sensitive_filename("MY_CRE~1.CSV")
         assert not is_sensitive_filename("report.csv")
@@ -782,6 +805,14 @@ class TestSecretRedactionAndDashboardHost:
         (tmp_path / "config").mkdir()
         write_json("config/notification_config.json", {"email": {"password": "secret"}})
         assert read_json("config/notification_config.json")["email"]["password"] == "secret"
+        with pytest.raises(ValueError, match="credential"):
+            read_json("id_rsa.txt")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("._.env")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("credentials.json.txt")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("config/notification_config.json.txt")
         with pytest.raises(ValueError, match="credential"):
             read_json("config/notification_config.json.bak")
         with pytest.raises(ValueError, match="credential"):
