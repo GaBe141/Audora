@@ -160,8 +160,11 @@ class EnhancedMusicDataStore:
         self._initialize_database()
         self._create_indexes()
 
-        # Enable WAL mode for better concurrency
+        # Enable WAL mode for better concurrency. Re-check sidecars first:
+        # the pooled connection was opened before this, and SQLite creates
+        # -shm by name when WAL is turned on.
         with self.get_connection() as conn:
+            self._reject_database_symlinks()
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=10000")
@@ -196,9 +199,23 @@ class EnhancedMusicDataStore:
         return [base, *[Path(f"{base}{suffix}") for suffix in self._DATABASE_SIDECAR_SUFFIXES]]
 
     def _reject_database_symlinks(self) -> None:
+        """Refuse symlink and hard-link database files SQLite would open by name.
+
+        ``O_NOFOLLOW`` on the main database does not cover ``-wal``, ``-shm``,
+        or ``-journal``. Enabling WAL opens ``-shm`` through the real path, so
+        a hard link at that name is overwritten with the shared-memory image.
+        """
         for candidate in self._database_files():
-            if candidate.is_symlink():
+            try:
+                info = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(info.st_mode):
                 raise ValueError("Refusing to open a symlinked database")
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(f"Refusing to open a non-regular database file: {candidate.name}")
+            if info.st_nlink > 1:
+                raise ValueError(f"Refusing to open a hard-linked database file: {candidate.name}")
 
     def _open_database_connection(self) -> sqlite3.Connection:
         """Open SQLite without following a symlink swapped in for the database.
