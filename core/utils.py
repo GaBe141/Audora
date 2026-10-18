@@ -306,6 +306,14 @@ def _dotenv_compound_extensions() -> frozenset[str]:
         tails.append(extra)
     tails.extend(f".local.{number}" for number in range(1, 10))
     tails.extend(f".{number}" for number in range(1, 10))
+    # Vim swap suffixes are three characters, so a bare ``.swp`` is not
+    # truncated and its safe-extension form is absent. Emacs closes the
+    # autosave with ``#`` (``#.env.canary.swp#``) and a backup may append
+    # ``~`` (``.env.canary.swp~``). Either extra character makes Windows
+    # emit ``SW~`` (``#ENVCA~1.SW~``, ``ENVCAN~1.SW~``).
+    for swap in (".swp", ".swo", ".swn", ".swx"):
+        tails.append(f"{swap}#")
+        tails.append(f"{swap}~")
     found: set[str] = set()
     for tail in tails:
         _basis, extension, truncated, _early = _short_name_parts(f"name{tail}")
@@ -385,6 +393,10 @@ def _is_windows_short_secret(candidate: str) -> bool:
     # basis with ENV and puts ``local`` or the disguise in the extension.
     # ``environment.txt`` is ``ENVIRO~1.TXT`` and stays allowed. ``ENVPRO~1``
     # with no extension is the short name of ``envprofile`` and stays allowed.
+    # ``SW~`` is the safe-extension form of a vim swap once Emacs or a
+    # trailing tilde lengthens ``.swp``. Stripping a leading ``#`` from
+    # ``#ENVCA~1.SW~`` leaves an ``ENV`` basis, so this check covers it.
+    # ``#ENVIR~1.SW~`` (``#environment.txt.swp#``) is refused on purpose.
     if basis.startswith("env") and extension in _DOTENV_COMPOUND_EXTENSIONS:
         return True
     # Unlisted modes are not in ``_SHORT_SECRET_ALIASES``. After collisions
@@ -500,7 +512,7 @@ def is_sensitive_filename(filename: str) -> bool:
     ``ENVPRO~1.LOC`` for ``.env.production.local``, ``EN9DD6~1.LOC`` for
     ``.env.canary.local`` after short-name collisions, ``ENB38A~1.CAN`` for
     ``.env.canary``, ``#EB57A~1.CAN`` for the Emacs autosave ``#.env.canary#``,
-    and ``NOTIFI~1.JSO``.
+    ``#ENVCA~1.SW~`` for ``#.env.canary.swp#``, and ``NOTIFI~1.JSO``.
     The canonical live config names stay readable through the JSON helpers;
     their short names do not.
     """
