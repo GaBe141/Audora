@@ -218,7 +218,15 @@ class SocialAPIManager:
         # Record errors
         if not success:
             config.error_count += 1
-            config.last_error = redact_secrets(error)
+            # The provider body can echo the key without a ``key=`` label.
+            # Pattern redaction then stores the secret in the config file.
+            config.last_error = redact_secrets(
+                error,
+                config.api_key,
+                config.secret_key,
+                config.access_token,
+                config.refresh_token,
+            )
 
             # Disable if too many errors
             if config.error_count >= 10:
