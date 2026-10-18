@@ -3,9 +3,13 @@ Enhanced data persistence layer for music discovery data.
 Handles trending data, viral predictions, and cross-platform analysis.
 """
 
+import errno
 import json
 import logging
+import os
 import sqlite3
+import stat
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -15,6 +19,62 @@ from typing import Any
 import pandas as pd
 
 from core.caching import get_cache
+from core.utils import (
+    PROJECT_ROOT,
+    confine_relative_path,
+    mkdir_nofollow,
+    open_unlinked_file,
+    save_dataframe,
+)
+
+
+def database_path_from_config(path: str) -> str:
+    """Resolve a configured database path. Absolute config paths are rejected."""
+    if path == ":memory:":
+        raise ValueError("In-memory databases cannot be selected from configuration")
+    return str(confine_relative_path(path))
+
+
+def _path_is_under(candidate: Path, root: Path) -> bool:
+    try:
+        candidate.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def resolve_constructor_database_path(path: str) -> str:
+    """Allow project-relative paths and absolute paths under the project or temp dir."""
+    if path == ":memory:":
+        return path
+    raw = Path(path)
+    if raw.is_symlink():
+        raise ValueError("Refusing to open a symlinked database")
+    if raw.is_absolute():
+        candidate = raw
+        allowed = _path_is_under(candidate, PROJECT_ROOT) or _path_is_under(
+            candidate, Path(tempfile.gettempdir())
+        )
+        if not allowed:
+            raise ValueError(
+                "Database path must be under the project root or the system temp directory"
+            )
+        if candidate.is_symlink():
+            raise ValueError("Refusing to open a symlinked database")
+        return str(candidate)
+    return str(confine_relative_path(raw))
+
+
+def _lock_down_file(path: Path) -> None:
+    if not path.exists() or os.name == "nt":
+        return
+    if path.is_symlink():
+        raise ValueError(f"Refusing to change permissions through a symlink: {path}")
+    fd = open_unlinked_file(path, os.O_RDONLY)
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
 
 
 @dataclass
@@ -61,6 +121,7 @@ class EnhancedMusicDataStore:
     - Data export in multiple formats
     - Analytics-ready data structures
     """
+
     _ALLOWED_BULK_UPDATE_FIELDS = {
         "platform",
         "track_name",
@@ -73,11 +134,21 @@ class EnhancedMusicDataStore:
         "metadata",
         "is_active",
     }
+    _DATABASE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 
     def __init__(self, db_path: str = "enhanced_music_trends.db", backup_dir: str = "backups"):
-        self.db_path = db_path
-        self.backup_dir = Path(backup_dir)
-        self.backup_dir.mkdir(exist_ok=True)
+        self.db_path = resolve_constructor_database_path(db_path)
+        if backup_dir == "backups" or not Path(backup_dir).is_absolute():
+            self.backup_dir = confine_relative_path(backup_dir)
+        else:
+            backup_candidate = Path(backup_dir)
+            if backup_candidate.is_symlink() or not (
+                _path_is_under(backup_candidate, PROJECT_ROOT)
+                or _path_is_under(backup_candidate, Path(tempfile.gettempdir()))
+            ):
+                raise ValueError("Backup directory must stay inside the project or temp directory")
+            self.backup_dir = backup_candidate
+        mkdir_nofollow(self.backup_dir)
         self.logger = logging.getLogger(__name__)
 
         # Initialize cache
@@ -89,12 +160,16 @@ class EnhancedMusicDataStore:
         self._initialize_database()
         self._create_indexes()
 
-        # Enable WAL mode for better concurrency
+        # Enable WAL mode for better concurrency. Re-check sidecars first:
+        # the pooled connection was opened before this, and SQLite creates
+        # -shm by name when WAL is turned on.
         with self.get_connection() as conn:
+            self._reject_database_symlinks()
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=10000")
             conn.execute("PRAGMA temp_store=memory")
+        self._lock_down_database_files()
 
     def _get_pooled_connection(self) -> sqlite3.Connection:
         """Get a connection from the pool or create a new one."""
@@ -103,8 +178,7 @@ class EnhancedMusicDataStore:
             self.logger.debug("Reused connection from pool")
             return conn
 
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
+        conn = self._open_database_connection()
         self.logger.debug("Created new database connection")
         return conn
 
@@ -116,6 +190,74 @@ class EnhancedMusicDataStore:
         else:
             conn.close()
             self.logger.debug("Closed excess connection")
+
+    def _database_files(self) -> list[Path]:
+        """Main database path plus rollback and WAL sidecars."""
+        if self.db_path == ":memory:":
+            return []
+        base = Path(self.db_path)
+        return [base, *[Path(f"{base}{suffix}") for suffix in self._DATABASE_SIDECAR_SUFFIXES]]
+
+    def _reject_database_symlinks(self) -> None:
+        """Refuse symlink and hard-link database files SQLite would open by name.
+
+        ``O_NOFOLLOW`` on the main database does not cover ``-wal``, ``-shm``,
+        or ``-journal``. Enabling WAL opens ``-shm`` through the real path, so
+        a hard link at that name is overwritten with the shared-memory image.
+        """
+        for candidate in self._database_files():
+            try:
+                info = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError("Refusing to open a symlinked database")
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(f"Refusing to open a non-regular database file: {candidate.name}")
+            if info.st_nlink > 1:
+                raise ValueError(f"Refusing to open a hard-linked database file: {candidate.name}")
+
+    def _open_database_connection(self) -> sqlite3.Connection:
+        """Open SQLite without following a symlink swapped in for the database.
+
+        A path check then ``sqlite3.connect(path)`` still follows a symlink
+        planted between the two calls, and ``O_NOFOLLOW`` still opens a hard
+        link to another file. Opening the inode only when it has a single
+        link keeps the connection off a credential planted under the database
+        name.
+        """
+        if self.db_path == ":memory:":
+            conn = sqlite3.connect(":memory:", check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        self._reject_database_symlinks()
+        db_file = Path(self.db_path)
+        mkdir_nofollow(db_file.parent)
+        flags = os.O_RDWR | os.O_CREAT
+        fd = -1
+        try:
+            fd = open_unlinked_file(db_file, flags, 0o600)
+            if os.name != "nt":
+                os.fchmod(fd, 0o600)
+            if Path("/proc/self/fd").is_dir():
+                uri = f"file:///proc/self/fd/{fd}?mode=rw"
+                conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+            else:
+                conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ValueError("Refusing to open a symlinked database") from exc
+            raise
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _lock_down_database_files(self) -> None:
+        for candidate in self._database_files():
+            _lock_down_file(candidate)
 
     def close_pool(self) -> None:
         """Close all connections in the pool."""
@@ -787,7 +929,9 @@ class EnhancedMusicDataStore:
         if not track_ids or not updates:
             return 0
 
-        invalid_fields = [field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS]
+        invalid_fields = [
+            field for field in updates if field not in self._ALLOWED_BULK_UPDATE_FIELDS
+        ]
         if invalid_fields:
             raise ValueError(
                 "Invalid update fields: "
@@ -917,12 +1061,40 @@ class EnhancedMusicDataStore:
             }
 
     def create_backup(self) -> str:
-        """Create a backup of the database."""
+        """Create a backup of the database.
+
+        The copy is written through the descriptor opened with ``O_NOFOLLOW``.
+        Re-opening the path would follow a symlink swapped in after creation
+        and dump the database onto an attacker-chosen file.
+        """
         backup_filename = f"music_trends_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
         backup_path = self.backup_dir / backup_filename
-
-        with self.get_connection() as source_conn, sqlite3.connect(backup_path) as backup_conn:
-            source_conn.backup(backup_conn)
+        if backup_path.exists() or backup_path.is_symlink():
+            raise ValueError("Refusing to overwrite an existing backup path")
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+        fd = open_unlinked_file(backup_path, flags, 0o600)
+        try:
+            if os.name != "nt":
+                os.fchmod(fd, 0o600)
+            identity = os.fstat(fd)
+            uri = f"file:///proc/self/fd/{fd}?mode=rw"
+            with (
+                self.get_connection() as source_conn,
+                sqlite3.connect(uri, uri=True) as backup_conn,
+            ):
+                backup_conn.execute("PRAGMA journal_mode=OFF")
+                source_conn.backup(backup_conn)
+                backup_conn.commit()
+            current = os.lstat(backup_path)
+            if (
+                stat.S_ISLNK(current.st_mode)
+                or current.st_ino != identity.st_ino
+                or current.st_dev != identity.st_dev
+            ):
+                raise ValueError("Backup path changed while the database was being copied")
+        finally:
+            os.close(fd)
+        _lock_down_file(backup_path)
 
         self.logger.info(f"Database backup created: {backup_path}")
         return str(backup_path)
@@ -958,13 +1130,11 @@ class EnhancedMusicDataStore:
                 query = f"SELECT * FROM {table} ORDER BY created_at DESC"
                 df = pd.read_sql_query(query, conn)
 
-            # Ensure directory exists
-            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
+            target = confine_relative_path(filepath)
+            save_dataframe(df, target)
+            self.logger.info(f"Exported {len(df)} rows from {table} to {target}")
 
-            df.to_csv(filepath, index=False)
-            self.logger.info(f"Exported {len(df)} rows from {table} to {filepath}")
-
-        return filepath
+        return str(target)
 
     def get_data_quality_report(self) -> dict[str, Any]:
         """Generate comprehensive data quality report."""
@@ -1167,10 +1337,7 @@ class EnhancedMusicDataStore:
         rmse = float((errors**2).mean() ** 0.5)
 
         acc_by_platform = (
-            evaluated_df.groupby("platform")["accuracy_score"]
-            .mean()
-            .round(3)
-            .to_dict()
+            evaluated_df.groupby("platform")["accuracy_score"].mean().round(3).to_dict()
         )
 
         return {
