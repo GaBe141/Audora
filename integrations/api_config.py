@@ -3,13 +3,11 @@ Configuration management for social media APIs.
 Handles API keys, rate limiting, and platform-specific settings.
 """
 
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
-from core.utils import read_json, write_json
+from core.utils import confine_relative_path, read_json, redact_secrets, write_json
 
 
 @dataclass
@@ -43,7 +41,7 @@ class SocialAPIManager:
     """Manages API configurations and rate limiting for all platforms."""
 
     def __init__(self, config_file: str = "config/social_apis.json"):
-        self.config_file = Path(config_file)
+        self.config_file = confine_relative_path(config_file)
         self.configs: dict[str, APIConfig] = {}
         self.load_configs()
 
@@ -131,9 +129,7 @@ class SocialAPIManager:
                 "error_count": config.error_count,
             }
 
-        written_path = write_json(self.config_file, config_data)
-        if os.name != "nt":
-            os.chmod(written_path, 0o600)
+        write_json(self.config_file, config_data, private=True)
 
     def get_config(self, platform: str) -> APIConfig | None:
         """Get configuration for a platform."""
@@ -222,7 +218,7 @@ class SocialAPIManager:
         # Record errors
         if not success:
             config.error_count += 1
-            config.last_error = error
+            config.last_error = redact_secrets(error)
 
             # Disable if too many errors
             if config.error_count >= 10:

@@ -1,13 +1,13 @@
 """Statistical analysis and forecasting module for music streaming data quality improvement."""
 
-import json
 import warnings
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from core.utils import resolve_project_path, write_json
 
 warnings.filterwarnings("ignore")
 
@@ -782,12 +782,9 @@ def run_comprehensive_analysis(
     recommendations = _generate_analysis_recommendations(results)
     results["recommendations"] = recommendations
 
-    # Save results
-    output_path = Path(output_dir)
+    output_path = resolve_project_path(output_dir)
     output_path.mkdir(exist_ok=True)
-
-    with open(output_path / "statistical_analysis_report.json", "w") as f:
-        json.dump(results, f, indent=2, default=str)
+    write_json(output_path / "statistical_analysis_report.json", results)
 
     print(f"\n✅ Analysis complete! Results saved to {output_path}")
     return results
