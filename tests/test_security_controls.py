@@ -454,6 +454,16 @@ class TestSecretRedactionAndDashboardHost:
         assert is_sensitive_filename(".credentials.json.swo")
         assert is_sensitive_filename("..env.swp")
         assert is_sensitive_filename("#id_rsa#")
+        assert is_sensitive_filename("#id_rsa~#")
+        assert is_sensitive_filename("#id_rsa.bak#")
+        assert is_sensitive_filename("#id_rsa.swp#")
+        assert is_sensitive_filename("#id_rsa.2#")
+        assert is_sensitive_filename("#credentials.json.bak#")
+        assert is_sensitive_filename("#.env~#")
+        assert is_sensitive_filename("#.envrc~#")
+        assert is_sensitive_filename("#.netrc~#")
+        assert is_sensitive_filename("#.pgpass~#")
+        assert is_sensitive_filename("#authorized_keys~#")
         assert is_sensitive_filename(".#id_ed25519")
         assert is_sensitive_filename("id_ed25519_sk")
         assert is_sensitive_filename("id_ecdsa_sk")
@@ -543,6 +553,53 @@ class TestSecretRedactionAndDashboardHost:
                 assert is_sensitive_filename(alias), alias
         assert is_sensitive_filename("EN8119~1.TXT")
         assert is_sensitive_filename("ENC86C~1.TX~")
+        for long_name in (
+            "#.env.canary#",
+            "#.env.nightly#",
+            "#.envrc.canary#",
+            "#.env.canary.local#",
+            "#.env.canary~#",
+            ".#.env.canary",
+            ".#.env.canary.local",
+            "#.env.txt#",
+            "#.env.csv#",
+            "#.envrc.txt#",
+            "#.envrc.csv#",
+            "#.env.txt~#",
+            ".#.env.txt",
+            ".#.env.csv~",
+        ):
+            aliases = _windows_short_aliases(long_name)
+            checksum_aliases = [alias for alias in aliases if alias.startswith("#e")]
+            assert checksum_aliases, long_name
+            for alias in aliases:
+                assert is_sensitive_filename(alias), alias
+                assert is_sensitive_filename(alias.upper() + "::$DATA"), alias
+        assert is_sensitive_filename("#EB57A~1.CAN")
+        assert is_sensitive_filename("#EB57A~1.CA~")
+        assert is_sensitive_filename("#E7E5E~1.LOC")
+        assert is_sensitive_filename("#E7E5E~1.LO~")
+        assert is_sensitive_filename("#E3F42~1.CAN")
+        assert is_sensitive_filename("#E30C2~1.CAN")
+        assert is_sensitive_filename("#EBCAB~1.TXT")
+        assert is_sensitive_filename("#EBCAB~1.TX~")
+        for long_name in (
+            "#.env~#",
+            "#id_rsa.bak#",
+            "#id_rsa.swp#",
+            "#.netrc~#",
+            "#credentials.json.bak#",
+        ):
+            aliases = _windows_short_aliases(long_name)
+            assert aliases, long_name
+            for alias in aliases:
+                assert is_sensitive_filename(alias), alias
+        assert not is_sensitive_filename("#id_safe~#")
+        assert not is_sensitive_filename("#report.csv.bak#")
+        assert not is_sensitive_filename("#notes.txt~#")
+        for plain_name in ("#id_safe~#", "#report.csv.bak#", "#notes.txt~#"):
+            for alias in _windows_short_aliases(plain_name):
+                assert not is_sensitive_filename(alias), alias
         for plain_name in (
             "environment.txt",
             "environment.txt~",
@@ -555,6 +612,13 @@ class TestSecretRedactionAndDashboardHost:
             "english.csv",
             "english.csv~",
             "envelope.txt",
+            "#environment.txt#",
+            "#environment.txt~#",
+            "#envelope.csv#",
+            "#entry.txt#",
+            "#english.csv#",
+            "#envprofile#",
+            ".#environment.txt",
         ):
             for alias in _windows_short_aliases(plain_name):
                 assert not is_sensitive_filename(alias), alias
@@ -577,6 +641,11 @@ class TestSecretRedactionAndDashboardHost:
         assert not is_sensitive_filename("ENC614~1.TXT")
         assert not is_sensitive_filename("EN29DD~1.TX~")
         assert not is_sensitive_filename("EN07DE~1.CS~")
+        assert not is_sensitive_filename("#E829F~1.TXT")
+        assert not is_sensitive_filename("#E829F~1.TX~")
+        assert not is_sensitive_filename("#ENVIR~1.TXT")
+        assert not is_sensitive_filename("#E3C38~1")
+        assert not is_sensitive_filename("#ENVPR~1")
         assert not is_sensitive_filename("environment.txt")
         assert not is_sensitive_filename("envelope.csv")
         assert not is_sensitive_filename("envelope.local")
@@ -601,6 +670,16 @@ class TestSecretRedactionAndDashboardHost:
             read_json("ENB38A~1.CAN")
         with pytest.raises(ValueError, match="credential"):
             read_json("ENB38A~1.CA~")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("#EB57A~1.CAN")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("#E7E5E~1.LOC")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("#EBCAB~1.TXT")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("#id_rsa.bak#")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("#.env~#")
         with pytest.raises(ValueError, match="credential"):
             load_dataframe("EN9DD6~1.LO~")
         with pytest.raises(ValueError, match="credential"):
