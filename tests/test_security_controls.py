@@ -501,12 +501,27 @@ class TestSecretRedactionAndDashboardHost:
         ):
             for alias in _windows_short_aliases(long_name):
                 assert is_sensitive_filename(alias), alias
-        canary_aliases = _windows_short_aliases(".env.canary.local")
-        assert any(alias.startswith("envcan~") for alias in canary_aliases)
-        for alias in canary_aliases:
-            if alias.startswith("envcan~"):
+        for long_name in (
+            ".env.canary.local",
+            ".env.nightly.local",
+            ".envrc.canary.local",
+            ".env.canary.local.bak",
+            ".env.canary.local.swp",
+        ):
+            aliases = _windows_short_aliases(long_name)
+            checksum_aliases = [alias for alias in aliases if not alias.startswith("env")]
+            assert checksum_aliases, long_name
+            for alias in aliases:
                 assert is_sensitive_filename(alias), alias
+                assert is_sensitive_filename(alias.upper() + "::$DATA"), alias
         assert is_sensitive_filename("ENVCAN~1.BAK")
+        assert is_sensitive_filename("EN9DD6~1.LOC")
+        assert is_sensitive_filename("EN9DD6~1.LO~")
+        for plain_name in ("environment.txt", "envelope.csv", "envprofile"):
+            for alias in _windows_short_aliases(plain_name):
+                assert not is_sensitive_filename(alias), alias
+        for alias in _windows_short_aliases("envelope.local"):
+            assert is_sensitive_filename(alias), alias
         assert not is_sensitive_filename("my_credentials.csv")
         assert not is_sensitive_filename("MY_CRE~1.CSV")
         assert not is_sensitive_filename("report.csv")
@@ -535,6 +550,10 @@ class TestSecretRedactionAndDashboardHost:
             read_json("ENV~1")
         with pytest.raises(ValueError, match="credential"):
             read_json("ENVPRO~1.LOC")
+        with pytest.raises(ValueError, match="credential"):
+            read_json("EN9DD6~1.LOC")
+        with pytest.raises(ValueError, match="credential"):
+            load_dataframe("EN9DD6~1.LO~")
         with pytest.raises(ValueError, match="credential"):
             load_dataframe("ENVDEV~1.LOC")
         with pytest.raises(ValueError, match="credential"):
