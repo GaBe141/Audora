@@ -611,23 +611,136 @@ def _raise_if_symlink_error(exc: OSError) -> None:
         raise ValueError("Refusing to follow a symlink") from exc
 
 
-def open_unlinked_file(path: Path | str, flags: int, mode: int = 0o644) -> int:
-    """Open a regular file that is neither a symlink nor a hard link.
-
-    ``O_NOFOLLOW`` refuses a swapped-in symlink. A hard link is an ordinary
-    directory entry for an inode that also has another name, so the same flag
-    still opens it. ``O_TRUNC`` or ``O_APPEND`` would then change that other
-    file, including a credential linked into the project. Truncation runs only
-    after the opened inode has a single link.
-    """
-    file_path = Path(path)
-    truncating = bool(flags & os.O_TRUNC)
-    open_flags = _nofollow_flags(flags & ~os.O_TRUNC)
+def _component_is_symlink(part: str, dir_fd: int) -> bool:
+    """True when this directory entry is a symlink. ``lstat`` does not follow it."""
     try:
-        fd = os.open(file_path, open_flags, mode)
+        info = os.lstat(part, dir_fd=dir_fd)
+    except OSError:
+        return False
+    return stat.S_ISLNK(info.st_mode)
+
+
+def _open_directory_component(part: str, dir_fd: int) -> int:
+    """Open one real directory. A symlink component is refused.
+
+    Linux reports ``ENOTDIR`` when ``O_DIRECTORY`` and ``O_NOFOLLOW`` are used
+    together on a symlink, and ``ELOOP`` when only ``O_NOFOLLOW`` is set.
+    Either result still names the symlink, so both must stop the walk.
+    """
+    try:
+        return os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR} and _component_is_symlink(part, dir_fd):
+            raise ValueError("Refusing to follow a symlink") from exc
+        raise
+
+
+def _path_components(path: Path) -> tuple[bool, list[str]]:
+    """Split a path into components that must be opened without following links.
+
+    ``..`` is rejected instead of being resolved. Resolving it would walk out
+    of a directory that was swapped for a symlink and land on a different file.
+    """
+    if str(path) in {"", "."}:
+        return False, []
+    absolute = path.is_absolute()
+    parts: list[str] = []
+    for part in path.parts:
+        if part in {path.anchor, "/"}:
+            continue
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            raise ValueError("Refusing to open a path that contains '..'")
+        if "\x00" in part or "/" in part or "\\" in part:
+            raise ValueError("Refusing to open a path with an unsafe component")
+        parts.append(part)
+    return absolute, parts
+
+
+def _directory_fd(path: Path) -> int:
+    """Return a directory fd reached without following a single symlink."""
+    absolute, parts = _path_components(path)
+    if absolute:
+        fd = os.open(path.anchor or "/", os.O_RDONLY | os.O_DIRECTORY)
+    else:
+        fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            next_fd = _open_directory_component(part, fd)
+            os.close(fd)
+            fd = next_fd
+        opened = fd
+        fd = -1
+        return opened
     except OSError as exc:
         _raise_if_symlink_error(exc)
         raise
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def mkdir_nofollow(path: Path | str, mode: int = 0o755) -> None:
+    """Create a directory without following a symlink in any component.
+
+    ``Path.mkdir`` follows a parent that was replaced with a symlink and
+    creates the new directory outside the project. Missing components are
+    created with ``mkdir(dir_fd=...)``; existing ones must be real directories.
+    """
+    directory = Path(path)
+    absolute, parts = _path_components(directory)
+    if not parts:
+        return
+    if absolute:
+        fd = os.open(directory.anchor or "/", os.O_RDONLY | os.O_DIRECTORY)
+    else:
+        fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            try:
+                next_fd = _open_directory_component(part, fd)
+            except FileNotFoundError:
+                # dir_fd keeps the new directory from following a parent symlink.
+                os.mkdir(part, mode, dir_fd=fd)  # noqa: PTH102
+                next_fd = _open_directory_component(part, fd)
+            os.close(fd)
+            fd = next_fd
+    except OSError as exc:
+        _raise_if_symlink_error(exc)
+        raise
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def open_unlinked_file(path: Path | str, flags: int, mode: int = 0o644) -> int:
+    """Open a regular file that is neither a symlink nor a hard link.
+
+    ``O_NOFOLLOW`` on the final component refuses a swapped-in symlink. It does
+    not apply to parent directories, so ``data`` replaced with a symlink to
+    another folder would still open ``data/secret``. Every component is opened
+    from a directory fd with ``O_NOFOLLOW``. A hard link is an ordinary
+    directory entry for an inode that also has another name, so that flag
+    still opens it. ``O_TRUNC`` would then change that other file, including a
+    credential linked into the project. Truncation runs only after the opened
+    inode has a single link.
+    """
+    file_path = Path(path)
+    name = file_path.name
+    if name in {"", ".", ".."}:
+        raise ValueError(f"Refusing to open a path that is not a file: {file_path}")
+    truncating = bool(flags & os.O_TRUNC)
+    open_flags = _nofollow_flags(flags & ~os.O_TRUNC)
+    dir_fd = _directory_fd(file_path.parent)
+    fd = -1
+    try:
+        fd = os.open(name, open_flags, mode, dir_fd=dir_fd)
+    except OSError as exc:
+        _raise_if_symlink_error(exc)
+        raise
+    finally:
+        os.close(dir_fd)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
@@ -679,7 +792,7 @@ def write_private_text(path: Path | str, content: str) -> Path:
     file_path = Path(path)
     if file_path.is_symlink():
         raise ValueError(f"Refusing to write through a symlink: {file_path}")
-    file_path.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_nofollow(file_path.parent)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     fd = open_unlinked_file(file_path, flags, 0o600)
     try:
@@ -1000,7 +1113,7 @@ def write_json(
     fd = -1
     try:
         if create_dirs:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            mkdir_nofollow(path.parent)
 
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
         mode = 0o600 if private else 0o644
@@ -1045,7 +1158,7 @@ def save_dataframe(df: Any, filepath: Path | str, create_dirs: bool = True) -> P
         raise ValueError(f"Refusing to write CSV through a symlink: {filepath}")
 
     if create_dirs:
-        filepath.parent.mkdir(parents=True, exist_ok=True)
+        mkdir_nofollow(filepath.parent)
 
     frame = neutralize_csv_frame(df)
     fd = open_unlinked_file(filepath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
@@ -1074,7 +1187,7 @@ def open_project_writer(path: Path | str, *, binary: bool = False) -> Iterator[i
         raise ValueError(f"Refusing to write a credential file: {file_path.name}")
     if file_path.is_symlink():
         raise ValueError(f"Refusing to write through a symlink: {file_path}")
-    file_path.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_nofollow(file_path.parent)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     fd = -1
     try:
@@ -1365,7 +1478,7 @@ def save_report(
     if safe_name in {"", ".", ".."}:
         raise ValueError("Invalid report filename")
     filepath = confine_relative_path(Path(output_dir) / safe_name)
-    filepath.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_nofollow(filepath.parent)
 
     # Add timestamp to data if requested
     if add_timestamp and "timestamp" not in data:
