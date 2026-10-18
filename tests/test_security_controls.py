@@ -664,6 +664,29 @@ class TestSecretRedactionAndDashboardHost:
             .read_text(encoding="utf-8")
         )
         assert auth_source.count("credentialed_requests_session()") == 2
+        assert "state=secrets.token_urlsafe(32)" in auth_source
+        assert "state=None" not in auth_source
+
+    def test_dashboard_command_output_is_redacted(self):
+        """Subprocess logs shown in the browser must not keep API keys."""
+        source = (
+            Path(__file__)
+            .resolve()
+            .parents[1]
+            .joinpath("gui", "app.py")
+            .read_text(encoding="utf-8")
+        )
+        runner = source.split("def _run_command", 1)[1].split("def _get_data_store", 1)[0]
+        assert "redact_secrets(out" in runner
+        assert 'return "Error", redact_secrets(e)' in runner
+        leaked = (
+            "Last.fm request failed: 403 for url: "
+            "https://ws.audioscrobbler.com/2.0/?method=chart.gettoptracks"
+            "&api_key=abc123secret&format=json"
+        )
+        redacted = redact_secrets(leaked)
+        assert "abc123secret" not in redacted
+        assert "REDACTED" in redacted
 
     def test_redacts_live_environment_secrets(self, monkeypatch):
         monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "spotify-live-secret")
